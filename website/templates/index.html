@@ -13,16 +13,16 @@
         <h1 class="hero-title">trm</h1>
         <p class="hero-tagline">All the context you need, in one place.</p>
         <p class="hero-sub">Your editor, server, tests, and docs &mdash; all visible at once in a GPU-rendered grid. Stop alt-tabbing between terminals. Start seeing your entire project in one glance.</p>
+        <div class="hero-links">
+            <a href="https://github.com/keyvez/trm/releases/latest" class="btn btn-primary" rel="noopener noreferrer" target="_blank">Download for macOS</a>
+            <a href="https://github.com/keyvez/trm" class="btn btn-secondary" rel="noopener noreferrer" target="_blank">View on GitHub</a>
+        </div>
         <div class="hero-install">
-            <div class="hero-install-label">Build from source</div>
+            <div class="hero-install-label">Or build from source</div>
             <div class="hero-install-cmd" onclick="navigator.clipboard.writeText('zig build -Doptimize=ReleaseFast')">
                 <code>zig build -Doptimize=ReleaseFast</code>
                 <span class="hero-install-copy" title="Copy to clipboard">&#x2398;</span>
             </div>
-        </div>
-        <div class="hero-links">
-            <a href="{{ get_url(path='docs/installation') }}" class="btn btn-primary">Get Started</a>
-            <a href="https://github.com/keyvez/trm" class="btn btn-secondary" rel="noopener noreferrer" target="_blank">View on GitHub</a>
         </div>
     </div>
 </section>
@@ -126,7 +126,10 @@
         <div class="quickstart-grid">
             <div class="quickstart-step">
                 <div class="quickstart-num">1</div>
-                <h3>Build</h3>
+                <h3>Download</h3>
+                <p>Grab the latest release from GitHub:</p>
+                <p><a href="https://github.com/keyvez/trm/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer" target="_blank">Download for macOS</a></p>
+                <p style="margin-top: 0.75rem; font-size: 0.85rem; opacity: 0.7;">Or build from source:</p>
                 <pre><code>git clone https://github.com/keyvez/trm.git
 cd trm
 zig build -Doptimize=ReleaseFast</code></pre>
@@ -289,7 +292,7 @@ trm --config path/to/config.toml</code></pre>
         <h2>Stop switching. Start seeing.</h2>
         <p>Set up your first multi-pane workspace in under a minute.</p>
         <div class="cta-links">
-            <a href="{{ get_url(path='docs/installation') }}" class="btn btn-primary">Installation Guide</a>
+            <a href="https://github.com/keyvez/trm/releases/latest" class="btn btn-primary" rel="noopener noreferrer" target="_blank">Download Latest Release</a>
             <a href="{{ get_url(path='docs/configuration') }}" class="btn btn-secondary">Configuration Docs</a>
         </div>
     </div>
