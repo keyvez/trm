@@ -133,41 +133,12 @@ msgstr ""
 msgid "Reset"
 msgstr ""
 
-#: src/apprt/gtk/ui/1.2/surface.blp:289 src/apprt/gtk/ui/1.5/window.blp:235
-msgid "Split"
-msgstr ""
-
-#: src/apprt/gtk/ui/1.2/surface.blp:292 src/apprt/gtk/ui/1.5/window.blp:238
+#: src/apprt/gtk/ui/1.2/surface.blp src/apprt/gtk/ui/1.5/window.blp
 msgid "Change Title…"
 msgstr ""
 
-#: src/apprt/gtk/ui/1.2/surface.blp:297 src/apprt/gtk/ui/1.5/window.blp:175
-#: src/apprt/gtk/ui/1.5/window.blp:243
-msgid "Split Up"
-msgstr ""
-
-#: src/apprt/gtk/ui/1.2/surface.blp:303 src/apprt/gtk/ui/1.5/window.blp:180
-#: src/apprt/gtk/ui/1.5/window.blp:248
-msgid "Split Down"
-msgstr ""
-
-#: src/apprt/gtk/ui/1.2/surface.blp:309 src/apprt/gtk/ui/1.5/window.blp:185
-#: src/apprt/gtk/ui/1.5/window.blp:253
-msgid "Split Left"
-msgstr ""
-
-#: src/apprt/gtk/ui/1.2/surface.blp:315 src/apprt/gtk/ui/1.5/window.blp:190
-#: src/apprt/gtk/ui/1.5/window.blp:258
-msgid "Split Right"
-msgstr ""
-
-#: src/apprt/gtk/ui/1.2/surface.blp:322
-msgid "Tab"
-msgstr ""
-
-#: src/apprt/gtk/ui/1.2/surface.blp:325 src/apprt/gtk/ui/1.5/window.blp:57
-#: src/apprt/gtk/ui/1.5/window.blp:107 src/apprt/gtk/ui/1.5/window.blp:222
-msgid "New Tab"
+#: src/apprt/gtk/ui/1.2/surface.blp src/apprt/gtk/ui/1.5/window.blp
+msgid "New Pane"
 msgstr ""
 
 #: src/apprt/gtk/ui/1.2/surface.blp:330 src/apprt/gtk/ui/1.5/window.blp:227
@@ -204,10 +175,6 @@ msgstr ""
 
 #: src/apprt/gtk/ui/1.5/surface-title-dialog.blp:10
 msgid "OK"
-msgstr ""
-
-#: src/apprt/gtk/ui/1.5/window.blp:58 src/apprt/gtk/ui/1.5/window.blp:108
-msgid "New Split"
 msgstr ""
 
 #: src/apprt/gtk/ui/1.5/window.blp:68 src/apprt/gtk/ui/1.5/window.blp:126

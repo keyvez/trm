@@ -51,12 +51,10 @@ template $GhosttyWindow: Adw.ApplicationWindow {
         };
 
         [start]
-        Adw.SplitButton {
+        Gtk.Button {
           clicked => $new_tab();
           icon-name: "tab-new-symbolic";
-          tooltip-text: _("New Tab");
-          dropdown-tooltip: _("New Split");
-          menu-model: split_menu;
+          tooltip-text: _("New Pane");
           can-focus: false;
           focus-on-click: false;
         }
@@ -97,16 +95,14 @@ template $GhosttyWindow: Adw.ApplicationWindow {
             side: start;
           }
 
-          Adw.SplitButton {
+          Gtk.Button {
             styles [
               "flat",
             ]
 
             clicked => $new_tab();
             icon-name: "tab-new-symbolic";
-            tooltip-text: _("New Tab");
-            dropdown-tooltip: _("New Split");
-            menu-model: split_menu;
+            tooltip-text: _("New Pane");
             can-focus: false;
             focus-on-click: false;
           }
@@ -170,28 +166,6 @@ template $GhosttyWindow: Adw.ApplicationWindow {
   };
 }
 
-menu split_menu {
-  item {
-    label: _("Split Up");
-    action: "win.split-up";
-  }
-
-  item {
-    label: _("Split Down");
-    action: "win.split-down";
-  }
-
-  item {
-    label: _("Split Left");
-    action: "win.split-left";
-  }
-
-  item {
-    label: _("Split Right");
-    action: "win.split-right";
-  }
-}
-
 menu main_menu {
   section {
     item {
@@ -219,45 +193,19 @@ menu main_menu {
 
   section {
     item {
-      label: _("New Tab");
+      label: _("New Pane");
       action: "win.new-tab";
+    }
+
+    item {
+      label: _("Change Title…");
+      action: "win.prompt-title";
     }
 
     item {
       label: _("Close Tab");
       action: "win.close-tab";
       target: "this";
-    }
-  }
-
-  section {
-    submenu {
-      label: _("Split");
-
-      item {
-        label: _("Change Title…");
-        action: "win.prompt-title";
-      }
-
-      item {
-        label: _("Split Up");
-        action: "win.split-up";
-      }
-
-      item {
-        label: _("Split Down");
-        action: "win.split-down";
-      }
-
-      item {
-        label: _("Split Left");
-        action: "win.split-left";
-      }
-
-      item {
-        label: _("Split Right");
-        action: "win.split-right";
-      }
     }
   }
 

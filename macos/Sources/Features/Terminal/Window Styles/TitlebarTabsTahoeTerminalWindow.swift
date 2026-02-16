@@ -293,7 +293,7 @@ class TitlebarTabsTahoeTerminalWindow: TransparentTitlebarTerminalWindow, NSTool
 
     class ViewModel: ObservableObject {
         @Published var titleFont: NSFont?
-        @Published var title: String = "👻 Ghostty"
+        @Published var title: String = "trm"
         @Published var hasTabBar: Bool = false
         @Published var isMainWindow: Bool = true
     }

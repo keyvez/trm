@@ -75,11 +75,11 @@
         <customObject id="YLy-65-1bz" customClass="NSFontManager"/>
         <menu title="Main Menu" systemMenu="main" id="AYu-sK-qS6">
             <items>
-                <menuItem title="Ghostty" id="1Xt-HY-uBw">
+                <menuItem title="trm" id="1Xt-HY-uBw">
                     <modifierMask key="keyEquivalentModifierMask"/>
-                    <menu key="submenu" title="Ghostty" systemMenu="apple" id="uQy-DD-JDr">
+                    <menu key="submenu" title="trm" systemMenu="apple" id="uQy-DD-JDr">
                         <items>
-                            <menuItem title="About Ghostty" id="5kV-Vb-QxS">
+                            <menuItem title="About trm" id="5kV-Vb-QxS">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="showAbout:" target="-1" id="tGt-68-tLn"/>
@@ -115,7 +115,7 @@
                                 <menu key="submenu" title="Services" id="aQe-vS-j8Q"/>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="qno-yg-pur"/>
-                            <menuItem title="Hide Ghostty" keyEquivalent="h" id="Olw-nP-bQN">
+                            <menuItem title="Hide trm" keyEquivalent="h" id="Olw-nP-bQN">
                                 <connections>
                                     <action selector="hide:" target="-1" id="PnN-Uc-m68"/>
                                 </connections>
@@ -133,7 +133,7 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="kCx-OE-vgT"/>
-                            <menuItem title="Quit Ghostty" id="4sb-4s-VLi">
+                            <menuItem title="Quit trm" id="4sb-4s-VLi">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="terminate:" target="-1" id="Te7-pn-YzF"/>
@@ -152,35 +152,16 @@
                                     <action selector="newWindow:" target="-1" id="pnf-fE-gHi"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="New Tab" id="uTG-Vz-hJU">
+                            <menuItem title="New Pane" id="uTG-Vz-hJU">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="newTab:" target="-1" id="KoW-K7-hw5"/>
                                 </connections>
                             </menuItem>
-                            <menuItem isSeparatorItem="YES" id="m54-Is-iLE"/>
-                            <menuItem title="Split Right" id="VUR-Ld-nLx">
-                                <modifierMask key="keyEquivalentModifierMask"/>
+                            <menuItem title="New Row" keyEquivalent="T" id="trm-NR-001">
+                                <modifierMask key="keyEquivalentModifierMask" command="YES" shift="YES"/>
                                 <connections>
-                                    <action selector="splitRight:" target="-1" id="cv2-Xg-FR4"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Split Left" id="Ppv-GP-lQU">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="splitLeft:" target="-1" id="Cey-Mf-bD2"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Split Down" id="UDZ-4y-6xL">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="splitDown:" target="-1" id="Zej-CF-6nO"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Split Up" id="Ggp-7N-GbX">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="splitUp:" target="-1" id="bbi-dK-pOS"/>
+                                    <action selector="newRow:" target="-1" id="trm-NR-002"/>
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="sjq-M1-UGS"/>
@@ -363,6 +344,19 @@
                                     <action selector="toggleTerminalInspector:" target="-1" id="87m-3R-fQl"/>
                                 </connections>
                             </menuItem>
+                            <menuItem isSeparatorItem="YES" id="trm-HP-sep"/>
+                            <menuItem title="Live Summary" keyEquivalent="L" id="trm-LS-001">
+                                <modifierMask key="keyEquivalentModifierMask" shift="YES" command="YES"/>
+                                <connections>
+                                    <action selector="toggleLiveSummary:" target="-1" id="trm-LS-002"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem title="Keyboard Shortcuts" keyEquivalent="/" id="trm-HP-001">
+                                <modifierMask key="keyEquivalentModifierMask" command="YES"/>
+                                <connections>
+                                    <action selector="toggleHelpPanel:" target="-1" id="trm-HP-002"/>
+                                </connections>
+                            </menuItem>
                         </items>
                     </menu>
                 </menuItem>
@@ -393,94 +387,6 @@
                                 <connections>
                                     <action selector="toggleVisibility:" target="bbz-4X-AYv" id="2vT-tL-3tQ"/>
                                 </connections>
-                            </menuItem>
-                            <menuItem isSeparatorItem="YES" id="rlu-tP-x0P"/>
-                            <menuItem title="Zoom Split" id="oPd-mn-IEH">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="splitZoom:" target="-1" id="g0e-Ls-D7L"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Select Previous Split" id="Lic-px-1wg">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="splitMoveFocusPrevious:" target="-1" id="ip5-6M-66n"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Select Next Split" id="bD7-ei-wKU">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <connections>
-                                    <action selector="splitMoveFocusNext:" target="-1" id="FSV-0l-3VR"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Select Split" id="dos-9S-LXC">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <menu key="submenu" title="Select Split" id="8tg-60-ZSU">
-                                    <items>
-                                        <menuItem title="Select Split Above" id="0yU-hC-8xF">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                            <connections>
-                                                <action selector="splitMoveFocusAbove:" target="-1" id="0Y7-7I-yQO"/>
-                                            </connections>
-                                        </menuItem>
-                                        <menuItem title="Select Split Below" id="QDz-d9-CBr">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                            <connections>
-                                                <action selector="splitMoveFocusBelow:" target="-1" id="9yp-du-tEq"/>
-                                            </connections>
-                                        </menuItem>
-                                        <menuItem title="Select Split Left" id="cTK-oy-KuV">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                            <connections>
-                                                <action selector="splitMoveFocusLeft:" target="-1" id="BZI-DX-ly3"/>
-                                            </connections>
-                                        </menuItem>
-                                        <menuItem title="Select Split Right" id="upj-mc-L7X">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                            <connections>
-                                                <action selector="splitMoveFocusRight:" target="-1" id="ELo-QZ-O6q"/>
-                                            </connections>
-                                        </menuItem>
-                                    </items>
-                                </menu>
-                            </menuItem>
-                            <menuItem title="Resize Split" id="BJO-3W-fkO" userLabel="Resize Split">
-                                <modifierMask key="keyEquivalentModifierMask"/>
-                                <menu key="submenu" title="Resize Split" id="t7T-Ti-0im">
-                                    <items>
-                                        <menuItem title="Equalize Splits" id="3gH-VD-vL9">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                            <connections>
-                                                <action selector="equalizeSplits:" target="-1" id="RE0-hS-YLf"/>
-                                            </connections>
-                                        </menuItem>
-                                        <menuItem isSeparatorItem="YES" id="XKA-Jd-h9t"/>
-                                        <menuItem title="Move Divider Up" id="h9Y-40-3oo">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                            <connections>
-                                                <action selector="moveSplitDividerUp:" target="-1" id="NhD-6U-Eq2"/>
-                                            </connections>
-                                        </menuItem>
-                                        <menuItem title="Move Divider Down" id="Zj7-2W-fdF">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                            <connections>
-                                                <action selector="moveSplitDividerDown:" target="-1" id="jeD-bm-wJX"/>
-                                            </connections>
-                                        </menuItem>
-                                        <menuItem title="Move Divider Left" id="wSR-ny-j1a">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                            <connections>
-                                                <action selector="moveSplitDividerLeft:" target="-1" id="mlg-SJ-ZZO"/>
-                                            </connections>
-                                        </menuItem>
-                                        <menuItem title="Move Divider Right" id="CcX-ql-QU4">
-                                            <modifierMask key="keyEquivalentModifierMask"/>
-                                            <connections>
-                                                <action selector="moveSplitDividerRight:" target="-1" id="h3W-wY-PI7"/>
-                                            </connections>
-                                        </menuItem>
-                                    </items>
-                                </menu>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="dgt-Tx-d4e"/>
                             <menuItem title="Return To Default Size" id="Gbx-Vi-OGC" userLabel="Return To Default Size">
@@ -516,7 +422,7 @@
                     <modifierMask key="keyEquivalentModifierMask"/>
                     <menu key="submenu" title="Help" systemMenu="help" id="F2S-fz-NVQ">
                         <items>
-                            <menuItem title="Ghostty Help" keyEquivalent="?" id="FKE-Sm-Kum">
+                            <menuItem title="trm Help" keyEquivalent="?" id="FKE-Sm-Kum">
                                 <connections>
                                     <action selector="showHelp:" target="bbz-4X-AYv" id="tiy-ow-xSw"/>
                                 </connections>

@@ -11,12 +11,23 @@ struct TerminalCommandPaletteView: View {
 
     /// The configuration so we can lookup keyboard shortcuts.
     @ObservedObject var ghosttyConfig: Ghostty.Config
-    
+
     /// The update view model for showing update commands.
     var updateViewModel: UpdateViewModel?
 
     /// The callback when an action is submitted.
     var onAction: ((String) -> Void)
+
+    /// Callback to execute parsed LLM actions against the terminal controller.
+    var onExecuteActions: (([TrmAction]) -> Void)?
+
+    /// Callback to build pane context for the LLM.
+    var buildPaneContext: (() -> [PaneContext])?
+
+    /// Callback to toggle live summary mode.
+    var onToggleLiveSummary: (() -> Void)?
+
+    @State private var showingAPIKeyPrompt = false
 
     var body: some View {
         ZStack {
@@ -31,7 +42,24 @@ struct TerminalCommandPaletteView: View {
                         CommandPaletteView(
                             isPresented: $isPresented,
                             backgroundColor: ghosttyConfig.backgroundColor,
-                            options: commandOptions
+                            options: commandOptions,
+                            onAISubmit: { prompt in
+                                let context = buildPaneContext?() ?? []
+                                return try await Trm.shared.llmClient.submit(
+                                    prompt: prompt,
+                                    paneContext: context
+                                )
+                            },
+                            onCommandSubmit: { command in
+                                // Route command mode: send raw text to focused surface
+                                onAction(command)
+                            },
+                            onExecuteActions: { actions in
+                                onExecuteActions?(actions)
+                            },
+                            onNeedsAPIKey: {
+                                showingAPIKeyPrompt = true
+                            }
                         )
                         .zIndex(1) // Ensure it's on top
 
@@ -39,6 +67,11 @@ struct TerminalCommandPaletteView: View {
                     }
                     .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
                 }
+            }
+        }
+        .sheet(isPresented: $showingAPIKeyPrompt) {
+            APIKeyPromptView(isPresented: $showingAPIKeyPrompt) { key in
+                Trm.shared.claudeAPIKey = key
             }
         }
         .onChange(of: isPresented) { newValue in
@@ -92,7 +125,7 @@ struct TerminalCommandPaletteView: View {
         // convey it'll go all the way through.
         let title: String
         if case .updateAvailable = updateViewModel.state {
-            title = "Update Ghostty and Restart"
+            title = "Update trm and Restart"
         } else {
             title = updateViewModel.text
         }
@@ -120,7 +153,7 @@ struct TerminalCommandPaletteView: View {
     /// Custom commands from the command-palette-entry configuration.
     private var terminalOptions: [CommandOption] {
         guard let appDelegate = NSApp.delegate as? AppDelegate else { return [] }
-        return appDelegate.ghostty.config.commandPaletteEntries
+        var options = appDelegate.ghostty.config.commandPaletteEntries
             .filter(\.isSupported)
             .map { c in
                 CommandOption(
@@ -130,6 +163,18 @@ struct TerminalCommandPaletteView: View {
                     onAction(c.action)
                 }
             }
+
+        if let toggleLiveSummary = onToggleLiveSummary {
+            options.append(CommandOption(
+                title: "Toggle Live Summary",
+                description: "Show/hide LLM-powered per-pane summaries",
+                leadingIcon: "text.below.photo"
+            ) {
+                toggleLiveSummary()
+            })
+        }
+
+        return options
     }
 
     /// Commands for jumping to other terminal surfaces.

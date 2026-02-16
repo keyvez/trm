@@ -422,6 +422,10 @@ extension Notification.Name {
 
     /// Focus the search field
     static let ghosttySearchFocus = Notification.Name("com.mitchellh.ghostty.searchFocus")
+
+    /// Open a URL in an inline webview pane instead of the system browser.
+    static let ghosttyOpenURLInPane = Notification.Name("com.mitchellh.ghostty.openURLInPane")
+    static let OpenURLInPaneURLKey = ghosttyOpenURLInPane.rawValue + ".url"
 }
 
 // NOTE: I am moving all of these to Notification.Name extensions over time. This

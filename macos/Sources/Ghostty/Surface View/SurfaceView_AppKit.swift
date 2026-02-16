@@ -376,7 +376,9 @@ extension Ghostty {
             ) { [weak self] event in self?.localEventHandler(event) }
 
             // Setup our surface. This will also initialize all the terminal IO.
-            let surface_cfg = baseConfig ?? SurfaceConfiguration()
+            var fallbackConfig = SurfaceConfiguration()
+            fallbackConfig.workingDirectory = NSHomeDirectory()
+            let surface_cfg = baseConfig ?? fallbackConfig
             let surface = surface_cfg.withCValue(view: self) { surface_cfg_c in
                 ghostty_surface_new(app, &surface_cfg_c)
             }
@@ -877,6 +879,13 @@ extension Ghostty {
         override func rightMouseDown(with event: NSEvent) {
             guard let surface = self.surface else { return super.rightMouseDown(with: event) }
 
+            // macOS converts ctrl+left-click into rightMouseDown. Route it
+            // back as a left-click so the core can handle ctrl+click selection.
+            if event.modifierFlags.contains(.control) {
+                ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, Ghostty.ghosttyMods(event.modifierFlags))
+                return
+            }
+
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             if (ghostty_surface_mouse_button(
                 surface,
@@ -894,6 +903,12 @@ extension Ghostty {
 
         override func rightMouseUp(with event: NSEvent) {
             guard let surface = self.surface else { return super.rightMouseUp(with: event) }
+
+            // Match the ctrl+left-click conversion in rightMouseDown.
+            if event.modifierFlags.contains(.control) {
+                ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, Ghostty.ghosttyMods(event.modifierFlags))
+                return
+            }
 
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             if (ghostty_surface_mouse_button(
@@ -1185,7 +1200,7 @@ extension Ghostty {
             // We only care about key down events. It might not even be possible
             // to receive any other event type here.
             guard event.type == .keyDown else { return false }
-            
+
             // Only process events if we're focused. Some key events like C-/ macOS
             // appears to send to the first view in the hierarchy rather than the
             // the first responder (I don't know why). This prevents us from handling it.
@@ -1195,7 +1210,28 @@ extension Ghostty {
             if (!focused) {
                 return false
             }
-            
+
+            // Termania-specific shortcuts that must be intercepted before the
+            // Ghostty binding system, since it may have conflicting defaults.
+            if event.modifierFlags.contains([.command, .shift]),
+               event.charactersIgnoringModifiers?.lowercased() == "t" {
+                // Cmd+Shift+T → New Row
+                if let controller = self.window?.windowController as? BaseTerminalController {
+                    controller.newRow(nil)
+                    return true
+                }
+            }
+
+            if event.modifierFlags.contains(.command),
+               !event.modifierFlags.contains(.shift),
+               event.charactersIgnoringModifiers == "/" {
+                // Cmd+/ → Toggle Help Panel
+                if let controller = self.window?.windowController as? BaseTerminalController {
+                    controller.toggleHelpPanel(nil)
+                    return true
+                }
+            }
+
             // Get information about if this is a binding.
             let bindingFlags = surfaceModel.flatMap { surface in
                 var ghosttyEvent = event.ghosttyKeyEvent(GHOSTTY_ACTION_PRESS)
@@ -1413,28 +1449,9 @@ extension Ghostty {
                 break
 
             case .leftMouseDown:
-                if !event.modifierFlags.contains(.control) {
-                    return nil
-                }
-
-                // In this case, AppKit calls menu BEFORE calling any mouse events.
-                // If mouse capturing is enabled then we never show the context menu
-                // so that we can handle ctrl+left-click in the terminal app.
-                guard let surfaceModel else { return nil }
-                if surfaceModel.mouseCaptured {
-                    return nil
-                }
-
-                // If we return a non-nil menu then mouse events will never be
-                // processed by the core, so we need to manually send a right
-                // mouse down event.
-                //
-                // Note this never sounds a right mouse up event but that's the
-                // same as normal right-click with capturing disabled from AppKit.
-                surfaceModel.sendMouseButton(.init(
-                    action: .press,
-                    button: .right,
-                    mods: .init(nsFlags: event.modifierFlags)))
+                // Don't show context menu for ctrl+left-click so that
+                // ctrl+click-drag can be used for space-boundary selection.
+                return nil
 
             default:
                 return nil
@@ -1453,13 +1470,13 @@ extension Ghostty {
             menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
 
             menu.addItem(.separator())
-            item = menu.addItem(withTitle: "Split Right", action: #selector(splitRight(_:)), keyEquivalent: "")
+            item = menu.addItem(withTitle: "New Pane Right", action: #selector(splitRight(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "rectangle.righthalf.inset.filled")
-            item = menu.addItem(withTitle: "Split Left", action: #selector(splitLeft(_:)), keyEquivalent: "")
+            item = menu.addItem(withTitle: "New Pane Left", action: #selector(splitLeft(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "rectangle.leadinghalf.inset.filled")
-            item = menu.addItem(withTitle: "Split Down", action: #selector(splitDown(_:)), keyEquivalent: "")
+            item = menu.addItem(withTitle: "New Pane Below", action: #selector(splitDown(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "rectangle.bottomhalf.inset.filled")
-            item = menu.addItem(withTitle: "Split Up", action: #selector(splitUp(_:)), keyEquivalent: "")
+            item = menu.addItem(withTitle: "New Pane Above", action: #selector(splitUp(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "rectangle.tophalf.inset.filled")
 
             menu.addItem(.separator())

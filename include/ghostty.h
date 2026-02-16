@@ -1153,6 +1153,139 @@ void ghostty_set_window_background_blur(ghostty_app_t, void*);
 // Benchmark API, if available.
 bool ghostty_benchmark_cli(const char*, const char*);
 
+//-------------------------------------------------------------------
+// Termania API — multi-pane grid terminal with plugin architecture
+
+// Opaque handle to the termania app.
+typedef void* trm_app_t;
+
+// Termania pane info struct (matches CPaneInfo in capi.zig).
+typedef struct {
+    uint32_t rows;
+    uint32_t cols;
+    uint32_t cursor_row;
+    uint32_t cursor_col;
+    uint8_t  title[128];
+    uint32_t title_len;
+    uint8_t  flags;    // bit0=dirty, 1=has_error, 2=is_exited, 3=is_focused
+    uint8_t  _pad[3];
+} termania_pane_info_s;
+
+// Termania pane layout struct (matches CPaneLayout in capi.zig).
+typedef struct {
+    float x;
+    float y;
+    float width;
+    float height;
+    float title_height;
+} termania_pane_layout_s;
+
+// Termania cell struct (matches CCell in terminal_types.zig).
+typedef struct {
+    uint32_t codepoint;
+    uint8_t  color_type;
+    uint8_t  color_r;
+    uint8_t  color_g;
+    uint8_t  color_b;
+    uint8_t  bg_type;
+    uint8_t  bg_r;
+    uint8_t  bg_g;
+    uint8_t  bg_b;
+    uint8_t  flags;
+    uint8_t  _pad[3];
+} termania_cell_s;
+
+// App lifecycle
+trm_app_t termania_create(void);
+trm_app_t termania_create_with_config(const char* config_path);
+void termania_destroy(trm_app_t);
+
+// Polling and pane management
+uint32_t termania_poll(trm_app_t);
+uint8_t  termania_poll_notification(trm_app_t, char*, uint32_t, char*, uint32_t);
+uint32_t termania_pane_count(trm_app_t);
+uint8_t  termania_pane_info(trm_app_t, uint32_t, termania_pane_info_s*);
+uint32_t termania_pane_cells(trm_app_t, uint32_t, termania_cell_s*, uint32_t);
+uint32_t termania_pane_layouts(trm_app_t, uint32_t, uint32_t, float, termania_pane_layout_s*, uint32_t);
+
+// Input
+void termania_send_key(trm_app_t, uint8_t, uint8_t);
+void termania_send_text(trm_app_t, const char*, uint32_t);
+
+// Window management
+void termania_resize(trm_app_t, uint32_t, uint32_t, float, float, float);
+void termania_action(trm_app_t, uint8_t);
+
+// Color resolution
+uint32_t termania_resolve_color(trm_app_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint32_t termania_bg_color(trm_app_t);
+uint32_t termania_fg_color(trm_app_t);
+uint32_t termania_cursor_color(trm_app_t);
+
+// Font and metrics
+float termania_cell_width(trm_app_t);
+float termania_cell_height(trm_app_t);
+float termania_font_size(trm_app_t);
+const char* termania_font_family(trm_app_t);
+
+// Focus management
+uint32_t termania_focused_pane(trm_app_t);
+void termania_set_focused_pane(trm_app_t, uint32_t);
+
+// UI config
+float termania_title_bar_height(trm_app_t);
+uint32_t termania_border_color(trm_app_t);
+uint32_t termania_border_focused_color(trm_app_t);
+uint32_t termania_title_bg_color(trm_app_t);
+uint32_t termania_title_fg_color(trm_app_t);
+
+// Plugin registry
+uint32_t termania_plugin_type_count(trm_app_t);
+uint32_t termania_plugin_type_name(trm_app_t, uint32_t, char*, uint32_t);
+uint32_t termania_plugin_type_display(trm_app_t, uint32_t, char*, uint32_t);
+
+// LLM integration
+uint32_t termania_llm_submit(trm_app_t, const char*, uint32_t);
+uint8_t  termania_llm_status(trm_app_t);
+uint32_t termania_llm_response_text(trm_app_t, char*, uint32_t);
+uint32_t termania_llm_action_count(trm_app_t);
+uint32_t termania_llm_action_desc(trm_app_t, uint32_t, char*, uint32_t);
+void     termania_llm_execute(trm_app_t);
+
+// Pane overlaying
+uint8_t termania_add_overlay(trm_app_t, uint32_t, const char*, uint32_t);
+void    termania_remove_overlay(trm_app_t, uint32_t);
+void    termania_swap_overlay(trm_app_t, uint32_t);
+void    termania_toggle_overlay_focus(trm_app_t, uint32_t);
+uint8_t termania_has_overlay(trm_app_t, uint32_t);
+
+// Watermark
+uint32_t termania_pane_watermark(trm_app_t, uint32_t, char*, uint32_t);
+void     termania_set_watermark(trm_app_t, uint32_t, const char*, uint32_t);
+
+// Session / Grid config
+uint32_t termania_grid_rows(trm_app_t);
+uint32_t termania_grid_cols(trm_app_t);
+uint32_t termania_grid_gap(trm_app_t);
+uint32_t termania_grid_padding(trm_app_t);
+uint32_t termania_config_pane_count(trm_app_t);
+uint32_t termania_config_pane_field(trm_app_t, uint32_t, uint8_t, char*, uint32_t);
+uint32_t termania_config_pane_initial_cmd_count(trm_app_t, uint32_t);
+uint32_t termania_config_pane_initial_cmd(trm_app_t, uint32_t, uint32_t, char*, uint32_t);
+
+// Context usage tracking
+uint8_t  termania_context_usage(trm_app_t, uint64_t*, uint64_t*, uint8_t*, uint8_t*);
+uint32_t termania_context_session_id(trm_app_t, char*, uint32_t);
+int64_t  termania_context_last_update(trm_app_t);
+
+// LLM config accessors
+uint32_t termania_config_llm_provider(trm_app_t, char*, uint32_t);
+uint32_t termania_config_llm_api_key(trm_app_t, char*, uint32_t);
+uint32_t termania_config_llm_model(trm_app_t, char*, uint32_t);
+uint32_t termania_config_llm_base_url(trm_app_t, char*, uint32_t);
+uint32_t termania_config_llm_max_tokens(trm_app_t);
+uint32_t termania_config_llm_system_prompt(trm_app_t, char*, uint32_t);
+
 #ifdef __cplusplus
 }
 #endif

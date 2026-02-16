@@ -46,11 +46,43 @@ class BaseTerminalController: NSWindowController,
         didSet { surfaceTreeDidChange(from: oldValue, to: surfaceTree) }
     }
 
+    // MARK: trm Grid State
+
+    /// Whether to use grid layout instead of split tree layout.
+    /// When true, surfaces from surfaceTree are rendered in a grid.
+    @Published var useGridLayout: Bool = true
+
+    /// Number of columns in each row of the grid (length = number of rows).
+    /// Updated when panes are added/removed.
+    @Published var gridRowCols: [Int] = [1]
+
+    /// The surfaces in grid order, derived from the surfaceTree leaves.
+    var gridSurfaces: [Ghostty.SurfaceView] {
+        Array(surfaceTree)
+    }
+
+    /// Inline webview panes opened via URL interception.
+    @Published var webviewPanes: [WebViewPane] = []
+
+    /// All panes (terminals + webviews) for the grid, in display order.
+    var gridPanes: [GridPane] {
+        gridSurfaces.map { .terminal($0) } + webviewPanes.map { .webview($0) }
+    }
+
     /// This can be set to show/hide the command palette.
     @Published var commandPaletteIsShowing: Bool = false
-    
+
+    /// This can be set to show/hide the help panel.
+    @Published var helpPanelIsShowing: Bool = false
+
     /// Set if the terminal view should show the update overlay.
     @Published var updateOverlayIsVisible: Bool = false
+
+    /// The live summary manager for per-pane LLM summaries.
+    let liveSummaryManager = LiveSummaryManager()
+
+    /// The context usage manager for Claude Code context window tracking.
+    let contextUsageManager = ContextUsageManager()
 
     /// Whether the terminal surface should focus when the mouse is over it.
     var focusFollowsMouse: Bool {
@@ -75,6 +107,11 @@ class BaseTerminalController: NSWindowController,
     /// Cache previously applied appearance to avoid unnecessary updates
     private var appliedColorScheme: ghostty_color_scheme_e?
 
+    /// Tracks the last Option key release time for double-tap detection.
+    private var lastOptionReleaseTime: TimeInterval = 0
+    /// Whether the Option key was pressed alone (no other modifiers or keys).
+    private var optionPressedAlone: Bool = false
+
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private var derivedConfig: DerivedConfig
 
@@ -91,7 +128,7 @@ class BaseTerminalController: NSWindowController,
     }
 
     /// The last computed title from the focused surface (without the override).
-    private var lastComputedTitle: String = "👻"
+    private var lastComputedTitle: String = "trm"
 
     /// The time that undo/redo operations that contain running ptys are valid for.
     var undoExpiration: Duration {
@@ -134,7 +171,27 @@ class BaseTerminalController: NSWindowController,
 
         // Initialize our initial surface.
         guard let ghostty_app = ghostty.app else { preconditionFailure("app must be loaded") }
-        self.surfaceTree = tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: base))
+        // Default the first surface CWD to the home directory (or pane 0 config)
+        // to avoid macOS Documents folder permission prompts.
+        let initialConfig: Ghostty.SurfaceConfiguration? = {
+            if let b = base { return b }
+            var cfg = Ghostty.SurfaceConfiguration()
+            let gridCfg = Trm.shared.gridConfig()
+            if let firstPane = gridCfg.panes.first {
+                if let cwd = firstPane.cwd, !cwd.isEmpty {
+                    cfg.workingDirectory = NSString(string: cwd).expandingTildeInPath
+                } else {
+                    cfg.workingDirectory = NSHomeDirectory()
+                }
+                if let cmd = firstPane.command, !cmd.isEmpty {
+                    cfg.command = cmd
+                }
+            } else {
+                cfg.workingDirectory = NSHomeDirectory()
+            }
+            return cfg
+        }()
+        self.surfaceTree = tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: initialConfig))
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -177,26 +234,6 @@ class BaseTerminalController: NSWindowController,
             object: nil)
         center.addObserver(
             self,
-            selector: #selector(ghosttyDidEqualizeSplits(_:)),
-            name: Ghostty.Notification.didEqualizeSplits,
-            object: nil)
-        center.addObserver(
-            self,
-            selector: #selector(ghosttyDidFocusSplit(_:)),
-            name: Ghostty.Notification.ghosttyFocusSplit,
-            object: nil)
-        center.addObserver(
-            self,
-            selector: #selector(ghosttyDidToggleSplitZoom(_:)),
-            name: Ghostty.Notification.didToggleSplitZoom,
-            object: nil)
-        center.addObserver(
-            self,
-            selector: #selector(ghosttyDidResizeSplit(_:)),
-            name: Ghostty.Notification.didResizeSplit,
-            object: nil)
-        center.addObserver(
-            self,
             selector: #selector(ghosttyDidPresentTerminal(_:)),
             name: Ghostty.Notification.ghosttyPresentTerminal,
             object: nil)
@@ -206,11 +243,28 @@ class BaseTerminalController: NSWindowController,
             name: .ghosttySurfaceDragEndedNoTarget,
             object: nil)
 
+        // Webview pane
+        center.addObserver(
+            self,
+            selector: #selector(ghosttyOpenURLInPane(_:)),
+            name: .ghosttyOpenURLInPane,
+            object: nil)
+
         // Listen for local events that we need to know of outside of
         // single surface handlers.
         self.eventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.flagsChanged]
         ) { [weak self] event in self?.localEventHandler(event) }
+
+        // Wire up the live summary manager's pane content provider.
+        liveSummaryManager.paneContentProvider = { [weak self] in
+            guard let self else { return [] }
+            return self.gridSurfaces.enumerated().map { index, surface in
+                let title = surface.title.isEmpty ? "Shell" : surface.title
+                let visibleText = surface.cachedScreenContents.get()
+                return (index: index, title: title, visibleText: visibleText)
+            }
+        }
     }
 
     deinit {
@@ -223,42 +277,74 @@ class BaseTerminalController: NSWindowController,
 
     // MARK: Methods
 
-    /// Create a new split.
+    /// Add a new pane to the grid layout.
+    ///
+    /// Horizontal splits (right/left) add a column to the row containing the focused surface.
+    /// Vertical splits (down/up) add a new row below/above the focused surface's row.
     @discardableResult
-    func newSplit(
+    func newGridPane(
         at oldView: Ghostty.SurfaceView,
         direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
         baseConfig config: Ghostty.SurfaceConfiguration? = nil
     ) -> Ghostty.SurfaceView? {
-        // We can only create new splits for surfaces in our tree.
-        guard surfaceTree.root?.node(view: oldView) != nil else { return nil }
-
-        // Create a new surface view
         guard let ghostty_app = ghostty.app else { return nil }
         let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
 
-        // Do the split
+        // We still add the surface to the split tree so all existing lifecycle
+        // management (close, focus, undo, etc.) continues to work. We always
+        // split right to keep leaves() order matching grid order.
         let newTree: SplitTree<Ghostty.SurfaceView>
         do {
             newTree = try surfaceTree.inserting(
                 view: newView,
                 at: oldView,
-                direction: direction)
+                direction: .right)
         } catch {
-            // If splitting fails for any reason (it should not), then we just log
-            // and return. The new view we created will be deinitialized and its
-            // no big deal.
-            Ghostty.logger.warning("failed to insert split: \(error)")
+            Ghostty.logger.warning("failed to insert grid pane: \(error)")
             return nil
+        }
+
+        // Find which row the old surface is in
+        let surfaces = Array(surfaceTree)
+        let oldFlatIndex = surfaces.firstIndex(where: { $0 === oldView }) ?? 0
+        let (row, _) = gridPosition(flatIndex: oldFlatIndex)
+
+        // Update grid shape based on direction
+        switch direction {
+        case .right, .left:
+            // Add column to current row
+            if row < gridRowCols.count {
+                gridRowCols[row] += 1
+            }
+        case .down:
+            // Add new row below
+            let insertRow = min(row + 1, gridRowCols.count)
+            gridRowCols.insert(1, at: insertRow)
+        case .up:
+            // Add new row above
+            gridRowCols.insert(1, at: row)
         }
 
         replaceSurfaceTree(
             newTree,
             moveFocusTo: newView,
             moveFocusFrom: oldView,
-            undoAction: "New Split")
+            undoAction: "New Pane")
 
         return newView
+    }
+
+    /// Convert a flat surface index to (row, col) in the grid.
+    private func gridPosition(flatIndex: Int) -> (row: Int, col: Int) {
+        var offset = 0
+        for (row, cols) in gridRowCols.enumerated() {
+            if flatIndex < offset + cols {
+                return (row, flatIndex - offset)
+            }
+            offset += cols
+        }
+        // Fallback to last row
+        return (max(gridRowCols.count - 1, 0), 0)
     }
 
     /// Move focus to a surface view.
@@ -273,6 +359,85 @@ class BaseTerminalController: NSWindowController,
             if !NSApp.isActive {
                 NSApp.activate(ignoringOtherApps: true)
             }
+        }
+    }
+
+    // MARK: - LLM Integration
+
+    /// Build pane context for the LLM system prompt.
+    func buildPaneContext() -> [PaneContext] {
+        let surfaces = gridSurfaces
+        return surfaces.enumerated().map { index, surface in
+            let title = surface.title.isEmpty ? "Shell" : surface.title
+            let isFocused = surface === focusedSurface
+
+            // Get visible text from the surface's cached contents.
+            let visibleText = surface.cachedScreenContents.get()
+
+            return PaneContext(
+                index: index,
+                title: title,
+                isFocused: isFocused,
+                visibleText: visibleText
+            )
+        }
+    }
+
+    /// Execute a list of parsed LLM actions against the terminal.
+    func executeTrmActions(_ actions: [TrmAction]) {
+        let surfaces = gridSurfaces
+        for action in actions {
+            switch action {
+            case .sendCommand(let pane, let command):
+                guard pane < surfaces.count else { continue }
+                sendTextToSurface(surfaces[pane], text: command + "\n")
+
+            case .sendToAll(let command):
+                for surface in surfaces {
+                    sendTextToSurface(surface, text: command + "\n")
+                }
+
+            case .setTitle(let pane, let title):
+                guard pane < surfaces.count else { continue }
+                // Set watermark as a visual title indicator
+                Trm.shared.setWatermark(forPane: UInt32(pane), text: title)
+
+            case .setWatermark(let pane, let watermark):
+                guard pane < surfaces.count else { continue }
+                Trm.shared.setWatermark(forPane: UInt32(pane), text: watermark)
+
+            case .clearWatermark(let pane):
+                guard pane < surfaces.count else { continue }
+                Trm.shared.setWatermark(forPane: UInt32(pane), text: "")
+
+            case .spawnPane:
+                guard let current = focusedSurface ?? surfaces.first else { continue }
+                newGridPane(at: current, direction: .right)
+
+            case .closePane(let pane):
+                guard pane < surfaces.count else { continue }
+                closeSurface(surfaces[pane], withConfirmation: false)
+
+            case .focusPane(let pane):
+                guard pane < surfaces.count else { continue }
+                focusSurface(surfaces[pane])
+
+            case .message:
+                // Messages are displayed in the command palette response area,
+                // no additional action needed here.
+                break
+            }
+        }
+    }
+
+    /// Send text to a specific surface via the `text:` binding action.
+    private func sendTextToSurface(_ surface: Ghostty.SurfaceView, text: String) {
+        guard let s = surface.surface else { return }
+        let action = "text:" + text
+        let len = action.utf8CString.count
+        guard len > 0 else { return }
+        action.withCString { cString in
+            ghostty_surface_binding_action(s, cString, UInt(len - 1))
         }
     }
 
@@ -449,6 +614,25 @@ class BaseTerminalController: NSWindowController,
             nil
         }
 
+        // Update grid shape if in grid mode
+        if useGridLayout, case .leaf(let view) = node {
+            let surfaces = Array(surfaceTree)
+            if let flatIdx = surfaces.firstIndex(where: { $0 === view }) {
+                let (row, _) = gridPosition(flatIndex: flatIdx)
+                if row < gridRowCols.count {
+                    if gridRowCols[row] > 1 {
+                        gridRowCols[row] -= 1
+                    } else {
+                        gridRowCols.remove(at: row)
+                    }
+                    // Ensure we always have at least [1] for the remaining surface
+                    if gridRowCols.isEmpty {
+                        gridRowCols = [1]
+                    }
+                }
+            }
+        }
+
         replaceSurfaceTree(
             surfaceTree.removing(node),
             moveFocusTo: nextFocus,
@@ -604,111 +788,10 @@ class BaseTerminalController: NSWindowController,
         default: return
         }
 
-        newSplit(at: oldView, direction: splitDirection, baseConfig: config)
+        // Always use grid layout — add pane to the grid
+        newGridPane(at: oldView, direction: splitDirection, baseConfig: config)
     }
 
-    @objc private func ghosttyDidEqualizeSplits(_ notification: Notification) {
-        guard let target = notification.object as? Ghostty.SurfaceView else { return }
-        
-        // Check if target surface is in current controller's tree
-        guard surfaceTree.contains(target) else { return }
-        
-        // Equalize the splits
-        surfaceTree = surfaceTree.equalized()
-    }
-    
-    @objc private func ghosttyDidFocusSplit(_ notification: Notification) {
-        // The target must be within our tree
-        guard let target = notification.object as? Ghostty.SurfaceView else { return }
-        guard surfaceTree.root?.node(view: target) != nil else { return }
-
-        // Get the direction from the notification
-        guard let directionAny = notification.userInfo?[Ghostty.Notification.SplitDirectionKey] else { return }
-        guard let direction = directionAny as? Ghostty.SplitFocusDirection else { return }
-
-        // Find the node for the target surface
-        guard let targetNode = surfaceTree.root?.node(view: target) else { return }
-        
-        // Find the next surface to focus
-        guard let nextSurface = surfaceTree.focusTarget(for: direction.toSplitTreeFocusDirection(), from: targetNode) else {
-            return
-        }
-
-        if surfaceTree.zoomed != nil {
-            if derivedConfig.splitPreserveZoom.contains(.navigation) {
-                surfaceTree = SplitTree(
-                    root: surfaceTree.root,
-                    zoomed: surfaceTree.root?.node(view: nextSurface))
-            } else {
-                surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil)
-            }
-        }
-
-        // Move focus to the next surface
-        DispatchQueue.main.async {
-            Ghostty.moveFocus(to: nextSurface, from: target)
-        }
-    }
-    
-    @objc private func ghosttyDidToggleSplitZoom(_ notification: Notification) {
-        // The target must be within our tree
-        guard let target = notification.object as? Ghostty.SurfaceView else { return }
-        guard let targetNode = surfaceTree.root?.node(view: target) else { return }
-
-        // Toggle the zoomed state
-        if surfaceTree.zoomed == targetNode {
-            // Already zoomed, unzoom it
-            surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil)
-        } else {
-            // We require that the split tree have splits
-            guard surfaceTree.isSplit else { return }
-
-            // Not zoomed or different node zoomed, zoom this node
-            surfaceTree = SplitTree(root: surfaceTree.root, zoomed: targetNode)
-        }
-
-        // Move focus to our window. Importantly this ensures that if we click the
-        // reset zoom button in a tab bar of an unfocused tab that we become focused.
-        window?.makeKeyAndOrderFront(nil)
-
-        // Ensure focus stays on the target surface. We lose focus when we do
-        // this so we need to grab it again.
-        DispatchQueue.main.async {
-            Ghostty.moveFocus(to: target)
-        }
-    }
-    
-    @objc private func ghosttyDidResizeSplit(_ notification: Notification) {
-        // The target must be within our tree
-        guard let target = notification.object as? Ghostty.SurfaceView else { return }
-        guard let targetNode = surfaceTree.root?.node(view: target) else { return }
-        
-        // Extract direction and amount from notification
-        guard let directionAny = notification.userInfo?[Ghostty.Notification.ResizeSplitDirectionKey] else { return }
-        guard let direction = directionAny as? Ghostty.SplitResizeDirection else { return }
-        
-        guard let amountAny = notification.userInfo?[Ghostty.Notification.ResizeSplitAmountKey] else { return }
-        guard let amount = amountAny as? UInt16 else { return }
-        
-        // Convert Ghostty.SplitResizeDirection to SplitTree.Spatial.Direction
-        let spatialDirection: SplitTree<Ghostty.SurfaceView>.Spatial.Direction
-        switch direction {
-        case .up: spatialDirection = .up
-        case .down: spatialDirection = .down
-        case .left: spatialDirection = .left
-        case .right: spatialDirection = .right
-        }
-        
-        // Use viewBounds for the spatial calculation bounds
-        let bounds = CGRect(origin: .zero, size: surfaceTree.viewBounds())
-        
-        // Perform the resize using the new SplitTree resize method
-        do {
-            surfaceTree = try surfaceTree.resizing(node: targetNode, by: amount, in: spatialDirection, with: bounds)
-        } catch {
-            Ghostty.logger.warning("failed to resize split: \(error)")
-        }
-    }
 
     @objc private func ghosttyDidPresentTerminal(_ notification: Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
@@ -724,6 +807,36 @@ class BaseTerminalController: NSWindowController,
 
         // Show a brief highlight to help the user locate the presented terminal.
         target.highlight()
+    }
+
+    @objc private func ghosttyOpenURLInPane(_ notification: Notification) {
+        // Only the key window's controller should handle this.
+        guard window?.isKeyWindow == true else { return }
+        guard let url = notification.userInfo?[Notification.Name.OpenURLInPaneURLKey] as? URL else { return }
+
+        let pane = WebViewPane(url: url)
+        webviewPanes.append(pane)
+
+        // Expand the last row to accommodate the new webview pane.
+        if gridRowCols.isEmpty {
+            gridRowCols = [1]
+        }
+        gridRowCols[gridRowCols.count - 1] += 1
+    }
+
+    /// Close and remove a webview pane from the grid.
+    func closeWebviewPane(_ pane: WebViewPane) {
+        guard let idx = webviewPanes.firstIndex(where: { $0.id == pane.id }) else { return }
+        webviewPanes.remove(at: idx)
+
+        // Shrink the last row (webview panes are always appended at the end).
+        if let lastRow = gridRowCols.indices.last {
+            if gridRowCols[lastRow] > 1 {
+                gridRowCols[lastRow] -= 1
+            } else if gridRowCols.count > 1 {
+                gridRowCols.removeLast()
+            }
+        }
     }
 
     @objc private func ghosttySurfaceDragEndedNoTarget(_ notification: Notification) {
@@ -749,7 +862,7 @@ class BaseTerminalController: NSWindowController,
         
         // Treat our undo below as a full group.
         undoManager?.beginUndoGrouping()
-        undoManager?.setActionName("Move Split")
+        undoManager?.setActionName("Move Pane")
         defer {
             undoManager?.endUndoGrouping()
         }
@@ -775,6 +888,35 @@ class BaseTerminalController: NSWindowController,
     }
 
     private func localEventFlagsChanged(_ event: NSEvent) -> NSEvent? {
+        // Detect double-tap of Option key to toggle command palette.
+        // Only process for our own window.
+        if window?.isKeyWindow == true {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let optionOnly = flags == .option
+
+            if optionOnly {
+                // Option key was just pressed (alone)
+                optionPressedAlone = true
+            } else if optionPressedAlone && flags.isEmpty {
+                // Option key was just released (it was pressed alone with no other keys)
+                optionPressedAlone = false
+                let now = ProcessInfo.processInfo.systemUptime
+                let elapsed = now - lastOptionReleaseTime
+                if elapsed < 0.3 {
+                    // Double-tap detected
+                    lastOptionReleaseTime = 0
+                    DispatchQueue.main.async { [weak self] in
+                        self?.toggleCommandPalette(nil)
+                    }
+                    return event
+                }
+                lastOptionReleaseTime = now
+            } else {
+                // Another modifier was involved, reset
+                optionPressedAlone = false
+            }
+        }
+
         var surfaces: [Ghostty.SurfaceView] = surfaceTree.map { $0 }
 
         // If we're the main window receiving key input, then we want to avoid
@@ -783,7 +925,7 @@ class BaseTerminalController: NSWindowController,
         if NSApp.mainWindow == window {
             surfaces = surfaces.filter { $0 != focusedSurface }
         }
-        
+
         for surface in surfaces {
             surface.flagsChanged(with: event)
         }
@@ -814,7 +956,7 @@ class BaseTerminalController: NSWindowController,
                 .store(in: &focusedSurfaceCancellables)
         } else {
             // There is no surface to listen to titles for.
-            titleDidChange(to: "👻")
+            titleDidChange(to: "trm")
         }
     }
     
@@ -913,7 +1055,7 @@ class BaseTerminalController: NSWindowController,
                 newTree,
                 moveFocusTo: source,
                 moveFocusFrom: focusedSurface,
-                undoAction: "Move Split")
+                undoAction: "Move Pane")
             return
         }
         
@@ -948,7 +1090,7 @@ class BaseTerminalController: NSWindowController,
         
         // Treat our undo below as a full group.
         undoManager?.beginUndoGrouping()
-        undoManager?.setActionName("Move Split")
+        undoManager?.setActionName("Move Pane")
         defer {
             undoManager?.endUndoGrouping()
         }
@@ -1146,9 +1288,86 @@ class BaseTerminalController: NSWindowController,
             fullscreenStyle = NativeFullscreen(window)
             fullscreenStyle?.delegate = self
         }
-        
+
         // Set our update overlay state
         updateOverlayIsVisible = defaultUpdateOverlayVisibility()
+
+        // Start context usage tracking
+        contextUsageManager.start()
+
+        // Setup initial panes from termania.toml config
+        setupInitialPanes()
+    }
+
+    /// Read the termania.toml session config and create the initial multi-pane layout.
+    private func setupInitialPanes() {
+        let config = Trm.shared.gridConfig()
+
+        // Only set up extra panes if the config defines more than a 1x1 grid
+        let totalPanes = config.rows * config.cols
+        guard totalPanes > 1 else {
+            // Even for a single pane, apply watermark and initial commands if configured
+            applyPaneConfig(config, startIndex: 0)
+            return
+        }
+
+        // Update grid layout parameters
+        gridRowCols = Array(repeating: config.cols, count: config.rows)
+
+        // Create additional surfaces for the grid (we already have 1 from init)
+        guard let ghostty_app = ghostty.app else { return }
+        guard let firstSurface = gridSurfaces.first else { return }
+
+        for i in 1..<totalPanes {
+            var surfaceConfig = Ghostty.SurfaceConfiguration()
+            // Use CWD from pane config, or default to home directory to avoid
+            // macOS Documents folder permission prompts.
+            if i < config.panes.count, let cwd = config.panes[i].cwd, !cwd.isEmpty {
+                surfaceConfig.workingDirectory = NSString(string: cwd).expandingTildeInPath
+            } else {
+                surfaceConfig.workingDirectory = NSHomeDirectory()
+            }
+            if i < config.panes.count, let cmd = config.panes[i].command, !cmd.isEmpty {
+                surfaceConfig.command = cmd
+            }
+            let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: surfaceConfig)
+            do {
+                surfaceTree = try surfaceTree.inserting(
+                    view: newView,
+                    at: firstSurface,
+                    direction: .right)
+            } catch {
+                Ghostty.logger.warning("failed to create initial grid pane: \(error)")
+            }
+        }
+
+        // Apply per-pane config (watermarks, initial commands)
+        applyPaneConfig(config, startIndex: 0)
+    }
+
+    /// Apply watermarks and initial commands from the termania config to surfaces.
+    private func applyPaneConfig(_ config: Trm.TrmGridConfig, startIndex: Int) {
+        let surfaces = gridSurfaces
+        for (i, paneConfig) in config.panes.enumerated() {
+            let surfaceIndex = startIndex + i
+            guard surfaceIndex < surfaces.count else { break }
+
+            // Set watermark
+            if let watermark = paneConfig.watermark, !watermark.isEmpty {
+                Trm.shared.setWatermark(forPane: UInt32(surfaceIndex), text: watermark)
+            }
+
+            // Send initial commands after a short delay to let the shell start
+            if !paneConfig.initialCommands.isEmpty {
+                let surface = surfaces[surfaceIndex]
+                let commands = paneConfig.initialCommands
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    for cmd in commands {
+                        self?.sendTextToSurface(surface, text: cmd + "\n")
+                    }
+                }
+            }
+        }
     }
     
     func defaultUpdateOverlayVisibility() -> Bool {
@@ -1201,6 +1420,9 @@ class BaseTerminalController: NSWindowController,
 
     func windowWillClose(_ notification: Notification) {
         guard let window else { return }
+
+        liveSummaryManager.stop()
+        contextUsageManager.stop()
 
         // I don't know if this is required anymore. We previously had a ref cycle between
         // the view and the window so we had to nil this out to break it but I think this
@@ -1270,85 +1492,8 @@ class BaseTerminalController: NSWindowController,
         promptTabTitle()
     }
 
-    @IBAction func splitRight(_ sender: Any) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_RIGHT)
-    }
-
-    @IBAction func splitLeft(_ sender: Any) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_LEFT)
-    }
-
-    @IBAction func splitDown(_ sender: Any) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_DOWN)
-    }
-
-    @IBAction func splitUp(_ sender: Any) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_UP)
-    }
-
-    @IBAction func splitZoom(_ sender: Any) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.splitToggleZoom(surface: surface)
-    }
-
-
-    @IBAction func splitMoveFocusPrevious(_ sender: Any) {
-        splitMoveFocus(direction: .previous)
-    }
-
-    @IBAction func splitMoveFocusNext(_ sender: Any) {
-        splitMoveFocus(direction: .next)
-    }
-
-    @IBAction func splitMoveFocusAbove(_ sender: Any) {
-        splitMoveFocus(direction: .up)
-    }
-
-    @IBAction func splitMoveFocusBelow(_ sender: Any) {
-        splitMoveFocus(direction: .down)
-    }
-
-    @IBAction func splitMoveFocusLeft(_ sender: Any) {
-        splitMoveFocus(direction: .left)
-    }
-
-    @IBAction func splitMoveFocusRight(_ sender: Any) {
-        splitMoveFocus(direction: .right)
-    }
-
-    @IBAction func equalizeSplits(_ sender: Any) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.splitEqualize(surface: surface)
-    }
-
-    @IBAction func moveSplitDividerUp(_ sender: Any) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.splitResize(surface: surface, direction: .up, amount: 10)
-    }
-
-    @IBAction func moveSplitDividerDown(_ sender: Any) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.splitResize(surface: surface, direction: .down, amount: 10)
-    }
-
-    @IBAction func moveSplitDividerLeft(_ sender: Any) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.splitResize(surface: surface, direction: .left, amount: 10)
-    }
-
-    @IBAction func moveSplitDividerRight(_ sender: Any) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.splitResize(surface: surface, direction: .right, amount: 10)
-    }
-
-    private func splitMoveFocus(direction: Ghostty.SplitFocusDirection) {
-        guard let surface = focusedSurface?.surface else { return }
-        ghostty.splitMoveFocus(surface: surface, direction: direction)
-    }
+    /// No-op — split zoom is not supported in grid layout mode.
+    @IBAction func splitZoom(_ sender: Any) {}
 
     @IBAction func increaseFontSize(_ sender: Any) {
         guard let surface = focusedSurface?.surface else { return }
@@ -1367,6 +1512,19 @@ class BaseTerminalController: NSWindowController,
 
     @IBAction func toggleCommandPalette(_ sender: Any?) {
         commandPaletteIsShowing.toggle()
+    }
+
+    @IBAction func toggleHelpPanel(_ sender: Any?) {
+        helpPanelIsShowing.toggle()
+    }
+
+    @IBAction func toggleLiveSummary(_ sender: Any?) {
+        liveSummaryManager.toggle()
+    }
+
+    @IBAction func newRow(_ sender: Any?) {
+        guard let surface = focusedSurface?.surface else { return }
+        ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_DOWN)
     }
     
     @IBAction func find(_ sender: Any) {
@@ -1402,20 +1560,17 @@ class BaseTerminalController: NSWindowController,
         let macosTitlebarProxyIcon: Ghostty.MacOSTitlebarProxyIcon
         let windowStepResize: Bool
         let focusFollowsMouse: Bool
-        let splitPreserveZoom: Ghostty.Config.SplitPreserveZoom
 
         init() {
             self.macosTitlebarProxyIcon = .visible
             self.windowStepResize = false
             self.focusFollowsMouse = false
-            self.splitPreserveZoom = .init()
         }
 
         init(_ config: Ghostty.Config) {
             self.macosTitlebarProxyIcon = config.macosTitlebarProxyIcon
             self.windowStepResize = config.windowStepResize
             self.focusFollowsMouse = config.focusFollowsMouse
-            self.splitPreserveZoom = config.splitPreserveZoom
         }
     }
 }

@@ -69,6 +69,7 @@ pub fn init(
             "Ghostty",
             "-configuration",
             xc_config,
+            "CODE_SIGNING_ALLOWED=NO",
         });
 
         // If we have a specific architecture, we need to pass it

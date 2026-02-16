@@ -378,8 +378,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if let fullscreenStyle = parentController.fullscreenStyle,
            fullscreenStyle.isFullscreen && !fullscreenStyle.supportsTabs {
             let alert = NSAlert()
-            alert.messageText = "Cannot Create New Tab"
-            alert.informativeText = "New tabs are unsupported while in non-native fullscreen. Exit fullscreen and try again."
+            alert.messageText = "Cannot Create New Pane"
+            alert.informativeText = "New panes are unsupported while in non-native fullscreen. Exit fullscreen and try again."
             alert.addButton(withTitle: "OK")
             alert.alertStyle = .warning
             alert.beginSheetModal(for: parent)
@@ -453,7 +453,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Setup our undo
         if let undoManager = parentController.undoManager {
-            undoManager.setActionName("New Tab")
+            undoManager.setActionName("New Pane")
             undoManager.registerUndo(
                 withTarget: controller,
                 expiresAfter: controller.undoExpiration
@@ -1193,8 +1193,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     @IBAction func newTab(_ sender: Any?) {
         guard let surface = focusedSurface?.surface else { return }
-        ghostty.newTab(surface: surface)
+        // Create a new pane in the grid (to the right of the focused pane)
+        ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_RIGHT)
     }
+
+
 
     @IBAction func closeTab(_ sender: Any?) {
         guard let window = window else { return }
@@ -1315,6 +1318,40 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @IBAction func toggleTerminalInspector(_ sender: Any?) {
         guard let surface = focusedSurface?.surface else { return }
         ghostty.toggleTerminalInspector(surface: surface)
+    }
+
+    // MARK: - Pane Overlay Actions (trm)
+
+    /// Cmd+Shift+O: Add an overlay pane on the focused surface.
+    @IBAction func addOverlay(_ sender: Any?) {
+        let trm = Trm.shared
+        let focused = trm.handle.flatMap { termania_focused_pane($0) } ?? 0
+        trm.addOverlay(fgIndex: focused)
+    }
+
+    /// Cmd+Shift+]: Swap overlay layers.
+    @IBAction func swapOverlay(_ sender: Any?) {
+        let trm = Trm.shared
+        let focused = trm.handle.flatMap { termania_focused_pane($0) } ?? 0
+        trm.swapOverlay(fgIndex: focused)
+    }
+
+    /// Cmd+Shift+W: Close overlay.
+    @IBAction func closeOverlay(_ sender: Any?) {
+        let trm = Trm.shared
+        let focused = trm.handle.flatMap { termania_focused_pane($0) } ?? 0
+        if trm.hasOverlay(fgIndex: focused) {
+            trm.removeOverlay(fgIndex: focused)
+        }
+    }
+
+    /// Tab (when overlay exists): Toggle focus between overlay layers.
+    @IBAction func toggleOverlayFocus(_ sender: Any?) {
+        let trm = Trm.shared
+        let focused = trm.handle.flatMap { termania_focused_pane($0) } ?? 0
+        if trm.hasOverlay(fgIndex: focused) {
+            trm.toggleOverlayFocus(fgIndex: focused)
+        }
     }
 
     //MARK: - TerminalViewDelegate

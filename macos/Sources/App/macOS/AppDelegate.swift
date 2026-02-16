@@ -29,10 +29,6 @@ class AppDelegate: NSObject,
 
     @IBOutlet private var menuNewWindow: NSMenuItem?
     @IBOutlet private var menuNewTab: NSMenuItem?
-    @IBOutlet private var menuSplitRight: NSMenuItem?
-    @IBOutlet private var menuSplitLeft: NSMenuItem?
-    @IBOutlet private var menuSplitDown: NSMenuItem?
-    @IBOutlet private var menuSplitUp: NSMenuItem?
     @IBOutlet private var menuClose: NSMenuItem?
     @IBOutlet private var menuCloseTab: NSMenuItem?
     @IBOutlet private var menuCloseWindow: NSMenuItem?
@@ -55,13 +51,6 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuToggleVisibility: NSMenuItem?
     @IBOutlet private var menuToggleFullScreen: NSMenuItem?
     @IBOutlet private var menuBringAllToFront: NSMenuItem?
-    @IBOutlet private var menuZoomSplit: NSMenuItem?
-    @IBOutlet private var menuPreviousSplit: NSMenuItem?
-    @IBOutlet private var menuNextSplit: NSMenuItem?
-    @IBOutlet private var menuSelectSplitAbove: NSMenuItem?
-    @IBOutlet private var menuSelectSplitBelow: NSMenuItem?
-    @IBOutlet private var menuSelectSplitLeft: NSMenuItem?
-    @IBOutlet private var menuSelectSplitRight: NSMenuItem?
     @IBOutlet private var menuReturnToDefaultSize: NSMenuItem?
     @IBOutlet private var menuFloatOnTop: NSMenuItem?
     @IBOutlet private var menuUseAsDefault: NSMenuItem?
@@ -76,11 +65,6 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuTerminalInspector: NSMenuItem?
     @IBOutlet private var menuCommandPalette: NSMenuItem?
 
-    @IBOutlet private var menuEqualizeSplits: NSMenuItem?
-    @IBOutlet private var menuMoveSplitDividerUp: NSMenuItem?
-    @IBOutlet private var menuMoveSplitDividerDown: NSMenuItem?
-    @IBOutlet private var menuMoveSplitDividerLeft: NSMenuItem?
-    @IBOutlet private var menuMoveSplitDividerRight: NSMenuItem?
 
     /// The dock menu
     private var dockMenu: NSMenu = NSMenu()
@@ -271,6 +255,9 @@ class AppDelegate: NSObject,
         ])
         center.delegate = self
 
+        // Start polling for Text Tap notifications (e.g. from Claude Code hooks)
+        Trm.shared.startNotificationPolling()
+
         // Observe our appearance so we can report the correct value to libghostty.
         self.appearanceObserver = NSApplication.shared.observe(
             \.effectiveAppearance,
@@ -400,9 +387,9 @@ class AppDelegate: NSObject,
 
         // We have some visible window. Show an app-wide modal to confirm quitting.
         let alert = NSAlert()
-        alert.messageText = "Quit Ghostty?"
+        alert.messageText = "Quit trm?"
         alert.informativeText = "All terminal sessions will be terminated."
-        alert.addButton(withTitle: "Close Ghostty")
+        alert.addButton(withTitle: "Close trm")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
         switch (alert.runModal()) {
@@ -493,7 +480,7 @@ class AppDelegate: NSObject,
             // may want to show this as a sheet on the focused window (especially if we're
             // opening a tab). I'm not sure.
             let alert = NSAlert()
-            alert.messageText = "Allow Ghostty to execute \"\(filename)\"?"
+            alert.messageText = "Allow trm to execute \"\(filename)\"?"
             alert.addButton(withTitle: "Allow")
             alert.addButton(withTitle: "Cancel")
             alert.alertStyle = .warning
@@ -563,10 +550,6 @@ class AppDelegate: NSObject,
         self.menuSecureInput?.setImageIfDesired(systemSymbolName: "lock.display")
         self.menuNewWindow?.setImageIfDesired(systemSymbolName: "macwindow.badge.plus")
         self.menuNewTab?.setImageIfDesired(systemSymbolName: "macwindow")
-        self.menuSplitRight?.setImageIfDesired(systemSymbolName: "rectangle.righthalf.inset.filled")
-        self.menuSplitLeft?.setImageIfDesired(systemSymbolName: "rectangle.leadinghalf.inset.filled")
-        self.menuSplitUp?.setImageIfDesired(systemSymbolName: "rectangle.tophalf.inset.filled")
-        self.menuSplitDown?.setImageIfDesired(systemSymbolName: "rectangle.bottomhalf.inset.filled")
         self.menuClose?.setImageIfDesired(systemSymbolName: "xmark")
         self.menuPasteSelection?.setImageIfDesired(systemSymbolName: "doc.on.clipboard.fill")
         self.menuIncreaseFontSize?.setImageIfDesired(systemSymbolName: "textformat.size.larger")
@@ -579,18 +562,6 @@ class AppDelegate: NSObject,
         self.menuReadonly?.setImageIfDesired(systemSymbolName: "eye.fill")
         self.menuToggleFullScreen?.setImageIfDesired(systemSymbolName: "square.arrowtriangle.4.outward")
         self.menuToggleVisibility?.setImageIfDesired(systemSymbolName: "eye")
-        self.menuZoomSplit?.setImageIfDesired(systemSymbolName: "arrow.up.left.and.arrow.down.right")
-        self.menuPreviousSplit?.setImageIfDesired(systemSymbolName: "chevron.backward.2")
-        self.menuNextSplit?.setImageIfDesired(systemSymbolName: "chevron.forward.2")
-        self.menuEqualizeSplits?.setImageIfDesired(systemSymbolName: "inset.filled.topleft.topright.bottomleft.bottomright.rectangle")
-        self.menuSelectSplitLeft?.setImageIfDesired(systemSymbolName: "arrow.left")
-        self.menuSelectSplitRight?.setImageIfDesired(systemSymbolName: "arrow.right")
-        self.menuSelectSplitAbove?.setImageIfDesired(systemSymbolName: "arrow.up")
-        self.menuSelectSplitBelow?.setImageIfDesired(systemSymbolName: "arrow.down")
-        self.menuMoveSplitDividerUp?.setImageIfDesired(systemSymbolName: "arrow.up.to.line")
-        self.menuMoveSplitDividerDown?.setImageIfDesired(systemSymbolName: "arrow.down.to.line")
-        self.menuMoveSplitDividerLeft?.setImageIfDesired(systemSymbolName: "arrow.left.to.line")
-        self.menuMoveSplitDividerRight?.setImageIfDesired(systemSymbolName: "arrow.right.to.line")
         self.menuFloatOnTop?.setImageIfDesired(systemSymbolName: "square.filled.on.square")
         self.menuFindParent?.setImageIfDesired(systemSymbolName: "text.page.badge.magnifyingglass")
     }
@@ -610,10 +581,6 @@ class AppDelegate: NSObject,
         syncMenuShortcut(config, action: "close_tab", menuItem: self.menuCloseTab)
         syncMenuShortcut(config, action: "close_window", menuItem: self.menuCloseWindow)
         syncMenuShortcut(config, action: "close_all_windows", menuItem: self.menuCloseAllWindows)
-        syncMenuShortcut(config, action: "new_split:right", menuItem: self.menuSplitRight)
-        syncMenuShortcut(config, action: "new_split:left", menuItem: self.menuSplitLeft)
-        syncMenuShortcut(config, action: "new_split:down", menuItem: self.menuSplitDown)
-        syncMenuShortcut(config, action: "new_split:up", menuItem: self.menuSplitUp)
 
         syncMenuShortcut(config, action: "undo", menuItem: self.menuUndo)
         syncMenuShortcut(config, action: "redo", menuItem: self.menuRedo)
@@ -627,18 +594,6 @@ class AppDelegate: NSObject,
         syncMenuShortcut(config, action: "search:next", menuItem: self.menuFindNext)
         syncMenuShortcut(config, action: "search:previous", menuItem: self.menuFindPrevious)
 
-        syncMenuShortcut(config, action: "toggle_split_zoom", menuItem: self.menuZoomSplit)
-        syncMenuShortcut(config, action: "goto_split:previous", menuItem: self.menuPreviousSplit)
-        syncMenuShortcut(config, action: "goto_split:next", menuItem: self.menuNextSplit)
-        syncMenuShortcut(config, action: "goto_split:up", menuItem: self.menuSelectSplitAbove)
-        syncMenuShortcut(config, action: "goto_split:down", menuItem: self.menuSelectSplitBelow)
-        syncMenuShortcut(config, action: "goto_split:left", menuItem: self.menuSelectSplitLeft)
-        syncMenuShortcut(config, action: "goto_split:right", menuItem: self.menuSelectSplitRight)
-        syncMenuShortcut(config, action: "resize_split:up,10", menuItem: self.menuMoveSplitDividerUp)
-        syncMenuShortcut(config, action: "resize_split:down,10", menuItem: self.menuMoveSplitDividerDown)
-        syncMenuShortcut(config, action: "resize_split:right,10", menuItem: self.menuMoveSplitDividerRight)
-        syncMenuShortcut(config, action: "resize_split:left,10", menuItem: self.menuMoveSplitDividerLeft)
-        syncMenuShortcut(config, action: "equalize_splits", menuItem: self.menuEqualizeSplits)
         syncMenuShortcut(config, action: "reset_window_size", menuItem: self.menuReturnToDefaultSize)
 
         syncMenuShortcut(config, action: "increase_font_size:1", menuItem: self.menuIncreaseFontSize)
@@ -1095,7 +1050,7 @@ class AppDelegate: NSObject,
 
     private func reloadDockMenu() {
         let newWindow = NSMenuItem(title: "New Window", action: #selector(newWindow), keyEquivalent: "")
-        let newTab = NSMenuItem(title: "New Tab", action: #selector(newTab), keyEquivalent: "")
+        let newTab = NSMenuItem(title: "New Pane", action: #selector(newTab), keyEquivalent: "")
 
         dockMenu.removeAllItems()
         dockMenu.addItem(newWindow)
@@ -1140,10 +1095,14 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newTab(_ sender: Any?) {
-        _ = TerminalController.newTab(
-            ghostty,
-            from: TerminalController.preferredParent?.window
-        )
+        // Create a new pane in the current window's grid rather than a new macOS tab
+        if let controller = TerminalController.preferredParent,
+           let surface = controller.focusedSurface?.surface {
+            ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_RIGHT)
+        } else {
+            // No existing window — create a new one
+            _ = TerminalController.newWindow(ghostty)
+        }
     }
 
     @IBAction func closeAllWindows(_ sender: Any?) {

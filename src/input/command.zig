@@ -415,8 +415,8 @@ fn actionCommands(action: Action.Key) []const Command {
 
         .new_tab => comptime &.{.{
             .action = .new_tab,
-            .title = "New Tab",
-            .description = "Open a new tab.",
+            .title = "New Pane",
+            .description = "Open a new pane.",
         }},
 
         .move_tab => comptime &.{
@@ -453,23 +453,23 @@ fn actionCommands(action: Action.Key) []const Command {
         .new_split => comptime &.{
             .{
                 .action = .{ .new_split = .left },
-                .title = "Split Left",
-                .description = "Split the terminal to the left.",
+                .title = "New Pane Left",
+                .description = "Add a new pane to the left.",
             },
             .{
                 .action = .{ .new_split = .right },
-                .title = "Split Right",
-                .description = "Split the terminal to the right.",
+                .title = "New Pane Right",
+                .description = "Add a new pane to the right.",
             },
             .{
                 .action = .{ .new_split = .up },
-                .title = "Split Up",
-                .description = "Split the terminal up.",
+                .title = "New Pane Above",
+                .description = "Add a new pane above in a new row.",
             },
             .{
                 .action = .{ .new_split = .down },
-                .title = "Split Down",
-                .description = "Split the terminal down.",
+                .title = "New Pane Below",
+                .description = "Add a new pane below in a new row.",
             },
         },
 

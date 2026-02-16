@@ -13,10 +13,10 @@ if ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) != GHOSTTY_SUCCE
     case .cli, .zig_run:
         let stderrHandle = FileHandle.standardError
         stderrHandle.write(
-            "Ghostty failed to initialize! If you're executing Ghostty from the command line\n" +
+            "trm failed to initialize! If you're executing trm from the command line\n" +
             "then this is usually because an invalid action or multiple actions were specified.\n" +
             "Actions start with the `+` character.\n\n" +
-            "View all available actions by running `ghostty +help`.\n")
+            "View all available actions by running `trm +help`.\n")
         exit(1)
         
     case .app:

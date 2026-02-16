@@ -57,32 +57,105 @@ struct CommandOption: Identifiable, Hashable {
     }
 }
 
+/// The active mode of the command palette, determined by query prefix.
+enum PaletteMode {
+    case ai       // Default — natural language prompt to LLM
+    case search   // Prefix: @  — search/filter commands
+    case command  // Prefix: !  — send raw text to terminal
+
+    var label: String {
+        switch self {
+        case .ai: return "AI"
+        case .search: return "Search"
+        case .command: return "Command"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .ai: return .purple
+        case .search: return .blue
+        case .command: return .green
+        }
+    }
+
+    var placeholder: String {
+        switch self {
+        case .ai: return "Ask AI, @search, or !command…"
+        case .search: return "Search commands…"
+        case .command: return "Send command to terminal…"
+        }
+    }
+
+    /// Detect mode from a query string.
+    static func detect(from query: String) -> PaletteMode {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("@") { return .search }
+        if trimmed.hasPrefix("!") { return .command }
+        return .ai
+    }
+
+    /// Strip the mode prefix from the query to get the effective search/command text.
+    static func effectiveQuery(from query: String) -> String {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("@") || trimmed.hasPrefix("!") {
+            return String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+        }
+        return trimmed
+    }
+}
+
 struct CommandPaletteView: View {
     @Binding var isPresented: Bool
     var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
     var options: [CommandOption]
+    /// Async callback for AI mode submissions. Returns an LLM response.
+    var onAISubmit: ((String) async throws -> TrmLLMResponse)?
+    /// Callback for command mode submissions.
+    var onCommandSubmit: ((String) -> Void)?
+    /// Callback to execute parsed LLM actions.
+    var onExecuteActions: (([TrmAction]) -> Void)?
+    /// Callback to show the API key prompt.
+    var onNeedsAPIKey: (() -> Void)?
     @State private var query = ""
     @State private var selectedIndex: UInt?
     @State private var hoveredOptionID: UUID?
     @FocusState private var isTextFieldFocused: Bool
+    @State private var aiResponseText: String?
+    @State private var aiIsThinking: Bool = false
+    @State private var pendingActions: [TrmAction] = []
+    @State private var aiTask: Task<Void, Never>?
+
+    /// Current palette mode based on query prefix.
+    var mode: PaletteMode { .detect(from: query) }
+
+    /// The effective query after stripping mode prefix.
+    var effectiveQuery: String { PaletteMode.effectiveQuery(from: query) }
 
     // The options that we should show, taking into account any filtering from
     // the query. Options with matching leadingColor are ranked higher.
     var filteredOptions: [CommandOption] {
-        if query.isEmpty {
+        // In AI mode, show all options when query is empty, otherwise hide command list
+        if mode == .ai && !effectiveQuery.isEmpty {
+            return []
+        }
+
+        let searchQuery = mode == .search ? effectiveQuery : (mode == .command ? "" : query)
+
+        if searchQuery.isEmpty {
             return options
         } else {
             // Filter by title/subtitle match OR color match
             let filtered = options.filter {
-                $0.title.localizedCaseInsensitiveContains(query) ||
-                ($0.subtitle?.localizedCaseInsensitiveContains(query) ?? false) ||
-                colorMatchScore(for: $0.leadingColor, query: query) > 0
+                $0.title.localizedCaseInsensitiveContains(searchQuery) ||
+                ($0.subtitle?.localizedCaseInsensitiveContains(searchQuery) ?? false) ||
+                colorMatchScore(for: $0.leadingColor, query: searchQuery) > 0
             }
-            
+
             // Sort by color match score (higher scores first), then maintain original order
             return filtered.sorted { a, b in
-                let scoreA = colorMatchScore(for: a.leadingColor, query: query)
-                let scoreB = colorMatchScore(for: b.leadingColor, query: query)
+                let scoreA = colorMatchScore(for: a.leadingColor, query: searchQuery)
+                let scoreB = colorMatchScore(for: b.leadingColor, query: searchQuery)
                 return scoreA > scoreB
             }
         }
@@ -105,57 +178,157 @@ struct CommandPaletteView: View {
         }
 
         VStack(alignment: .leading, spacing: 0) {
-            CommandPaletteQuery(query: $query, isTextFieldFocused: _isTextFieldFocused) { event in
-                switch (event) {
-                case .exit:
-                    isPresented = false
+            // Mode badge + query field
+            HStack(spacing: 8) {
+                // Mode indicator pill
+                Text(mode.label)
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(mode.color.opacity(0.2)))
+                    .foregroundStyle(mode.color)
+                    .padding(.leading, 12)
 
-                case .submit:
-                    isPresented = false
-                    selectedOption?.action()
+                CommandPaletteQuery(
+                    query: $query,
+                    isTextFieldFocused: _isTextFieldFocused,
+                    placeholder: mode.placeholder
+                ) { event in
+                    switch (event) {
+                    case .exit:
+                        isPresented = false
 
-                case .move(.up):
-                    if filteredOptions.isEmpty { break }
-                    let current = selectedIndex ?? UInt(filteredOptions.count)
-                    selectedIndex = (current == 0)
-                        ? UInt(filteredOptions.count - 1)
-                        : current - 1
+                    case .submit:
+                        switch mode {
+                        case .ai:
+                            // If we have pending actions and a response showing, execute them.
+                            if !pendingActions.isEmpty && aiResponseText != nil {
+                                let actions = pendingActions
+                                pendingActions = []
+                                aiResponseText = nil
+                                isPresented = false
+                                onExecuteActions?(actions)
+                            } else {
+                                let prompt = effectiveQuery
+                                if !prompt.isEmpty {
+                                    // Check for API key first
+                                    if !Trm.shared.hasAPIKey {
+                                        onNeedsAPIKey?()
+                                    } else {
+                                        submitAIPrompt(prompt)
+                                    }
+                                }
+                            }
+                        case .search:
+                            isPresented = false
+                            selectedOption?.action()
+                        case .command:
+                            let cmd = effectiveQuery
+                            if !cmd.isEmpty {
+                                isPresented = false
+                                onCommandSubmit?(cmd)
+                            }
+                        }
 
-                case .move(.down):
-                    if filteredOptions.isEmpty { break }
-                    let current = selectedIndex ?? UInt.max
-                    selectedIndex = (current >= UInt(filteredOptions.count - 1))
-                        ? 0
-                        : current + 1
+                    case .move(.up):
+                        if filteredOptions.isEmpty { break }
+                        let current = selectedIndex ?? UInt(filteredOptions.count)
+                        selectedIndex = (current == 0)
+                            ? UInt(filteredOptions.count - 1)
+                            : current - 1
 
-                case .move(_):
-                    // Unknown, ignore
-                    break
-                }
-            }
-            .onChange(of: query) { newValue in
-                // If the user types a query then we want to make sure the first
-                // value is selected. If the user clears the query and we were selecting
-                // the first, we unset any selection.
-                if !newValue.isEmpty {
-                    if selectedIndex == nil {
-                        selectedIndex = 0
+                    case .move(.down):
+                        if filteredOptions.isEmpty { break }
+                        let current = selectedIndex ?? UInt.max
+                        selectedIndex = (current >= UInt(filteredOptions.count - 1))
+                            ? 0
+                            : current + 1
+
+                    case .move(_):
+                        // Unknown, ignore
+                        break
                     }
-                } else {
-                    if let selectedIndex, selectedIndex == 0 {
-                        self.selectedIndex = nil
+                }
+                .onChange(of: query) { newValue in
+                    // Reset AI state when query changes
+                    aiTask?.cancel()
+                    aiTask = nil
+                    aiResponseText = nil
+                    aiIsThinking = false
+                    pendingActions = []
+
+                    // If the user types a query then we want to make sure the first
+                    // value is selected. If the user clears the query and we were selecting
+                    // the first, we unset any selection.
+                    if !newValue.isEmpty {
+                        if selectedIndex == nil {
+                            selectedIndex = 0
+                        }
+                    } else {
+                        if let selectedIndex, selectedIndex == 0 {
+                            self.selectedIndex = nil
+                        }
                     }
                 }
             }
 
             Divider()
 
-            CommandTable(
-                options: filteredOptions,
-                selectedIndex: $selectedIndex,
-                hoveredOptionID: $hoveredOptionID) { option in
-                    isPresented = false
-                    option.action()
+            // AI thinking indicator
+            if aiIsThinking {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                    Text("Thinking…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
+
+            // AI response area
+            if let response = aiResponseText {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(response)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+
+                    if !pendingActions.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(pendingActions.enumerated()), id: \.offset) { _, action in
+                                Text(action.displayDescription)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+
+                        HStack {
+                            Text("Press Enter to execute, Escape to cancel")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 8)
+                    } else {
+                        Spacer().frame(height: 8)
+                    }
+                }
+            }
+
+            // Command list (hidden in AI mode when typing)
+            if !filteredOptions.isEmpty {
+                CommandTable(
+                    options: filteredOptions,
+                    selectedIndex: $selectedIndex,
+                    hoveredOptionID: $hoveredOptionID) { option in
+                        isPresented = false
+                        option.action()
+                }
             }
         }
         .frame(maxWidth: 500)
@@ -185,6 +358,12 @@ struct CommandPaletteView: View {
             // it here when dismissing.
             isTextFieldFocused = newValue
             if !isPresented {
+                // Cancel any in-flight AI task.
+                aiTask?.cancel()
+                aiTask = nil
+                aiIsThinking = false
+                aiResponseText = nil
+                pendingActions = []
                 // This is optional, since most of the time
                 // there will be a delay before the next use.
                 // To keep behavior the same as before, we reset it.
@@ -201,6 +380,36 @@ struct CommandPaletteView: View {
         }
     }
     
+    /// Submit an AI prompt asynchronously and update UI state on completion.
+    private func submitAIPrompt(_ prompt: String) {
+        aiIsThinking = true
+        aiResponseText = nil
+        pendingActions = []
+
+        aiTask = Task {
+            do {
+                guard let handler = onAISubmit else { return }
+                let response = try await handler(prompt)
+
+                guard !Task.isCancelled else { return }
+
+                await MainActor.run {
+                    aiIsThinking = false
+                    aiResponseText = response.explanation
+                    pendingActions = response.actions
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+
+                await MainActor.run {
+                    aiIsThinking = false
+                    aiResponseText = "Error: \(error.localizedDescription)"
+                    pendingActions = []
+                }
+            }
+        }
+    }
+
     /// Returns a score (0.0 to 1.0) indicating how well a color matches a search query color name.
     /// Returns 0 if no color name in the query matches, or if the color is nil.
     private func colorMatchScore(for color: Color?, query: String) -> Double {
@@ -231,11 +440,13 @@ struct CommandPaletteView: View {
 /// The text field for building the query for the command palette.
 fileprivate struct CommandPaletteQuery: View {
     @Binding var query: String
+    var placeholder: String
     var onEvent: ((KeyboardEvent) -> Void)? = nil
     @FocusState private var isTextFieldFocused: Bool
 
-    init(query: Binding<String>, isTextFieldFocused: FocusState<Bool>, onEvent: ((KeyboardEvent) -> Void)? = nil) {
+    init(query: Binding<String>, isTextFieldFocused: FocusState<Bool>, placeholder: String = "Ask AI, @search, or !command…", onEvent: ((KeyboardEvent) -> Void)? = nil) {
         _query = query
+        self.placeholder = placeholder
         self.onEvent = onEvent
         _isTextFieldFocused = isTextFieldFocused
     }
@@ -266,7 +477,7 @@ fileprivate struct CommandPaletteQuery: View {
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
 
-            TextField("Execute a command…", text: $query)
+            TextField(placeholder, text: $query)
                 .padding()
                 .font(.system(size: 20, weight: .light))
                 .frame(height: 48)

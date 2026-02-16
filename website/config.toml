@@ -1,0 +1,8 @@
+base_url = "/"
+title = "trm"
+description = "AI-native terminal emulator built on Ghostty"
+compile_sass = false
+build_search_index = false
+
+[markdown.highlighting]
+theme = "material-theme-ocean"

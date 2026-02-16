@@ -1,7 +1,7 @@
 <!-- LOGO -->
 <h1>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/keyvez/trm/main/website/public/images/icon.png" alt="trm" width="128">
+  <img src="https://raw.githubusercontent.com/keyvez/trm/main/website/static/images/icon.png" alt="trm" width="128">
   <br>trm
 </h1>
   <p align="center">

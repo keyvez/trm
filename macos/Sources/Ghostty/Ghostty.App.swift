@@ -481,7 +481,8 @@ extension Ghostty {
                 newWindow(app, target: target)
 
             case GHOSTTY_ACTION_NEW_TAB:
-                newTab(app, target: target)
+                // Redirect new tab to new split (grid pane) to the right
+                newSplit(app, target: target, direction: GHOSTTY_SPLIT_DIRECTION_RIGHT)
 
             case GHOSTTY_ACTION_NEW_SPLIT:
                 newSplit(app, target: target, direction: action.action.new_split)
@@ -502,19 +503,19 @@ extension Ghostty {
                 return gotoTab(app, target: target, tab: action.action.goto_tab)
 
             case GHOSTTY_ACTION_GOTO_SPLIT:
-                return gotoSplit(app, target: target, direction: action.action.goto_split)
+                break // Split navigation removed — using grid layout
 
             case GHOSTTY_ACTION_GOTO_WINDOW:
                 return gotoWindow(app, target: target, direction: action.action.goto_window)
 
             case GHOSTTY_ACTION_RESIZE_SPLIT:
-                return resizeSplit(app, target: target, resize: action.action.resize_split)
+                break // Split resize removed — using grid layout
 
             case GHOSTTY_ACTION_EQUALIZE_SPLITS:
-                equalizeSplits(app, target: target)
+                break // Split equalize removed — using grid layout
 
             case GHOSTTY_ACTION_TOGGLE_SPLIT_ZOOM:
-                return toggleSplitZoom(app, target: target)
+                break // Split zoom removed — using grid layout
 
             case GHOSTTY_ACTION_INSPECTOR:
                 controlInspector(app, target: target, mode: action.action.inspector)
@@ -704,16 +705,28 @@ extension Ghostty {
                     NSWorkspace.shared.open([url], withApplicationAt: textEditor, configuration: NSWorkspace.OpenConfiguration())
                     return true
                 }
-                
+
             case .html:
                 // The extension will be HTML and we do the right thing automatically.
                 break
-                
+
             case .unknown:
                 break
             }
-            
-            // Open with the default application for the URL
+
+            // HTTP/HTTPS URLs open in an inline webview pane instead of the system browser.
+            if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                NotificationCenter.default.post(
+                    name: .ghosttyOpenURLInPane,
+                    object: nil,
+                    userInfo: [
+                        Foundation.Notification.Name.OpenURLInPaneURLKey: url,
+                    ]
+                )
+                return true
+            }
+
+            // Other schemes (file://, mailto://, etc.) fall back to the system handler.
             NSWorkspace.shared.open(url)
             return true
         }

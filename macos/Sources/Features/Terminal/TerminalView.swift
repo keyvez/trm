@@ -17,7 +17,13 @@ protocol TerminalViewDelegate: AnyObject {
 
     /// Perform an action. At the time of writing this is only triggered by the command palette.
     func performAction(_ action: String, on: Ghostty.SurfaceView)
-    
+
+    /// Execute parsed LLM actions against the terminal.
+    func executeTrmActions(_ actions: [TrmAction])
+
+    /// Build pane context for the LLM system prompt.
+    func buildPaneContext() -> [PaneContext]
+
     /// A split tree operation
     func performSplitAction(_ action: TerminalSplitOperation)
 }
@@ -30,11 +36,35 @@ protocol TerminalViewModel: ObservableObject {
     /// and children. This should be @Published.
     var surfaceTree: SplitTree<Ghostty.SurfaceView> { get set }
 
+    /// Whether to use grid layout instead of the binary split tree.
+    var useGridLayout: Bool { get }
+
+    /// Number of columns in each row of the grid layout.
+    var gridRowCols: [Int] { get }
+
+    /// The surfaces in grid order, derived from the surfaceTree.
+    var gridSurfaces: [Ghostty.SurfaceView] { get }
+
+    /// Inline webview panes opened via URL interception.
+    var webviewPanes: [WebViewPane] { get }
+
+    /// All panes (terminals + webviews) for the grid, in display order.
+    var gridPanes: [GridPane] { get }
+
     /// The command palette state.
     var commandPaletteIsShowing: Bool { get set }
-    
+
+    /// The help panel state.
+    var helpPanelIsShowing: Bool { get set }
+
     /// The update overlay should be visible.
     var updateOverlayIsVisible: Bool { get }
+
+    /// The live summary manager for per-pane LLM summaries.
+    var liveSummaryManager: LiveSummaryManager { get }
+
+    /// The context usage manager for Claude Code context window tracking.
+    var contextUsageManager: ContextUsageManager { get }
 }
 
 /// The main terminal view. This terminal view supports splits.
@@ -80,10 +110,17 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         DebugBuildWarningView()
                     }
 
-                    TerminalSplitTreeView(
-                        tree: viewModel.surfaceTree,
-                        action: { delegate?.performSplitAction($0) })
-                        .environmentObject(ghostty)
+                    TrmGridView(
+                        panes: viewModel.gridPanes,
+                        rowCols: viewModel.gridRowCols,
+                        gap: Trm.shared.gridConfig().gap,
+                        padding: Trm.shared.gridConfig().padding,
+                        liveSummaryManager: viewModel.liveSummaryManager,
+                        onCloseWebviewPane: { pane in
+                            (self.delegate as? BaseTerminalController)?.closeWebviewPane(pane)
+                        }
+                    )
+                    .environmentObject(ghostty)
                         .focused($focused)
                         .onAppear { self.focused = true }
                         .onChange(of: focusedSurface) { newValue in
@@ -112,14 +149,46 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         surfaceView: surfaceView,
                         isPresented: $viewModel.commandPaletteIsShowing,
                         ghosttyConfig: ghostty.config,
-                        updateViewModel: (NSApp.delegate as? AppDelegate)?.updateViewModel) { action in
-                        self.delegate?.performAction(action, on: surfaceView)
-                    }
+                        updateViewModel: (NSApp.delegate as? AppDelegate)?.updateViewModel,
+                        onAction: { action in
+                            self.delegate?.performAction(action, on: surfaceView)
+                        },
+                        onExecuteActions: { actions in
+                            self.delegate?.executeTrmActions(actions)
+                        },
+                        buildPaneContext: { [weak delegate] in
+                            delegate?.buildPaneContext() ?? []
+                        },
+                        onToggleLiveSummary: {
+                            viewModel.liveSummaryManager.toggle()
+                        }
+                    )
                 }
                 
                 // Show update information above all else.
                 if viewModel.updateOverlayIsVisible {
                     UpdateOverlay()
+                }
+
+                // Context usage overlay (bottom-right, below update pill)
+                if let usage = viewModel.contextUsageManager.currentUsage {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            ContextUsageOverlayView(
+                                usage: usage,
+                                dailyTokensUsed: viewModel.contextUsageManager.dailyTokensUsed,
+                                weeklyTokensUsed: viewModel.contextUsageManager.weeklyTokensUsed
+                            )
+                        }
+                    }
+                }
+
+                // Help panel overlay
+                if viewModel.helpPanelIsShowing {
+                    HelpPanelView(isPresented: $viewModel.helpPanelIsShowing)
+                        .transition(.opacity)
                 }
             }
             .frame(maxWidth: .greatestFiniteMagnitude, maxHeight: .greatestFiniteMagnitude)
@@ -154,11 +223,11 @@ struct DebugBuildWarningView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundColor(.yellow)
 
-            Text("You're running a debug build of Ghostty! Performance will be degraded.")
+            Text("You're running a debug build of trm! Performance will be degraded.")
                 .padding(.all, 8)
                 .popover(isPresented: $isPopover, arrowEdge: .bottom) {
                     Text("""
-                    Debug builds of Ghostty are very slow and you may experience
+                    Debug builds of trm are very slow and you may experience
                     performance problems. Debug builds are only recommended during
                     development.
                     """)
@@ -171,7 +240,7 @@ struct DebugBuildWarningView: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Debug build warning")
-        .accessibilityValue("Debug builds of Ghostty are very slow and you may experience performance problems. Debug builds are only recommended during development.")
+        .accessibilityValue("Debug builds of trm are very slow and you may experience performance problems. Debug builds are only recommended during development.")
         .accessibilityAddTraits(.isStaticText)
         .onTapGesture {
             isPopover = true

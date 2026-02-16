@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ config.title }}{% endblock %} — AI-Native Terminal Emulator</title>
+    <meta name="description" content="{% block description %}{{ config.description }}{% endblock %}">
+    <link rel="stylesheet" href="{{ get_url(path='css/style.css') }}">
+    <link rel="icon" type="image/png" href="{{ get_url(path='favicon.png') }}">
+    <link rel="apple-touch-icon" href="{{ get_url(path='images/apple-touch-icon.png') }}">
+    {% block head_extra %}{% endblock %}
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="{{ get_url(path='/') }}" class="nav-logo">
+                <img src="{{ get_url(path='images/icon.png') }}" alt="trm" class="nav-logo-icon" width="28" height="28">
+                <span class="nav-logo-text">trm</span>
+            </a>
+            <div class="nav-links">
+                <a href="{{ get_url(path='docs/installation') }}">Install</a>
+                <a href="{{ get_url(path='docs/configuration') }}">Config</a>
+                <a href="{{ get_url(path='docs/plugins') }}">Plugins</a>
+                <a href="{{ get_url(path='docs/text-tap-api') }}">API</a>
+                <a href="{{ get_url(path='docs/keyboard-shortcuts') }}">Shortcuts</a>
+                <a href="https://github.com/keyvez/trm" class="nav-github" rel="noopener noreferrer" target="_blank">GitHub</a>
+            </div>
+            <button class="nav-toggle" aria-label="Toggle navigation" onclick="document.querySelector('.nav-links').classList.toggle('nav-links-open')">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-cols">
+                <div class="footer-col">
+                    <h4>Documentation</h4>
+                    <a href="{{ get_url(path='docs/installation') }}">Installation</a>
+                    <a href="{{ get_url(path='docs/configuration') }}">Configuration</a>
+                    <a href="{{ get_url(path='docs/keyboard-shortcuts') }}">Keyboard Shortcuts</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Features</h4>
+                    <a href="{{ get_url(path='docs/plugins') }}">Plugins</a>
+                    <a href="{{ get_url(path='docs/text-tap-api') }}">Text Tap API</a>
+                    <a href="{{ get_url(path='examples/') }}">Examples</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Project</h4>
+                    <a href="https://github.com/keyvez/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+                    <a href="https://github.com/keyvez/trm/issues" rel="noopener noreferrer" target="_blank">Issues</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>trm is MIT-licensed open source software.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

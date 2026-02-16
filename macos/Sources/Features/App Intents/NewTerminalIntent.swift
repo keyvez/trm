@@ -64,6 +64,7 @@ struct NewTerminalIntent: AppIntent {
         let ghostty = appDelegate.ghostty
 
         var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = NSHomeDirectory()
 
         // We don't run command as "command" and instead use "initialInput" so
         // that we can get all the login scripts to setup things like PATH.
@@ -130,7 +131,7 @@ struct NewTerminalIntent: AppIntent {
                 throw GhosttyIntentError.surfaceNotFound
             }
 
-            if let view = controller.newSplit(
+            if let view = controller.newGridPane(
                 at: parent,
                 direction: location.splitDirection!,
                 baseConfig: config

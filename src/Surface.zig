@@ -4101,8 +4101,14 @@ pub fn mouseButtonCallback(
         switch (self.mouse.left_click_count) {
             // Single click
             1 => {
-                // If we have a selection, clear it. This always happens.
-                if (self.io.terminal.screens.active.selection != null) {
+                // Ctrl+single-click selects contiguous non-space text
+                if (mods.ctrl) {
+                    if (self.io.terminal.screens.active.selectToSpace(pin.*)) |sel| {
+                        try self.io.terminal.screens.active.select(sel);
+                        try self.queueRender();
+                    }
+                } else if (self.io.terminal.screens.active.selection != null) {
+                    // If we have a selection, clear it. This always happens.
                     try self.io.terminal.screens.active.select(null);
                     try self.queueRender();
                 }
@@ -4310,10 +4316,10 @@ fn maybePromptClick(self: *Surface) !bool {
             null,
         );
         break :prompt_pin it.next() orelse {
-            // This shouldn't be possible because we asserted we're at
-            // a prompt above, so we MUST find some prompt in a left_up search.
+            // This can happen when cursorIsAtPrompt() detects a prompt
+            // state but the prompt iterator doesn't find one (e.g. the
+            // shell hasn't fully initialized semantic prompt markers yet).
             log.warn("cursor is at prompt but no prompt found", .{});
-            if (comptime std.debug.runtime_safety) unreachable;
             return false;
         };
     };
@@ -4792,7 +4798,10 @@ pub fn cursorPosCallback(
 
         // Handle dragging depending on click count
         switch (self.mouse.left_click_count) {
-            1 => try self.dragLeftClickSingle(pin, pos.x),
+            1 => if (self.mouse.mods.ctrl)
+                try self.dragLeftClickCtrlSingle(pin)
+            else
+                try self.dragLeftClickSingle(pin, pos.x),
             2 => try self.dragLeftClickDouble(pin),
             3 => try self.dragLeftClickTriple(pin),
             0 => unreachable, // handled above
@@ -4843,6 +4852,50 @@ fn dragLeftClickDouble(
         try self.io.terminal.screens.active.select(.init(
             word_start.start(),
             word_current.end(),
+            false,
+        ));
+    }
+}
+
+/// Ctrl+click-drag selects all contiguous non-space text, crossing all
+/// line boundaries. This is useful for selecting long URLs that span
+/// multiple wrapped lines.
+fn dragLeftClickCtrlSingle(
+    self: *Surface,
+    drag_pin: terminal.Pin,
+) !void {
+    const screen: *terminal.Screen = self.io.terminal.screens.active;
+    const click_pin = self.mouse.left_click_pin.?.*;
+
+    // Get the space-bounded span closest to our starting click.
+    const span_start = screen.selectToSpaceBetween(
+        click_pin,
+        drag_pin,
+    ) orelse {
+        try self.setSelection(null);
+        return;
+    };
+
+    // Get the space-bounded span closest to our current drag point.
+    const span_current = screen.selectToSpaceBetween(
+        drag_pin,
+        click_pin,
+    ) orelse {
+        try self.setSelection(null);
+        return;
+    };
+
+    // Union the two spans based on drag direction
+    if (drag_pin.before(click_pin)) {
+        try self.io.terminal.screens.active.select(.init(
+            span_current.start(),
+            span_start.end(),
+            false,
+        ));
+    } else {
+        try self.io.terminal.screens.active.select(.init(
+            span_start.start(),
+            span_current.end(),
             false,
         ));
     }

@@ -38,7 +38,7 @@ struct CyclingIconView: View {
             advanceToNextIcon()
         }
         .help("macos-icon = \(currentIcon.rawValue)")
-        .accessibilityLabel("Ghostty Application Icon")
+        .accessibilityLabel("trm Application Icon")
         .accessibilityHint("Click to cycle through icon variants")
     }
 

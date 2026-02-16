@@ -40,8 +40,8 @@
             <img src="/images/hero-icon.png" alt="trm">
         </div>
         <h1 class="hero-title">trm</h1>
-        <p class="hero-tagline">AI-native terminal emulator</p>
-        <p class="hero-sub">Built on Ghostty's GPU renderer with grid layout, AI command palette, 10 plugin types, and pane overlaying. Written in Zig.</p>
+        <p class="hero-tagline">All the context you need, in one place.</p>
+        <p class="hero-sub">Your editor, server, tests, and docs &mdash; all visible at once in a GPU-rendered grid. Stop alt-tabbing between terminals. Start seeing your entire project in one glance.</p>
         <div class="hero-install">
             <div class="hero-install-label">Build from source</div>
             <div class="hero-install-cmd" onclick="navigator.clipboard.writeText('zig build -Doptimize=ReleaseFast')">
@@ -56,10 +56,33 @@
     </div>
 </section>
 
+<!-- Pitch -->
+<section class="pitch" id="pitch">
+    <div class="section-inner">
+        <div class="pitch-grid">
+            <div class="pitch-card">
+                <div class="pitch-num">4&ndash;9</div>
+                <div class="pitch-label">panes visible at once</div>
+                <p>Editor, server, tests, logs, docs &mdash; no hidden tabs, no memorizing which window is where.</p>
+            </div>
+            <div class="pitch-card">
+                <div class="pitch-num">0</div>
+                <div class="pitch-label">context switches</div>
+                <p>Every pane has a live AI summary. See what changed without switching focus. Your brain stays in flow.</p>
+            </div>
+            <div class="pitch-card">
+                <div class="pitch-num">1</div>
+                <div class="pitch-label">config file per project</div>
+                <p>Drop a <code>trm.toml</code> in your repo. Grid layout, pane commands, watermarks &mdash; your whole workspace boots in one command.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
 <!-- Features -->
 <section class="features" id="features">
     <div class="section-inner">
-        <h2 class="section-title">Built for Power Users</h2>
+        <h2 class="section-title">Everything You Need, Nothing Hidden</h2>
         <div class="feature-grid">
             <div class="feature-card">
                 <div class="feature-icon">&#x2728;</div>
@@ -105,6 +128,16 @@
                 <div class="feature-icon">&#x1F50C;</div>
                 <h3>Text Tap API</h3>
                 <p>Unix socket API for external control. Subscribe to output, send input, execute actions via JSON. Scriptable automation built in.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F514;</div>
+                <h3>Claude Code Notifications</h3>
+                <p>Native macOS notifications when Claude Code is waiting for input. Uses the Text Tap socket &mdash; no osascript needed. Drop-in hook script included.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F4CA;</div>
+                <h3>Context Usage Tracking</h3>
+                <p>Real-time Claude Code context window gauge with color-coded warnings. Track daily and weekly token usage with persistent history. Auto-compact alerts built in.</p>
             </div>
         </div>
     </div>
@@ -277,8 +310,8 @@ trm --config path/to/config.toml</code></pre>
 <!-- CTA -->
 <section class="cta">
     <div class="section-inner">
-        <h2>Ready to try trm?</h2>
-        <p>Read the installation guide or dive straight into the configuration reference.</p>
+        <h2>Stop switching. Start seeing.</h2>
+        <p>Set up your first multi-pane workspace in under a minute.</p>
         <div class="cta-links">
             <a href="/docs/installation" class="btn btn-primary">Installation Guide</a>
             <a href="/docs/configuration" class="btn btn-secondary">Configuration Docs</a>

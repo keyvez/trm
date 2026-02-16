@@ -369,8 +369,9 @@ class QuickTerminalController: BaseTerminalController {
                 }
             } else {
                 var config = Ghostty.SurfaceConfiguration()
+                config.workingDirectory = NSHomeDirectory()
                 config.environmentVariables["GHOSTTY_QUICK_TERMINAL"] = "1"
-                
+
                 let view = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
                 surfaceTree = SplitTree(view: view)
                 focusedSurface = view
@@ -629,8 +630,8 @@ class QuickTerminalController: BaseTerminalController {
     private func showNoNewTabAlert() {
         guard let window else { return }
         let alert = NSAlert()
-        alert.messageText = "Cannot Create New Tab"
-        alert.informativeText = "Tabs aren't supported in the Quick Terminal."
+        alert.messageText = "Cannot Create New Pane"
+        alert.informativeText = "Panes aren't supported in the Quick Terminal."
         alert.addButton(withTitle: "OK")
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window)

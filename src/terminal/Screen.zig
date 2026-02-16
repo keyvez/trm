@@ -2853,6 +2853,84 @@ pub fn selectWord(
     return .init(start, end, false);
 }
 
+/// Select all contiguous non-space text under the given point, crossing all
+/// line boundaries (both soft and hard wrapped). Only spaces (0x20), tabs
+/// (0x09), and empty cells are treated as boundaries. This is useful for
+/// selecting long URLs or paths that span multiple lines.
+///
+/// Returns null if the pin is on an empty cell or a space/tab.
+pub fn selectToSpace(self: *Screen, pin: Pin) ?Selection {
+    _ = self;
+
+    // If our cell is empty we can't select
+    const start_cell = pin.rowAndCell().cell;
+    if (!start_cell.hasText()) return null;
+
+    // If the cell is a space or tab, return null
+    if (start_cell.content.codepoint == 0x20 or start_cell.content.codepoint == 0x09) return null;
+
+    // Go forwards to find our end boundary
+    const end: Pin = end: {
+        var it = pin.cellIterator(.right_down, null);
+        var prev = it.next().?; // Consume one, our start
+        while (it.next()) |p| {
+            const rac = p.rowAndCell();
+            const cell = rac.cell;
+
+            // If we reached an empty cell it's a boundary
+            if (!cell.hasText()) break :end prev;
+
+            // If we hit a space or tab, it's a boundary
+            if (cell.content.codepoint == 0x20 or cell.content.codepoint == 0x09) break :end prev;
+
+            prev = p;
+        }
+
+        break :end prev;
+    };
+
+    // Go backwards to find our start boundary
+    const start: Pin = start: {
+        var it = pin.cellIterator(.left_up, null);
+        var prev = it.next().?; // Consume one, our start
+        while (it.next()) |p| {
+            const rac = p.rowAndCell();
+            const cell = rac.cell;
+
+            // If we reached an empty cell it's a boundary
+            if (!cell.hasText()) break :start prev;
+
+            // If we hit a space or tab, it's a boundary
+            if (cell.content.codepoint == 0x20 or cell.content.codepoint == 0x09) break :start prev;
+
+            prev = p;
+        }
+
+        break :start prev;
+    };
+
+    return .init(start, end, false);
+}
+
+/// Like selectWordBetween but uses selectToSpace — finds the nearest
+/// contiguous non-space span between start and end.
+pub fn selectToSpaceBetween(self: *Screen, start: Pin, end: Pin) ?Selection {
+    const dir: PageList.Direction = if (start.before(end)) .right_down else .left_up;
+    var it = start.cellIterator(dir, end);
+    while (it.next()) |pin| {
+        // Boundary conditions
+        switch (dir) {
+            .right_down => if (end.before(pin)) return null,
+            .left_up => if (pin.before(end)) return null,
+        }
+
+        // If we found a span, then return it
+        if (self.selectToSpace(pin)) |sel| return sel;
+    }
+
+    return null;
+}
+
 /// Select the command output under the given point. The limits of the output
 /// are determined by semantic prompt information provided by shell integration.
 /// A selection can span multiple physical lines if they are soft-wrapped.

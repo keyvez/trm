@@ -73,7 +73,9 @@ extension Ghostty {
             super.init(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
 
             // Setup our surface. This will also initialize all the terminal IO.
-            let surface_cfg = baseConfig ?? SurfaceConfiguration()
+            var fallbackConfig = SurfaceConfiguration()
+            fallbackConfig.workingDirectory = NSHomeDirectory()
+            let surface_cfg = baseConfig ?? fallbackConfig
             let surface = surface_cfg.withCValue(view: self) { surface_cfg_c in
                 ghostty_surface_new(app, &surface_cfg_c)
             }

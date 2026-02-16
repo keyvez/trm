@@ -285,66 +285,26 @@ menu context_menu_model {
   }
 
   section {
-    submenu {
-      label: _("Split");
-
-      item {
-        label: _("Change Title…");
-        action: "surface.prompt-title";
-      }
-
-      item {
-        label: _("Split Up");
-        action: "split-tree.new-split";
-        target: "up";
-      }
-
-      item {
-        label: _("Split Down");
-        action: "split-tree.new-split";
-        target: "down";
-      }
-
-      item {
-        label: _("Split Left");
-        action: "split-tree.new-split";
-        target: "left";
-      }
-
-      item {
-        label: _("Split Right");
-        action: "split-tree.new-split";
-        target: "right";
-      }
+    item {
+      label: _("New Pane");
+      action: "win.new-tab";
     }
 
-    submenu {
-      label: _("Tab");
+    item {
+      label: _("Change Title…");
+      action: "surface.prompt-title";
+    }
+  }
 
-      item {
-        label: _("New Tab");
-        action: "win.new-tab";
-      }
-
-      item {
-        label: _("Close Tab");
-        action: "tab.close";
-        target: "this";
-      }
+  section {
+    item {
+      label: _("New Window");
+      action: "win.new-window";
     }
 
-    submenu {
-      label: _("Window");
-
-      item {
-        label: _("New Window");
-        action: "win.new-window";
-      }
-
-      item {
-        label: _("Close Window");
-        action: "win.close";
-      }
+    item {
+      label: _("Close Window");
+      action: "win.close";
     }
   }
 
