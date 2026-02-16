@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Installation — AI-Native Terminal Emulator</title>
+    <meta name="description" content="How to install trm on macOS by building from source.">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
+    
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="" class="nav-logo">
+                <img src="/images/icon.png" alt="trm" class="nav-logo-icon" width="28" height="28">
+                <span class="nav-logo-text">trm</span>
+            </a>
+            <div class="nav-links">
+                <a href="/docs/installation">Install</a>
+                <a href="/docs/configuration">Config</a>
+                <a href="/docs/plugins">Plugins</a>
+                <a href="/docs/text-tap-api">API</a>
+                <a href="/docs/keyboard-shortcuts">Shortcuts</a>
+                <a href="https://github.com/keyvez/trm" class="nav-github" rel="noopener noreferrer" target="_blank">GitHub</a>
+            </div>
+            <button class="nav-toggle" aria-label="Toggle navigation" onclick="document.querySelector('.nav-links').classList.toggle('nav-links-open')">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+
+    <main>
+        
+<div class="docs-layout">
+    <aside class="docs-sidebar">
+        <nav class="docs-nav">
+            <h4>Documentation</h4>
+            <a href="/docs/installation" >Installation</a>
+            <a href="/docs/configuration" >Configuration</a>
+            <a href="/docs/keyboard-shortcuts" >Keyboard Shortcuts</a>
+            <a href="/docs/plugins" >Plugins</a>
+            <a href="/docs/text-tap-api" >Text Tap API</a>
+            <h4>Resources</h4>
+            <a href="/examples">Examples</a>
+            <a href="https://github.com/anthropics/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+        </nav>
+    </aside>
+    <article class="docs-content">
+        <h1>Installation</h1>
+        <h2 id="requirements">Requirements</h2>
+<ul>
+<li><strong>macOS</strong> (trm uses macOS-native APIs for WebView, Notes, and Screen Capture plugins)</li>
+<li><strong>Zig 0.13+</strong> (latest stable release)</li>
+<li><strong>GPU</strong> with Metal support (required by the Ghostty renderer)</li>
+</ul>
+<h2 id="build-from-source">Build from Source</h2>
+<p>Clone the repository and build with release optimizations:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">git</span><span style="color: #C3E88D;"> clone https://github.com/anthropics/trm.git</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">cd</span><span style="color: #C3E88D;"> trm</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">zig</span><span style="color: #C3E88D;"> build -Doptimize=ReleaseFast</span></span></code></pre>
+<p>The binary will be at <code>zig-out/bin/trm</code>. You can copy it to a location in your <code>PATH</code>:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">cp</span><span style="color: #C3E88D;"> zig-out/bin/trm /usr/local/bin/</span></span></code></pre><h2 id="dependencies">Dependencies</h2>
+<p>trm is built on <a rel="external" href="https://ghostty.org">Ghostty</a>'s terminal core and renderer. All dependencies are managed through Zig's build system. Key components include:</p>
+<table><thead><tr><th>Component</th><th>Purpose</th></tr></thead><tbody>
+<tr><td>Ghostty core</td><td>Terminal emulation, VT parser, GPU rendering</td></tr>
+<tr><td>Metal / OpenGL</td><td>GPU-accelerated rendering backends</td></tr>
+<tr><td>libghostty</td><td>C API bridge for macOS integration</td></tr>
+<tr><td>AppKit / WebKit</td><td>macOS native views (WKWebView, NSTextView)</td></tr>
+</tbody></table>
+<p>No system libraries need to be installed separately; the macOS SDK provides everything else.</p>
+<h2 id="verify-installation">Verify Installation</h2>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> --version</span></span></code></pre>
+<p>This prints the version number and exits.</p>
+<h2 id="first-launch">First Launch</h2>
+<p>Simply run <code>trm</code> with no arguments to start with a single terminal pane using the default configuration:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span></span></code></pre>
+<p>trm automatically creates a default config file at <code>~/.config/trm/config.toml</code> on first run.</p>
+<p>To launch with a specific session file:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> --config path/to/session.toml</span></span></code></pre>
+<p>See the <a href="/docs/configuration/">Configuration</a> guide for details on customizing your setup.</p>
+<h2 id="uninstall">Uninstall</h2>
+<p>Remove the binary:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">rm</span><span style="color: #C3E88D;"> /usr/local/bin/trm</span></span></code></pre>
+<p>To also remove configuration files:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">rm</span><span style="color: #C3E88D;"> -rf ~/.config/trm</span></span></code></pre>
+    </article>
+</div>
+
+    </main>
+
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-cols">
+                <div class="footer-col">
+                    <h4>Documentation</h4>
+                    <a href="/docs/installation">Installation</a>
+                    <a href="/docs/configuration">Configuration</a>
+                    <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Features</h4>
+                    <a href="/docs/plugins">Plugins</a>
+                    <a href="/docs/text-tap-api">Text Tap API</a>
+                    <a href="/examples">Examples</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Project</h4>
+                    <a href="https://github.com/keyvez/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+                    <a href="https://github.com/keyvez/trm/issues" rel="noopener noreferrer" target="_blank">Issues</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>trm is MIT-licensed open source software.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

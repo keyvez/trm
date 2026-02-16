@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Examples — AI-Native Terminal Emulator</title>
+    <meta name="description" content="AI-native terminal emulator built on Ghostty">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
+    
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="" class="nav-logo">
+                <img src="/images/icon.png" alt="trm" class="nav-logo-icon" width="28" height="28">
+                <span class="nav-logo-text">trm</span>
+            </a>
+            <div class="nav-links">
+                <a href="/docs/installation">Install</a>
+                <a href="/docs/configuration">Config</a>
+                <a href="/docs/plugins">Plugins</a>
+                <a href="/docs/text-tap-api">API</a>
+                <a href="/docs/keyboard-shortcuts">Shortcuts</a>
+                <a href="https://github.com/keyvez/trm" class="nav-github" rel="noopener noreferrer" target="_blank">GitHub</a>
+            </div>
+            <button class="nav-toggle" aria-label="Toggle navigation" onclick="document.querySelector('.nav-links').classList.toggle('nav-links-open')">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+
+    <main>
+        
+<div class="docs-layout">
+    <aside class="docs-sidebar">
+        <nav class="docs-nav">
+            <h4>Documentation</h4>
+            <a href="/docs/installation">Installation</a>
+            <a href="/docs/configuration">Configuration</a>
+            <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+            <a href="/docs/plugins">Plugins</a>
+            <a href="/docs/text-tap-api">Text Tap API</a>
+            <h4>Resources</h4>
+            <a href="/examples">Examples</a>
+            <a href="https://github.com/anthropics/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+        </nav>
+    </aside>
+    <article class="docs-content">
+        <h1>Examples</h1>
+        <p>Example session files to get you started with trm. These files are also available in the <code>examples/</code> directory of the <a rel="external" href="https://github.com/anthropics/trm">source repository</a>.</p>
+<h2 id="basic-single-terminal">Basic: Single Terminal</h2>
+<p>The simplest possible setup -- a single terminal pane with default settings:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># trm.toml</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Shell</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><h2 id="development-workflow">Development Workflow</h2>
+<p>A 2x2 grid with an editor, dev server, test runner, and embedded preview:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Dev Workflow</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span></span>
+<span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Editor</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">EDIT</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Server</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">npm run dev</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">SRV</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Tests</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">cargo watch -x test</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">TEST</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">webview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Preview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>url</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">http://localhost:3000</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><h2 id="multi-llm-grid">Multi-LLM Grid</h2>
+<p>A 3x3 grid running multiple LLM sessions simultaneously, with broadcast mode to send the same prompt to all:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">LLM Grid</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
+<span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Claude 1</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">claude</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Claude 2</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">claude</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Claude 3</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">claude</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Claude 4</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">claude</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Claude 5</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">claude</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Claude 6</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">claude</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Claude 7</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">claude</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Claude 8</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">claude</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Claude 9</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">claude</span><span style="color: #89DDFF;">&quot;]</span></span></code></pre>
+<p>Use <code>Cmd+Shift+B</code> to enable broadcast mode and send the same prompt to all 9 instances at once.</p>
+<h2 id="plugin-gallery">Plugin Gallery</h2>
+<p>Showcases multiple plugin types in a 2x3 grid:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Plugin Gallery</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span></span>
+<span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Shell</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">DEV</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Build</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">BUILD</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">webview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Docs</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>url</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">https://docs.rs</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">notes</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Scratch</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>content</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;"># Notes</span><span>\n\n</span><span style="color: #C3E88D;">Type anything here.</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">git_status</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Git</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>repo</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">system_info</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">System</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><h2 id="monitoring-dashboard">Monitoring Dashboard</h2>
+<p>A 2x3 dashboard for system and application monitoring:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Monitor</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span></span>
+<span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">system_info</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">System</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>refresh_ms</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2000</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">process_monitor</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Processes</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>refresh_ms</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 1500</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">log_viewer</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">System Log</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>file</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/var/log/system.log</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Shell</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">OPS</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">git_status</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Deploy Repo</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>repo</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/deploy</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">file_browser</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Files</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>path</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><h2 id="full-stack-with-file-browser">Full Stack with File Browser</h2>
+<p>Combines terminals, documentation, file browsing, and Markdown preview:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Full Stack</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span></span>
+<span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Frontend</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp/frontend</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">npm run dev</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Backend</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp/backend</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">cargo watch -x run</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">webview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">App</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>url</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">http://localhost:5173</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">file_browser</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Files</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>path</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">markdown_preview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">README</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>file</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp/README.md</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">git_status</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Git</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>repo</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span></code></pre>
+        
+    </article>
+</div>
+
+    </main>
+
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-cols">
+                <div class="footer-col">
+                    <h4>Documentation</h4>
+                    <a href="/docs/installation">Installation</a>
+                    <a href="/docs/configuration">Configuration</a>
+                    <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Features</h4>
+                    <a href="/docs/plugins">Plugins</a>
+                    <a href="/docs/text-tap-api">Text Tap API</a>
+                    <a href="/examples">Examples</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Project</h4>
+                    <a href="https://github.com/keyvez/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+                    <a href="https://github.com/keyvez/trm/issues" rel="noopener noreferrer" target="_blank">Issues</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>trm is MIT-licensed open source software.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

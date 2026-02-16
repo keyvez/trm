@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plugins — AI-Native Terminal Emulator</title>
+    <meta name="description" content="Reference for all 10 trm pane plugin types: terminal, webview, notes, screen capture, file browser, process monitor, log viewer, markdown preview, system info, and git status.">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
+    
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="" class="nav-logo">
+                <img src="/images/icon.png" alt="trm" class="nav-logo-icon" width="28" height="28">
+                <span class="nav-logo-text">trm</span>
+            </a>
+            <div class="nav-links">
+                <a href="/docs/installation">Install</a>
+                <a href="/docs/configuration">Config</a>
+                <a href="/docs/plugins">Plugins</a>
+                <a href="/docs/text-tap-api">API</a>
+                <a href="/docs/keyboard-shortcuts">Shortcuts</a>
+                <a href="https://github.com/keyvez/trm" class="nav-github" rel="noopener noreferrer" target="_blank">GitHub</a>
+            </div>
+            <button class="nav-toggle" aria-label="Toggle navigation" onclick="document.querySelector('.nav-links').classList.toggle('nav-links-open')">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+
+    <main>
+        
+<div class="docs-layout">
+    <aside class="docs-sidebar">
+        <nav class="docs-nav">
+            <h4>Documentation</h4>
+            <a href="/docs/installation" >Installation</a>
+            <a href="/docs/configuration" >Configuration</a>
+            <a href="/docs/keyboard-shortcuts" >Keyboard Shortcuts</a>
+            <a href="/docs/plugins" >Plugins</a>
+            <a href="/docs/text-tap-api" >Text Tap API</a>
+            <h4>Resources</h4>
+            <a href="/examples">Examples</a>
+            <a href="https://github.com/anthropics/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+        </nav>
+    </aside>
+    <article class="docs-content">
+        <h1>Plugins</h1>
+        <p>trm supports 10 built-in pane plugin types managed by an extensible plugin registry. Each pane in the grid can be a different type, configured via <code>[[panes]]</code> blocks in your session file.</p>
+<p>All plugins share these common fields:</p>
+<table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>type</code></td><td>String</td><td><code>"terminal"</code></td><td>The plugin type identifier</td></tr>
+<tr><td><code>title</code></td><td>String?</td><td>Auto-generated</td><td>Custom title for the pane's title bar</td></tr>
+</tbody></table>
+<h2 id="plugin-registry">Plugin Registry</h2>
+<p>trm uses a plugin registry that maps plugin type names to factory functions. All 10 built-in plugins are registered at startup. The registry supports:</p>
+<ul>
+<li><strong>Plugin discovery</strong> — list all available plugin types</li>
+<li><strong>Plugin instantiation</strong> — create plugins by name</li>
+<li><strong>Extensibility</strong> — future support for dynamic plugin loading</li>
+</ul>
+<hr />
+<h2 id="terminal">terminal</h2>
+<p>Full VT100/VT220 terminal emulator with a PTY-backed shell. This is the default pane type.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Dev Shell</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>command</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/bin/zsh</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">DEV</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">echo &#39;Hello!&#39;</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #C3E88D;">ls -la</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># env = [[&quot;NODE_ENV&quot;, &quot;development&quot;], [&quot;PORT&quot;, &quot;3000&quot;]]</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>command</code></td><td>String?</td><td><code>$SHELL</code></td><td>Shell or command to execute</td></tr>
+<tr><td><code>cwd</code></td><td>String?</td><td>Inherited</td><td>Working directory (supports <code>~</code> expansion)</td></tr>
+<tr><td><code>watermark</code></td><td>String?</td><td>None</td><td>Large faded text displayed behind the terminal content, useful for identifying panes at a glance</td></tr>
+<tr><td><code>initial_commands</code></td><td>String[]?</td><td>None</td><td>Commands to run automatically after the shell starts. Each is sent with a carriage return</td></tr>
+<tr><td><code>env</code></td><td>[String, String][]?</td><td>None</td><td>Extra environment variables as <code>[key, value]</code> pairs</td></tr>
+</tbody></table>
+<p><strong>Features:</strong></p>
+<ul>
+<li>GPU-rendered text via Ghostty's Metal/OpenGL renderer</li>
+<li>Full ANSI color support (16 colors + 256-color + true color)</li>
+<li>Scrollback history</li>
+<li>Mouse text selection (click-drag, double-click for word selection)</li>
+<li>Copy/paste via system clipboard</li>
+<li>VT100 escape sequence handling</li>
+<li>Broadcasts input when broadcast mode is active</li>
+</ul>
+<hr />
+<h2 id="webview">webview</h2>
+<p>Embedded web browser using macOS WKWebView. Click inside the pane to interact -- keyboard input is handled natively by WKWebView when focused.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">webview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Documentation</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>url</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">https://docs.rs</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>url</code></td><td>String?</td><td>None</td><td>URL to load in the embedded browser</td></tr>
+</tbody></table>
+<p><strong>Features:</strong></p>
+<ul>
+<li>Full web rendering via WebKit</li>
+<li>JavaScript support</li>
+<li>Navigation via the Text Tap API (<code>navigate</code> action)</li>
+<li>Native macOS scrolling and interaction</li>
+<li>Automatically positioned and resized with the grid layout</li>
+</ul>
+<blockquote>
+<p><strong>Note:</strong> WebView panes are macOS-only.</p>
+</blockquote>
+<hr />
+<h2 id="notes">notes</h2>
+<p>Editable text area using macOS NSTextView. Supports both in-memory scratch pads and file-backed persistent notes.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># In-memory scratch pad</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">notes</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Scratch Pad</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>content</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Type anything here...</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># File-backed persistent notes</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">notes</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">TODO List</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>file</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/trm-todo.md</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>content</code></td><td>String?</td><td>None</td><td>Initial content (used when no <code>file</code> is specified)</td></tr>
+<tr><td><code>file</code></td><td>String?</td><td>None</td><td>File path for persistent storage. Content is loaded on startup and auto-saved on close</td></tr>
+</tbody></table>
+<p><strong>Features:</strong></p>
+<ul>
+<li>Native macOS text editing</li>
+<li>File persistence (when <code>file</code> is specified)</li>
+<li>Content manipulation via the Text Tap API (<code>set_content</code> action)</li>
+</ul>
+<blockquote>
+<p><strong>Note:</strong> Notes panes are macOS-only.</p>
+</blockquote>
+<hr />
+<h2 id="screen-capture">screen_capture</h2>
+<p>Mirrors another application's window into a trm pane. Uses macOS ScreenCaptureKit.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># By application bundle ID</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">screen_capture</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Safari Mirror</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>target</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">com.apple.Safari</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># By window title</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">screen_capture</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">VS Code Mirror</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>target_title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">trm</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>target</code></td><td>String?</td><td>None</td><td>Application bundle ID to capture (e.g., <code>"com.apple.Safari"</code>)</td></tr>
+<tr><td><code>target_title</code></td><td>String?</td><td>None</td><td>Target a specific window by its title string</td></tr>
+</tbody></table>
+<blockquote>
+<p><strong>Note:</strong> This plugin is a work in progress. macOS-only.</p>
+</blockquote>
+<hr />
+<h2 id="file-browser">file_browser</h2>
+<p>Interactive file browser that displays a directory tree.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">file_browser</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Project Files</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>path</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>path</code></td><td>String?</td><td><code>"."</code></td><td>Root directory to browse (supports <code>~</code> expansion)</td></tr>
+</tbody></table>
+<p><strong>Features:</strong></p>
+<ul>
+<li>Tree view with expandable directories</li>
+<li>File size display</li>
+<li>Keyboard navigation (arrow keys, Enter to expand/collapse)</li>
+<li>Auto-refresh on changes</li>
+</ul>
+<hr />
+<h2 id="process-monitor">process_monitor</h2>
+<p>Displays a list of running processes sorted by CPU usage, similar to <code>top</code>.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">process_monitor</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Processes</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>refresh_ms</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2000</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>refresh_ms</code></td><td>Integer?</td><td><code>2000</code></td><td>Refresh interval in milliseconds</td></tr>
+</tbody></table>
+<p><strong>Features:</strong></p>
+<ul>
+<li>PID, user, CPU %, memory %, and command columns</li>
+<li>Sorted by CPU usage</li>
+<li>Scrollable list</li>
+<li>Auto-refresh at the configured interval</li>
+</ul>
+<hr />
+<h2 id="log-viewer">log_viewer</h2>
+<p>Tails a log file and displays its contents with auto-scroll.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">log_viewer</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">System Log</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>file</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/var/log/system.log</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>file</code></td><td>String?</td><td><code>"/var/log/system.log"</code></td><td>Path to the log file to tail. Also accepts <code>path</code> as an alias</td></tr>
+</tbody></table>
+<p><strong>Features:</strong></p>
+<ul>
+<li>Tails the file (reads new content as it appears)</li>
+<li>Scrollable history (up to 10,000 lines)</li>
+<li>Incremental reads (efficient for large log files)</li>
+</ul>
+<hr />
+<h2 id="markdown-preview">markdown_preview</h2>
+<p>Renders Markdown content with syntax highlighting for headings, code blocks, lists, and emphasis.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># From a file</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">markdown_preview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">README</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>file</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp/README.md</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># Inline content</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">markdown_preview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Preview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>content</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;"># Hello</span><span>\n\n</span><span style="color: #C3E88D;">This is **bold** text.</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>file</code></td><td>String?</td><td>None</td><td>Markdown file to render. Also accepts <code>path</code> as an alias</td></tr>
+<tr><td><code>content</code></td><td>String?</td><td>None</td><td>Inline Markdown content (used when no <code>file</code> is specified)</td></tr>
+</tbody></table>
+<p><strong>Features:</strong></p>
+<ul>
+<li>Heading rendering with color differentiation</li>
+<li>Code block highlighting</li>
+<li>Bold and italic text support</li>
+<li>Scrollable content</li>
+</ul>
+<hr />
+<h2 id="system-info">system_info</h2>
+<p>Displays live system information including hostname, OS version, CPU, memory, disk, and network statistics.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">system_info</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">System</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>refresh_ms</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3000</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>refresh_ms</code></td><td>Integer?</td><td><code>3000</code></td><td>Refresh interval in milliseconds</td></tr>
+</tbody></table>
+<p><strong>Features:</strong></p>
+<ul>
+<li>Hostname and OS version</li>
+<li>System uptime and load averages</li>
+<li>CPU usage percentage</li>
+<li>Memory usage</li>
+<li>Disk usage</li>
+<li>Network interface information</li>
+</ul>
+<hr />
+<h2 id="git-status">git_status</h2>
+<p>Displays Git repository status, including branch, modified files, and recent log.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">git_status</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Git</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>repo</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>repo</code></td><td>String?</td><td><code>"."</code></td><td>Path to the Git repository. Also accepts <code>path</code> as an alias</td></tr>
+</tbody></table>
+<p><strong>Features:</strong></p>
+<ul>
+<li>Current branch display</li>
+<li>Modified/staged/untracked file listing with status indicators</li>
+<li>Recent commit log</li>
+<li>Multiple views: Status, Log, Diff</li>
+<li>Auto-refresh on changes</li>
+</ul>
+<hr />
+<h2 id="mixing-plugin-types">Mixing Plugin Types</h2>
+<p>You can combine any plugin types in a single session. Here is an example that uses five different types in a 2x3 grid:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Full Stack Dev</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span></span>
+<span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Shell</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">DEV</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Server</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">npm run dev</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">webview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Preview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>url</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">http://localhost:3000</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">file_browser</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Files</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>path</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">git_status</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Git</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>repo</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">system_info</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">System</span><span style="color: #89DDFF;">&quot;</span></span></code></pre>
+    </article>
+</div>
+
+    </main>
+
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-cols">
+                <div class="footer-col">
+                    <h4>Documentation</h4>
+                    <a href="/docs/installation">Installation</a>
+                    <a href="/docs/configuration">Configuration</a>
+                    <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Features</h4>
+                    <a href="/docs/plugins">Plugins</a>
+                    <a href="/docs/text-tap-api">Text Tap API</a>
+                    <a href="/examples">Examples</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Project</h4>
+                    <a href="https://github.com/keyvez/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+                    <a href="https://github.com/keyvez/trm/issues" rel="noopener noreferrer" target="_blank">Issues</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>trm is MIT-licensed open source software.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

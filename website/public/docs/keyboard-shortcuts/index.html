@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Keyboard Shortcuts — AI-Native Terminal Emulator</title>
+    <meta name="description" content="Complete list of keyboard shortcuts for trm.">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
+    
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="" class="nav-logo">
+                <img src="/images/icon.png" alt="trm" class="nav-logo-icon" width="28" height="28">
+                <span class="nav-logo-text">trm</span>
+            </a>
+            <div class="nav-links">
+                <a href="/docs/installation">Install</a>
+                <a href="/docs/configuration">Config</a>
+                <a href="/docs/plugins">Plugins</a>
+                <a href="/docs/text-tap-api">API</a>
+                <a href="/docs/keyboard-shortcuts">Shortcuts</a>
+                <a href="https://github.com/keyvez/trm" class="nav-github" rel="noopener noreferrer" target="_blank">GitHub</a>
+            </div>
+            <button class="nav-toggle" aria-label="Toggle navigation" onclick="document.querySelector('.nav-links').classList.toggle('nav-links-open')">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+
+    <main>
+        
+<div class="docs-layout">
+    <aside class="docs-sidebar">
+        <nav class="docs-nav">
+            <h4>Documentation</h4>
+            <a href="/docs/installation" >Installation</a>
+            <a href="/docs/configuration" >Configuration</a>
+            <a href="/docs/keyboard-shortcuts" >Keyboard Shortcuts</a>
+            <a href="/docs/plugins" >Plugins</a>
+            <a href="/docs/text-tap-api" >Text Tap API</a>
+            <h4>Resources</h4>
+            <a href="/examples">Examples</a>
+            <a href="https://github.com/anthropics/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+        </nav>
+    </aside>
+    <article class="docs-content">
+        <h1>Keyboard Shortcuts</h1>
+        <p>All keyboard shortcuts are hardcoded and cannot be customized via configuration. On macOS, <code>Cmd</code> refers to the Command key.</p>
+<h2 id="pane-management">Pane Management</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd+N</code></td><td>Add a new pane to the right in the current row</td></tr>
+<tr><td><code>Cmd+Option+N</code></td><td>Add a new row with one pane</td></tr>
+<tr><td><code>Cmd+Shift+N</code></td><td>Open a new window</td></tr>
+<tr><td><code>Cmd+W</code></td><td>Close the focused pane</td></tr>
+<tr><td><code>Cmd+R</code></td><td>Rename the focused pane (opens rename overlay)</td></tr>
+</tbody></table>
+<h2 id="pane-navigation">Pane Navigation</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd+1</code> through <code>Cmd+9</code></td><td>Jump to pane by number (1-indexed)</td></tr>
+<tr><td><code>Cmd+]</code></td><td>Focus the next pane</td></tr>
+<tr><td><code>Cmd+[</code></td><td>Focus the previous pane</td></tr>
+<tr><td><code>Cmd+Shift+Left</code></td><td>Swap focused pane with the neighbor to the left</td></tr>
+<tr><td><code>Cmd+Shift+Right</code></td><td>Swap focused pane with the neighbor to the right</td></tr>
+<tr><td><code>Cmd+Shift+Up</code></td><td>Swap focused pane with the neighbor above</td></tr>
+<tr><td><code>Cmd+Shift+Down</code></td><td>Swap focused pane with the neighbor below</td></tr>
+</tbody></table>
+<h2 id="font-size">Font Size</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd++</code> / <code>Cmd+=</code></td><td>Increase font size by 2pt</td></tr>
+<tr><td><code>Cmd+-</code></td><td>Decrease font size by 2pt</td></tr>
+<tr><td><code>Cmd+0</code></td><td>Reset font size to the configured default</td></tr>
+</tbody></table>
+<h2 id="broadcast-and-multi-select">Broadcast and Multi-Select</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd+Shift+B</code></td><td>Toggle broadcast mode (type in all terminal panes at once)</td></tr>
+<tr><td><code>Shift+Click+Drag</code></td><td>Rectangle-select multiple panes</td></tr>
+<tr><td><code>Cmd+Click</code></td><td>Toggle a single pane in/out of the selection</td></tr>
+<tr><td><code>Cmd+Shift+A</code></td><td>Select all panes</td></tr>
+<tr><td><code>Cmd+Shift+D</code></td><td>Deselect all panes</td></tr>
+</tbody></table>
+<p>When multiple panes are selected, the command overlay targets only those panes.</p>
+<h2 id="command-palette">Command Palette</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd+Shift+Enter</code></td><td>Open the command palette (AI mode by default)</td></tr>
+<tr><td><code>Option+Option</code></td><td>Double-tap Option within 400ms to open the command palette</td></tr>
+</tbody></table>
+<h3 id="command-palette-modes">Command Palette Modes</h3>
+<table><thead><tr><th>Mode</th><th>Prefix</th><th>Description</th></tr></thead><tbody>
+<tr><td>AI</td><td>(none)</td><td>Default. Send a prompt to the LLM for intelligent terminal control</td></tr>
+<tr><td>Search</td><td><code>@</code></td><td>Fuzzy search over built-in commands</td></tr>
+<tr><td>Command</td><td><code>!</code></td><td>Send raw command to focused/targeted panes</td></tr>
+</tbody></table>
+<h3 id="inside-the-command-palette">Inside the Command Palette</h3>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Escape</code></td><td>Close the palette</td></tr>
+<tr><td><code>Enter</code></td><td>Submit the prompt / execute the selected command</td></tr>
+<tr><td><code>Up</code> / <code>Down</code></td><td>Navigate search results (in Search mode)</td></tr>
+<tr><td><code>Backspace</code></td><td>Delete last character</td></tr>
+<tr><td><code>Space</code></td><td>Toggle pane selection (when in target mode)</td></tr>
+</tbody></table>
+<h2 id="pane-overlaying">Pane Overlaying</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd+Shift+O</code></td><td>Add an overlay background pane to the current cell</td></tr>
+<tr><td><code>Cmd+Shift+}</code></td><td>Swap foreground and background layers</td></tr>
+<tr><td><code>Cmd+Shift+W</code></td><td>Close the overlay (background) pane</td></tr>
+<tr><td><code>Tab</code></td><td>Toggle focus between foreground and background layers</td></tr>
+</tbody></table>
+<h2 id="rename-overlay">Rename Overlay</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Escape</code></td><td>Cancel rename</td></tr>
+<tr><td><code>Enter</code></td><td>Confirm rename</td></tr>
+<tr><td><code>Backspace</code></td><td>Delete last character</td></tr>
+</tbody></table>
+<h2 id="help-overlay">Help Overlay</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd+/</code> or <code>Cmd+?</code></td><td>Toggle the help overlay</td></tr>
+<tr><td><code>Escape</code></td><td>Close the help overlay</td></tr>
+<tr><td><code>Up</code> / <code>k</code></td><td>Scroll up</td></tr>
+<tr><td><code>Down</code> / <code>j</code></td><td>Scroll down</td></tr>
+<tr><td><code>Page Up</code></td><td>Scroll up 10 lines</td></tr>
+<tr><td><code>Page Down</code></td><td>Scroll down 10 lines</td></tr>
+<tr><td><code>Home</code></td><td>Scroll to top</td></tr>
+</tbody></table>
+<h2 id="text-selection">Text Selection</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Click+Drag</code></td><td>Select text in a terminal pane</td></tr>
+<tr><td><code>Double-Click</code></td><td>Select a word</td></tr>
+<tr><td><code>Ctrl+Click</code></td><td>Select contiguous non-space text (URLs, paths) across wrapped lines</td></tr>
+<tr><td><code>Ctrl+Click+Drag</code></td><td>Extend selection by space boundaries, crossing all line breaks</td></tr>
+<tr><td><code>Escape</code></td><td>Clear the current selection</td></tr>
+</tbody></table>
+<h2 id="other">Other</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd+,</code></td><td>Open <code>config.toml</code> in your default editor</td></tr>
+</tbody></table>
+<h2 id="terminal-input">Terminal Input</h2>
+<p>Standard terminal key sequences are forwarded to the focused pane:</p>
+<ul>
+<li><code>Enter</code>, <code>Backspace</code>, <code>Tab</code>, <code>Escape</code></li>
+<li>Arrow keys (<code>Up</code>, <code>Down</code>, <code>Left</code>, <code>Right</code>)</li>
+<li><code>Home</code>, <code>End</code>, <code>Page Up</code>, <code>Page Down</code></li>
+<li><code>Insert</code>, <code>Delete</code></li>
+<li><code>F1</code> through <code>F12</code></li>
+<li><code>Ctrl+C</code>, <code>Ctrl+D</code>, <code>Ctrl+Z</code>, and all other Ctrl combinations</li>
+</ul>
+
+    </article>
+</div>
+
+    </main>
+
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-cols">
+                <div class="footer-col">
+                    <h4>Documentation</h4>
+                    <a href="/docs/installation">Installation</a>
+                    <a href="/docs/configuration">Configuration</a>
+                    <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Features</h4>
+                    <a href="/docs/plugins">Plugins</a>
+                    <a href="/docs/text-tap-api">Text Tap API</a>
+                    <a href="/examples">Examples</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Project</h4>
+                    <a href="https://github.com/keyvez/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+                    <a href="https://github.com/keyvez/trm/issues" rel="noopener noreferrer" target="_blank">Issues</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>trm is MIT-licensed open source software.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

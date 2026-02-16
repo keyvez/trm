@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Text Tap API — AI-Native Terminal Emulator</title>
+    <meta name="description" content="Protocol reference for trm&#x27;s Text Tap API: a Unix domain socket interface for external process integration.">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
+    
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="" class="nav-logo">
+                <img src="/images/icon.png" alt="trm" class="nav-logo-icon" width="28" height="28">
+                <span class="nav-logo-text">trm</span>
+            </a>
+            <div class="nav-links">
+                <a href="/docs/installation">Install</a>
+                <a href="/docs/configuration">Config</a>
+                <a href="/docs/plugins">Plugins</a>
+                <a href="/docs/text-tap-api">API</a>
+                <a href="/docs/keyboard-shortcuts">Shortcuts</a>
+                <a href="https://github.com/keyvez/trm" class="nav-github" rel="noopener noreferrer" target="_blank">GitHub</a>
+            </div>
+            <button class="nav-toggle" aria-label="Toggle navigation" onclick="document.querySelector('.nav-links').classList.toggle('nav-links-open')">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+
+    <main>
+        
+<div class="docs-layout">
+    <aside class="docs-sidebar">
+        <nav class="docs-nav">
+            <h4>Documentation</h4>
+            <a href="/docs/installation" >Installation</a>
+            <a href="/docs/configuration" >Configuration</a>
+            <a href="/docs/keyboard-shortcuts" >Keyboard Shortcuts</a>
+            <a href="/docs/plugins" >Plugins</a>
+            <a href="/docs/text-tap-api" >Text Tap API</a>
+            <h4>Resources</h4>
+            <a href="/examples">Examples</a>
+            <a href="https://github.com/anthropics/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+        </nav>
+    </aside>
+    <article class="docs-content">
+        <h1>Text Tap API</h1>
+        <p>The Text Tap API is a Unix domain socket server that lets external processes subscribe to terminal output, send input to panes, and execute structured actions. It enables scripting, automation, and integration with external tools.</p>
+<h2 id="configuration">Configuration</h2>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">text_tap</span><span style="color: #89DDFF;">]</span></span>
+<span class="giallo-l"><span>enabled</span><span style="color: #89DDFF;"> =</span><span style="color: #FF9CAC;"> true</span></span>
+<span class="giallo-l"><span>socket_path</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/tmp/trm.sock</span><span style="color: #89DDFF;">&quot;</span></span></code></pre>
+<p>When <code>enabled</code> is <code>true</code> (the default), trm listens on the specified Unix domain socket. Any process on the system can connect and interact with trm using the newline-delimited JSON protocol described below.</p>
+<h2 id="protocol">Protocol</h2>
+<p>All communication uses <strong>newline-delimited JSON</strong> over a Unix domain socket. Each message is a single line of JSON terminated by <code>\n</code>.</p>
+<h3 id="connection">Connection</h3>
+<p>Connect to the socket using any Unix domain socket client:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># Using socat</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">socat</span><span style="color: #C3E88D;"> - UNIX-CONNECT:/tmp/trm.sock</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># Using netcat (if it supports Unix sockets)</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">nc</span><span style="color: #C3E88D;"> -U /tmp/trm.sock</span></span></code></pre>
+<p>Or programmatically in Python:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="python"><span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">import</span><span> socket</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">import</span><span> json</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>sock</span><span style="color: #89DDFF;"> =</span><span> socket</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">socket</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">socket</span><span style="color: #89DDFF;">.</span><span style="color: #F07178;">AF_UNIX</span><span style="color: #89DDFF;">,</span><span style="color: #82AAFF;"> socket</span><span style="color: #89DDFF;">.</span><span style="color: #F07178;">SOCK_STREAM</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span>sock</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">connect</span><span style="color: #89DDFF;">(&quot;</span><span style="color: #C3E88D;">/tmp/trm.sock</span><span style="color: #89DDFF;">&quot;)</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #C792EA;">def</span><span style="color: #82AAFF;"> send</span><span style="color: #89DDFF;">(</span><span style="font-style: italic;">msg</span><span style="color: #89DDFF;">):</span></span>
+<span class="giallo-l"><span>    sock</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">sendall</span><span style="color: #89DDFF;">((</span><span style="color: #82AAFF;">json</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">dumps</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">msg</span><span style="color: #89DDFF;">) + &quot;</span><span>\n</span><span style="color: #89DDFF;">&quot;).</span><span style="color: #82AAFF;">encode</span><span style="color: #89DDFF;">())</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #C792EA;">def</span><span style="color: #82AAFF;"> recv</span><span style="color: #89DDFF;">():</span></span>
+<span class="giallo-l"><span>    data</span><span style="color: #89DDFF;"> =</span><span style="color: #C792EA;"> b</span><span style="color: #89DDFF;">&quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">    while</span><span style="color: #89DDFF;"> not</span><span> data</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">endswith</span><span style="color: #89DDFF;">(</span><span style="color: #C792EA;">b</span><span style="color: #89DDFF;">&quot;</span><span>\n</span><span style="color: #89DDFF;">&quot;):</span></span>
+<span class="giallo-l"><span>        data</span><span style="color: #89DDFF;"> +=</span><span> sock</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">recv</span><span style="color: #89DDFF;">(</span><span style="color: #F78C6C;">4096</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">    return</span><span> json</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">loads</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">data</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">decode</span><span style="color: #89DDFF;">())</span></span></code></pre>
+<hr />
+<h2 id="client-to-server-commands">Client-to-Server Commands</h2>
+<h3 id="list">list</h3>
+<p>List the number of available panes.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">list</span><span style="color: #89DDFF;">&quot;: true}</span></span></code></pre>
+<p><strong>Response:</strong></p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">panes</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 9</span><span style="color: #89DDFF;">}</span></span></code></pre><h3 id="subscribe">subscribe</h3>
+<p>Subscribe to live content updates from panes. New clients are automatically subscribed to all panes.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;">// Subscribe to all panes</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">subscribe</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">all</span><span style="color: #89DDFF;">&quot;}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;">// Subscribe to a specific pane (0-indexed)</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">subscribe</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">}</span></span></code></pre>
+<p>Once subscribed, the server sends content updates whenever the pane's visible content changes (throttled to at most one update per 250ms per pane).</p>
+<h3 id="unsubscribe">unsubscribe</h3>
+<p>Stop receiving updates from a specific pane.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">unsubscribe</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">}</span></span></code></pre><h3 id="send">send</h3>
+<p>Send raw input text to one or more panes. The input is written directly to the pane's PTY, so include <code>\r</code> for Enter.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;">// Send to a specific pane</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">send</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">, &quot;</span><span style="color: #C792EA;">input</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">ls -la</span><span>\r</span><span style="color: #89DDFF;">&quot;}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;">// Send to all panes</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">send</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">all</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #C792EA;">input</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">echo hello</span><span>\r</span><span style="color: #89DDFF;">&quot;}</span></span></code></pre>
+<p><strong>Response:</strong></p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">ok</span><span style="color: #89DDFF;">&quot;: true}</span></span></code></pre><h3 id="action">action</h3>
+<p>Execute a structured <code>TermaniaAction</code>. This is the most powerful command, supporting pane lifecycle management, metadata changes, navigation, and more.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">send_command</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">, &quot;</span><span style="color: #FFCB6B;">command</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">ls -la</span><span style="color: #89DDFF;">&quot;}}</span></span></code></pre>
+<p><strong>Response:</strong></p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">ok</span><span style="color: #89DDFF;">&quot;: true}</span></span></code></pre>
+<hr />
+<h2 id="server-to-client-messages">Server-to-Client Messages</h2>
+<h3 id="content-updates">Content updates</h3>
+<p>Sent to subscribed clients when a pane's visible content changes.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">, &quot;</span><span style="color: #C792EA;">content</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">user@host:~$ ls</span><span>\n</span><span style="color: #C3E88D;">Documents  Downloads  Desktop</span><span>\n</span><span style="color: #C3E88D;">user@host:~$ </span><span style="color: #89DDFF;">&quot;}</span></span></code></pre><h3 id="pane-count">Pane count</h3>
+<p>Response to a <code>list</code> command.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">panes</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 9</span><span style="color: #89DDFF;">}</span></span></code></pre><h3 id="acknowledgment">Acknowledgment</h3>
+<p>Response to <code>send</code> and <code>action</code> commands.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">ok</span><span style="color: #89DDFF;">&quot;: true}</span></span></code></pre><h3 id="error">Error</h3>
+<p>Response when an <code>action</code> command has an invalid format.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">error</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">invalid action format</span><span style="color: #89DDFF;">&quot;}</span></span></code></pre>
+<hr />
+<h2 id="termaniaaction-reference">TermaniaAction Reference</h2>
+<p>The <code>action</code> command accepts any <code>TermaniaAction</code> as its value. These are the same actions that the LLM integration uses internally.</p>
+<h3 id="terminal-i-o">Terminal I/O</h3>
+<h4 id="send-command">send_command</h4>
+<p>Send a command to a specific pane (appends <code>\r</code> automatically).</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">send_command</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">, &quot;</span><span style="color: #FFCB6B;">command</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">ls -la</span><span style="color: #89DDFF;">&quot;}}</span></span></code></pre><h4 id="send-to-all">send_to_all</h4>
+<p>Send a command to all terminal panes.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">send_to_all</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">command</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">clear</span><span style="color: #89DDFF;">&quot;}}</span></span></code></pre><h3 id="pane-metadata">Pane Metadata</h3>
+<h4 id="set-title">set_title</h4>
+<p>Rename a pane's title bar.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">set_title</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">, &quot;</span><span style="color: #FFCB6B;">title</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">My Shell</span><span style="color: #89DDFF;">&quot;}}</span></span></code></pre><h4 id="set-watermark">set_watermark</h4>
+<p>Set a large background watermark on a pane.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">set_watermark</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">, &quot;</span><span style="color: #FFCB6B;">watermark</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">PROD</span><span style="color: #89DDFF;">&quot;}}</span></span></code></pre><h4 id="clear-watermark">clear_watermark</h4>
+<p>Remove a pane's watermark.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">clear_watermark</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">}}</span></span></code></pre><h3 id="webview-control">WebView Control</h3>
+<h4 id="navigate">navigate</h4>
+<p>Navigate a webview pane to a new URL.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">navigate</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 3</span><span style="color: #89DDFF;">, &quot;</span><span style="color: #FFCB6B;">url</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">https://example.com</span><span style="color: #89DDFF;">&quot;}}</span></span></code></pre><h3 id="notes-control">Notes Control</h3>
+<h4 id="set-content">set_content</h4>
+<p>Set the text content of a notes pane.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">set_content</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 4</span><span style="color: #89DDFF;">, &quot;</span><span style="color: #FFCB6B;">content</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">Updated notes content</span><span style="color: #89DDFF;">&quot;}}</span></span></code></pre><h3 id="pane-lifecycle">Pane Lifecycle</h3>
+<h4 id="spawn-pane">spawn_pane</h4>
+<p>Create a new pane. All fields except <code>pane_type</code> are optional.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">spawn_pane</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">pane_type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">title</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">New Shell</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">command</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">/bin/bash</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">cwd</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">~/projects</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">watermark</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">NEW</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">}}</span></span></code></pre>
+<p>Other optional fields: <code>url</code> (for webview), <code>content</code> (for notes), <code>row</code>.</p>
+<h4 id="close-pane">close_pane</h4>
+<p>Close a pane by index.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">close_pane</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 2</span><span style="color: #89DDFF;">}}</span></span></code></pre><h4 id="replace-pane">replace_pane</h4>
+<p>Replace a pane's type in-place (e.g., swap a terminal for a webview).</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">replace_pane</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">pane_type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">webview</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">title</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">Docs</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">url</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">https://docs.rs</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">}}</span></span></code></pre><h3 id="layout">Layout</h3>
+<h4 id="swap-panes">swap_panes</h4>
+<p>Swap two panes' positions in the grid.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">swap_panes</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">a</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">, &quot;</span><span style="color: #FFCB6B;">b</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 4</span><span style="color: #89DDFF;">}}</span></span></code></pre><h4 id="focus-pane">focus_pane</h4>
+<p>Focus a specific pane.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">focus_pane</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">pane</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 2</span><span style="color: #89DDFF;">}}</span></span></code></pre><h3 id="user-communication">User Communication</h3>
+<h4 id="message">message</h4>
+<p>Display a message to the user (informational, no side effects on panes).</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{&quot;</span><span style="color: #C792EA;">action</span><span style="color: #89DDFF;">&quot;: {&quot;</span><span style="color: #FFCB6B;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">message</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #FFCB6B;">text</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">Build completed successfully!</span><span style="color: #89DDFF;">&quot;}}</span></span></code></pre>
+<hr />
+<h2 id="example-automation-script">Example: Automation Script</h2>
+<p>Here is a complete Python script that connects to trm, lists panes, sends a command, and subscribes to output:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="python"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;">#!/usr/bin/env python3</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">&quot;&quot;&quot;</span><span style="color: #464B5D;font-style: italic;">Example Text Tap client for trm.</span><span style="color: #89DDFF;font-style: italic;">&quot;&quot;&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">import</span><span> socket</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">import</span><span> json</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">import</span><span> sys</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">import</span><span> time</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>SOCKET_PATH</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/tmp/trm.sock</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #C792EA;">def</span><span style="color: #82AAFF;"> connect</span><span style="color: #89DDFF;">():</span></span>
+<span class="giallo-l"><span>    sock</span><span style="color: #89DDFF;"> =</span><span> socket</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">socket</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">socket</span><span style="color: #89DDFF;">.</span><span style="color: #F07178;">AF_UNIX</span><span style="color: #89DDFF;">,</span><span style="color: #82AAFF;"> socket</span><span style="color: #89DDFF;">.</span><span style="color: #F07178;">SOCK_STREAM</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span>    sock</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">connect</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">SOCKET_PATH</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">    return</span><span> sock</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #C792EA;">def</span><span style="color: #82AAFF;"> send_msg</span><span style="color: #89DDFF;">(</span><span style="font-style: italic;">sock</span><span style="color: #89DDFF;">,</span><span style="font-style: italic;"> msg</span><span style="color: #89DDFF;">):</span></span>
+<span class="giallo-l"><span>    sock</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">sendall</span><span style="color: #89DDFF;">((</span><span style="color: #82AAFF;">json</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">dumps</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">msg</span><span style="color: #89DDFF;">) + &quot;</span><span>\n</span><span style="color: #89DDFF;">&quot;).</span><span style="color: #82AAFF;">encode</span><span style="color: #89DDFF;">())</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #C792EA;">def</span><span style="color: #82AAFF;"> recv_msg</span><span style="color: #89DDFF;">(</span><span style="font-style: italic;">sock</span><span style="color: #89DDFF;">):</span></span>
+<span class="giallo-l"><span>    data</span><span style="color: #89DDFF;"> =</span><span style="color: #C792EA;"> b</span><span style="color: #89DDFF;">&quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">    while</span><span style="color: #89DDFF;"> not</span><span> data</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">endswith</span><span style="color: #89DDFF;">(</span><span style="color: #C792EA;">b</span><span style="color: #89DDFF;">&quot;</span><span>\n</span><span style="color: #89DDFF;">&quot;):</span></span>
+<span class="giallo-l"><span>        chunk</span><span style="color: #89DDFF;"> =</span><span> sock</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">recv</span><span style="color: #89DDFF;">(</span><span style="color: #F78C6C;">4096</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">        if</span><span style="color: #89DDFF;"> not</span><span> chunk</span><span style="color: #89DDFF;">:</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">            raise</span><span style="color: #FFCB6B;"> ConnectionError</span><span style="color: #89DDFF;">(&quot;</span><span style="color: #C3E88D;">Socket closed</span><span style="color: #89DDFF;">&quot;)</span></span>
+<span class="giallo-l"><span>        data</span><span style="color: #89DDFF;"> +=</span><span> chunk</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">    return</span><span> json</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">loads</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">data</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">decode</span><span style="color: #89DDFF;">().</span><span style="color: #82AAFF;">strip</span><span style="color: #89DDFF;">())</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #C792EA;">def</span><span style="color: #82AAFF;"> main</span><span style="color: #89DDFF;">():</span></span>
+<span class="giallo-l"><span>    sock</span><span style="color: #89DDFF;"> =</span><span style="color: #82AAFF;"> connect</span><span style="color: #89DDFF;">()</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;">    # List panes</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">    send_msg</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">sock</span><span style="color: #89DDFF;">, {&quot;</span><span style="color: #C3E88D;">list</span><span style="color: #89DDFF;">&quot;: True})</span></span>
+<span class="giallo-l"><span>    resp</span><span style="color: #89DDFF;"> =</span><span style="color: #82AAFF;"> recv_msg</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">sock</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">    print</span><span style="color: #89DDFF;">(</span><span style="color: #C792EA;">f</span><span style="color: #C3E88D;">&quot;Panes: </span><span style="color: #F78C6C;">{</span><span style="color: #82AAFF;">resp</span><span style="color: #89DDFF;">[&#39;</span><span style="color: #C3E88D;">panes</span><span style="color: #89DDFF;">&#39;]</span><span style="color: #F78C6C;">}</span><span style="color: #C3E88D;">&quot;</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;">    # Send a command to pane 0</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">    send_msg</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">sock</span><span style="color: #89DDFF;">, {&quot;</span><span style="color: #C3E88D;">send</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">, &quot;</span><span style="color: #C3E88D;">input</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">echo &#39;Hello from Text Tap!&#39;</span><span>\r</span><span style="color: #89DDFF;">&quot;})</span></span>
+<span class="giallo-l"><span>    resp</span><span style="color: #89DDFF;"> =</span><span style="color: #82AAFF;"> recv_msg</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">sock</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">    print</span><span style="color: #89DDFF;">(</span><span style="color: #C792EA;">f</span><span style="color: #C3E88D;">&quot;Send result: </span><span style="color: #F78C6C;">{</span><span style="color: #82AAFF;">resp</span><span style="color: #F78C6C;">}</span><span style="color: #C3E88D;">&quot;</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;">    # Subscribe to pane 0 and print updates</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">    send_msg</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">sock</span><span style="color: #89DDFF;">, {&quot;</span><span style="color: #C3E88D;">subscribe</span><span style="color: #89DDFF;">&quot;:</span><span style="color: #F78C6C;"> 0</span><span style="color: #89DDFF;">})</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">    print</span><span style="color: #89DDFF;">(&quot;</span><span style="color: #C3E88D;">Subscribed to pane 0. Listening for updates...</span><span style="color: #89DDFF;">&quot;)</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">    try</span><span style="color: #89DDFF;">:</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">        while</span><span style="color: #89DDFF;"> True:</span></span>
+<span class="giallo-l"><span>            msg</span><span style="color: #89DDFF;"> =</span><span style="color: #82AAFF;"> recv_msg</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">sock</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">            if</span><span style="color: #89DDFF;"> &quot;</span><span style="color: #C3E88D;">content</span><span style="color: #89DDFF;">&quot; in</span><span> msg</span><span style="color: #89DDFF;">:</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">                print</span><span style="color: #89DDFF;">(</span><span style="color: #C792EA;">f</span><span style="color: #C3E88D;">&quot;[Pane </span><span style="color: #F78C6C;">{</span><span style="color: #82AAFF;">msg</span><span style="color: #89DDFF;">[&#39;</span><span style="color: #C3E88D;">pane</span><span style="color: #89DDFF;">&#39;]</span><span style="color: #F78C6C;">}</span><span style="color: #C3E88D;">] </span><span style="color: #F78C6C;">{</span><span style="color: #82AAFF;">msg</span><span style="color: #89DDFF;">[&#39;</span><span style="color: #C3E88D;">content</span><span style="color: #89DDFF;">&#39;][:</span><span style="color: #F78C6C;">80</span><span style="color: #89DDFF;">]</span><span style="color: #F78C6C;">}</span><span style="color: #C3E88D;">...&quot;</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">    except</span><span style="color: #FFCB6B;"> KeyboardInterrupt</span><span style="color: #89DDFF;">:</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">        pass</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">    finally</span><span style="color: #89DDFF;">:</span></span>
+<span class="giallo-l"><span>        sock</span><span style="color: #89DDFF;">.</span><span style="color: #82AAFF;">close</span><span style="color: #89DDFF;">()</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;font-style: italic;">if</span><span> __name__</span><span style="color: #89DDFF;"> == &quot;</span><span style="color: #C3E88D;">__main__</span><span style="color: #89DDFF;">&quot;:</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">    main</span><span style="color: #89DDFF;">()</span></span></code></pre>
+<hr />
+<h2 id="throttling">Throttling</h2>
+<p>Content broadcasts are throttled to at most one update per 250ms per pane. If the content has not changed since the last broadcast, no update is sent even if the interval has elapsed.</p>
+<h2 id="security">Security</h2>
+<p>The Text Tap socket is a local Unix domain socket with standard file permissions. Any process running as the same user can connect. If you need to restrict access, adjust the file permissions on the socket path or change <code>socket_path</code> to a location with restricted access.</p>
+
+    </article>
+</div>
+
+    </main>
+
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-cols">
+                <div class="footer-col">
+                    <h4>Documentation</h4>
+                    <a href="/docs/installation">Installation</a>
+                    <a href="/docs/configuration">Configuration</a>
+                    <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Features</h4>
+                    <a href="/docs/plugins">Plugins</a>
+                    <a href="/docs/text-tap-api">Text Tap API</a>
+                    <a href="/examples">Examples</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Project</h4>
+                    <a href="https://github.com/keyvez/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+                    <a href="https://github.com/keyvez/trm/issues" rel="noopener noreferrer" target="_blank">Issues</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>trm is MIT-licensed open source software.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

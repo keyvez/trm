@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuration — AI-Native Terminal Emulator</title>
+    <meta name="description" content="Complete reference for trm&#x27;s TOML configuration files.">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
+    
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="" class="nav-logo">
+                <img src="/images/icon.png" alt="trm" class="nav-logo-icon" width="28" height="28">
+                <span class="nav-logo-text">trm</span>
+            </a>
+            <div class="nav-links">
+                <a href="/docs/installation">Install</a>
+                <a href="/docs/configuration">Config</a>
+                <a href="/docs/plugins">Plugins</a>
+                <a href="/docs/text-tap-api">API</a>
+                <a href="/docs/keyboard-shortcuts">Shortcuts</a>
+                <a href="https://github.com/keyvez/trm" class="nav-github" rel="noopener noreferrer" target="_blank">GitHub</a>
+            </div>
+            <button class="nav-toggle" aria-label="Toggle navigation" onclick="document.querySelector('.nav-links').classList.toggle('nav-links-open')">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+
+    <main>
+        
+<div class="docs-layout">
+    <aside class="docs-sidebar">
+        <nav class="docs-nav">
+            <h4>Documentation</h4>
+            <a href="/docs/installation" >Installation</a>
+            <a href="/docs/configuration" >Configuration</a>
+            <a href="/docs/keyboard-shortcuts" >Keyboard Shortcuts</a>
+            <a href="/docs/plugins" >Plugins</a>
+            <a href="/docs/text-tap-api" >Text Tap API</a>
+            <h4>Resources</h4>
+            <a href="/examples">Examples</a>
+            <a href="https://github.com/anthropics/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+        </nav>
+    </aside>
+    <article class="docs-content">
+        <h1>Configuration</h1>
+        <p>trm uses TOML files for configuration, combining Ghostty's terminal settings with trm-specific features.</p>
+<h2 id="file-locations">File Locations</h2>
+<h3 id="config-toml-global">config.toml (global)</h3>
+<p>Looked up in this order:</p>
+<ol>
+<li><code>~/.config/trm/config.toml</code></li>
+<li><code>$XDG_CONFIG_HOME/trm/config.toml</code></li>
+<li>Platform-native config dir (e.g., <code>~/Library/Application Support/trm/config.toml</code> on macOS)</li>
+</ol>
+<p>A default <code>config.toml</code> is created automatically on first launch.</p>
+<h3 id="session-files">Session files</h3>
+<p>Looked up in this order:</p>
+<ol>
+<li>Explicit CLI argument: <code>trm --config path/to/session.toml</code></li>
+<li><code>./trm.toml</code> in the current working directory</li>
+<li><code>~/.config/trm/trm.toml</code></li>
+<li>Falls back to <code>[[panes]]</code> in <code>config.toml</code></li>
+</ol>
+<p>This means you can drop a <code>trm.toml</code> in any project directory and trm will automatically load it when launched from that directory.</p>
+<hr />
+<h2 id="font">[font]</h2>
+<p>Typography settings for all terminal panes. Only in <code>config.toml</code>.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">font</span><span style="color: #89DDFF;">]</span></span>
+<span class="giallo-l"><span>family</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">SF Mono</span><span style="color: #89DDFF;">&quot;</span><span style="color: #464B5D;font-style: italic;">         # Font family name</span></span>
+<span class="giallo-l"><span>size</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 14.0</span><span style="color: #464B5D;font-style: italic;">                # Font size in points</span></span>
+<span class="giallo-l"><span>line_height</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 1.2</span><span style="color: #464B5D;font-style: italic;">          # Line height multiplier (1.0 = tight)</span></span>
+<span class="giallo-l"><span>letter_spacing</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 0.0</span><span style="color: #464B5D;font-style: italic;">       # Extra horizontal spacing in pixels</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># bold_family = &quot;Menlo&quot;    # Optional: separate font for bold text</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>family</code></td><td>String</td><td><code>"SF Mono"</code></td><td>Font family name. Examples: <code>"JetBrains Mono"</code>, <code>"Menlo"</code>, <code>"Fira Code"</code>, <code>"Cascadia Code"</code></td></tr>
+<tr><td><code>size</code></td><td>Float</td><td><code>14.0</code></td><td>Font size in points</td></tr>
+<tr><td><code>line_height</code></td><td>Float</td><td><code>1.2</code></td><td>Line height multiplier</td></tr>
+<tr><td><code>letter_spacing</code></td><td>Float</td><td><code>0.0</code></td><td>Extra character spacing in pixels</td></tr>
+<tr><td><code>bold_family</code></td><td>String?</td><td><code>None</code></td><td>Optional separate font family for bold text</td></tr>
+</tbody></table>
+<hr />
+<h2 id="grid">[grid]</h2>
+<p>Grid layout for the pane tiling system. Only in <code>config.toml</code> (but <code>rows</code>/<code>cols</code> can be overridden by session files).</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">grid</span><span style="color: #89DDFF;">]</span></span>
+<span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
+<span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
+<span class="giallo-l"><span>gap</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 4</span></span>
+<span class="giallo-l"><span>inner_padding</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 4</span></span>
+<span class="giallo-l"><span>outer_padding</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 4</span></span>
+<span class="giallo-l"><span>title_bar_height</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 24</span></span>
+<span class="giallo-l"><span>border_radius</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 8</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>rows</code></td><td>Integer</td><td><code>1</code></td><td>Number of rows in the pane grid</td></tr>
+<tr><td><code>cols</code></td><td>Integer</td><td><code>1</code></td><td>Number of columns in the pane grid</td></tr>
+<tr><td><code>gap</code></td><td>Integer</td><td><code>4</code></td><td>Gap between panes in pixels</td></tr>
+<tr><td><code>inner_padding</code></td><td>Integer</td><td><code>4</code></td><td>Padding inside each pane (border to content)</td></tr>
+<tr><td><code>outer_padding</code></td><td>Integer</td><td><code>4</code></td><td>Padding around the entire grid</td></tr>
+<tr><td><code>title_bar_height</code></td><td>Integer</td><td><code>24</code></td><td>Height of each pane's title bar in pixels</td></tr>
+<tr><td><code>border_radius</code></td><td>Integer</td><td><code>8</code></td><td>Corner radius for pane borders (0 = sharp)</td></tr>
+</tbody></table>
+<hr />
+<h2 id="window">[window]</h2>
+<p>Initial window dimensions and title. Only in <code>config.toml</code> (title can be overridden by session).</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">window</span><span style="color: #89DDFF;">]</span></span>
+<span class="giallo-l"><span>width</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 1920</span></span>
+<span class="giallo-l"><span>height</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 1080</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">trm</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>width</code></td><td>Integer</td><td><code>1920</code></td><td>Initial window width in pixels</td></tr>
+<tr><td><code>height</code></td><td>Integer</td><td><code>1080</code></td><td>Initial window height in pixels</td></tr>
+<tr><td><code>title</code></td><td>String</td><td><code>"trm"</code></td><td>Window title (overridden by session-level <code>title</code>)</td></tr>
+</tbody></table>
+<hr />
+<h2 id="colors">[colors]</h2>
+<p>Color scheme for all terminal panes. All values are hex strings (<code>#RRGGBB</code> or <code>#RRGGBBAA</code>). Only in <code>config.toml</code>.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">colors</span><span style="color: #89DDFF;">]</span></span>
+<span class="giallo-l"><span>background</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#010409</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>foreground</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#e6edf3</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cursor</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#f0f6fc</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>selection</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#264f78</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>border</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#30363d</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>border_focused</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#58a6ff</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title_bg</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#0d1117</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title_fg</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#e6edf3</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>ansi</span><span style="color: #89DDFF;"> = [</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#0d1117</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 0  black</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#ff7b72</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 1  red</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#3fb950</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 2  green</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#d29922</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 3  yellow</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#58a6ff</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 4  blue</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#bc8cff</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 5  magenta</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#39d353</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 6  cyan</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#c9d1d9</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 7  white</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#484f58</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 8  bright black</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#ffa198</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 9  bright red</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#56d364</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 10 bright green</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#e3b341</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 11 bright yellow</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#79c0ff</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 12 bright blue</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#d2a8ff</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 13 bright magenta</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#56d364</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 14 bright cyan</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #C3E88D;">#f0f6fc</span><span style="color: #89DDFF;">&quot;,</span><span style="color: #464B5D;font-style: italic;">  # 15 bright white</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">]</span></span></code></pre><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>background</code></td><td><code>#010409</code></td><td>Background color for all panes</td></tr>
+<tr><td><code>foreground</code></td><td><code>#e6edf3</code></td><td>Default text/foreground color</td></tr>
+<tr><td><code>cursor</code></td><td><code>#f0f6fc</code></td><td>Cursor block color</td></tr>
+<tr><td><code>selection</code></td><td><code>#264f78</code></td><td>Text selection highlight</td></tr>
+<tr><td><code>border</code></td><td><code>#30363d</code></td><td>Unfocused pane border</td></tr>
+<tr><td><code>border_focused</code></td><td><code>#58a6ff</code></td><td>Focused pane border (bright blue)</td></tr>
+<tr><td><code>title_bg</code></td><td><code>#0d1117</code></td><td>Title bar background</td></tr>
+<tr><td><code>title_fg</code></td><td><code>#e6edf3</code></td><td>Title bar text</td></tr>
+<tr><td><code>ansi</code></td><td>(16 colors)</td><td>ANSI color palette: 8 normal + 8 bright</td></tr>
+</tbody></table>
+<hr />
+<h2 id="text-tap">[text_tap]</h2>
+<p>The Text Tap API server. See the <a href="/docs/text-tap-api/">Text Tap API</a> reference for protocol details. Only in <code>config.toml</code>.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">text_tap</span><span style="color: #89DDFF;">]</span></span>
+<span class="giallo-l"><span>enabled</span><span style="color: #89DDFF;"> =</span><span style="color: #FF9CAC;"> true</span></span>
+<span class="giallo-l"><span>socket_path</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/tmp/trm.sock</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>enabled</code></td><td>Boolean</td><td><code>true</code></td><td>Enable/disable the Unix socket server</td></tr>
+<tr><td><code>socket_path</code></td><td>String</td><td><code>"/tmp/trm.sock"</code></td><td>Path for the Unix domain socket</td></tr>
+</tbody></table>
+<hr />
+<h2 id="llm">[llm]</h2>
+<p>LLM integration for the AI command palette (<code>Cmd+Shift+Enter</code>). Supports Anthropic, OpenAI, Ollama, and custom OpenAI-compatible endpoints. Only in <code>config.toml</code>.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">llm</span><span style="color: #89DDFF;">]</span></span>
+<span class="giallo-l"><span>provider</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">anthropic</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># api_key = &quot;sk-...&quot;          # Or set ANTHROPIC_API_KEY env var</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># model = &quot;claude-sonnet-4-20250514&quot;</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># base_url = &quot;https://...&quot;    # For ollama/custom providers</span></span>
+<span class="giallo-l"><span>max_tokens</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 1024</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># system_prompt = &quot;You are a helpful terminal assistant.&quot;</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>provider</code></td><td>String</td><td><code>"anthropic"</code></td><td>LLM provider: <code>"anthropic"</code>, <code>"openai"</code>, <code>"ollama"</code>, <code>"custom"</code></td></tr>
+<tr><td><code>api_key</code></td><td>String?</td><td><code>None</code></td><td>API key (falls back to <code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code> env vars)</td></tr>
+<tr><td><code>model</code></td><td>String?</td><td><code>None</code></td><td>Model name. Defaults: Anthropic = <code>claude-sonnet-4-20250514</code>, OpenAI = <code>gpt-4o</code>, Ollama = <code>llama3</code></td></tr>
+<tr><td><code>base_url</code></td><td>String?</td><td><code>None</code></td><td>Base URL for Ollama/custom endpoints. Ollama default: <code>http://localhost:11434/v1</code></td></tr>
+<tr><td><code>max_tokens</code></td><td>Integer</td><td><code>1024</code></td><td>Maximum tokens in the LLM response</td></tr>
+<tr><td><code>system_prompt</code></td><td>String?</td><td><code>None</code></td><td>Custom system prompt override</td></tr>
+</tbody></table>
+<hr />
+<h2 id="panes">[[panes]]</h2>
+<p>Pane definitions. Each <code>[[panes]]</code> block defines one pane in the grid. Panes fill the grid left-to-right, top-to-bottom.</p>
+<p>Panes can appear in session files (<code>trm.toml</code>) or as a fallback in <code>config.toml</code>.</p>
+<h3 id="common-fields">Common fields</h3>
+<table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>type</code></td><td>String</td><td><code>"terminal"</code></td><td>Pane type (see <a href="/docs/plugins/">Plugins</a>)</td></tr>
+<tr><td><code>title</code></td><td>String?</td><td>Auto-generated</td><td>Custom title for the pane's title bar</td></tr>
+</tbody></table>
+<h3 id="terminal-pane-fields">Terminal pane fields</h3>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Dev Shell</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>command</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/bin/zsh</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">DEV</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">echo &#39;Hello!&#39;</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #C3E88D;">ls -la</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># env = [[&quot;NODE_ENV&quot;, &quot;development&quot;], [&quot;PORT&quot;, &quot;3000&quot;]]</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>command</code></td><td>String?</td><td><code>$SHELL</code></td><td>Shell or command to run</td></tr>
+<tr><td><code>cwd</code></td><td>String?</td><td>Inherited</td><td>Working directory (supports <code>~</code> expansion)</td></tr>
+<tr><td><code>watermark</code></td><td>String?</td><td><code>None</code></td><td>Large faded background text</td></tr>
+<tr><td><code>initial_commands</code></td><td>String[]?</td><td><code>None</code></td><td>Commands to run on startup</td></tr>
+<tr><td><code>env</code></td><td>[String, String][]?</td><td><code>None</code></td><td>Extra environment variables</td></tr>
+</tbody></table>
+<h3 id="webview-pane-fields">WebView pane fields</h3>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">webview</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Docs</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>url</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">https://docs.rs</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>url</code></td><td>String?</td><td><code>None</code></td><td>URL to load in the embedded browser</td></tr>
+</tbody></table>
+<h3 id="notes-pane-fields">Notes pane fields</h3>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">notes</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Scratch</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>content</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Type here...</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># file = &quot;~/notes.md&quot;    # For persistent notes</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>content</code></td><td>String?</td><td><code>None</code></td><td>Initial in-memory content</td></tr>
+<tr><td><code>file</code></td><td>String?</td><td><code>None</code></td><td>File path for persistent storage (auto-saved)</td></tr>
+</tbody></table>
+<h3 id="other-plugin-types">Other plugin types</h3>
+<p>See the <a href="/docs/plugins/">Plugins</a> reference for full details on all 10 plugin types and their specific configuration fields.</p>
+<hr />
+<h2 id="session-level-overrides">Session-Level Overrides</h2>
+<p>Session files (<code>trm.toml</code>) support these top-level keys that override <code>config.toml</code>:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">My Project</span><span style="color: #89DDFF;">&quot;</span><span style="color: #464B5D;font-style: italic;">     # Overrides [window] title</span></span>
+<span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span><span style="color: #464B5D;font-style: italic;">                 # Overrides [grid] rows</span></span>
+<span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span><span style="color: #464B5D;font-style: italic;">                 # Overrides [grid] cols</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># ... pane definitions</span></span></code></pre><h2 id="cli-usage">CLI Usage</h2>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #464B5D;font-style: italic;">                              # Default config/session</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> --config path/to/session.toml</span><span style="color: #464B5D;font-style: italic;">    # Specific session file</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> -h / --help</span><span style="color: #464B5D;font-style: italic;">                  # Print help</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> -v / --version</span><span style="color: #464B5D;font-style: italic;">               # Print version</span></span></code></pre><h2 id="environment-variables">Environment Variables</h2>
+<table><thead><tr><th>Variable</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>RUST_LOG</code></td><td>Log level (e.g., <code>RUST_LOG=debug trm</code>)</td></tr>
+<tr><td><code>SHELL</code></td><td>Default shell for terminal panes</td></tr>
+<tr><td><code>ANTHROPIC_API_KEY</code></td><td>Anthropic API key (fallback for <code>[llm]</code>)</td></tr>
+<tr><td><code>OPENAI_API_KEY</code></td><td>OpenAI API key (fallback for <code>[llm]</code>)</td></tr>
+</tbody></table>
+
+    </article>
+</div>
+
+    </main>
+
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-cols">
+                <div class="footer-col">
+                    <h4>Documentation</h4>
+                    <a href="/docs/installation">Installation</a>
+                    <a href="/docs/configuration">Configuration</a>
+                    <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Features</h4>
+                    <a href="/docs/plugins">Plugins</a>
+                    <a href="/docs/text-tap-api">Text Tap API</a>
+                    <a href="/examples">Examples</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Project</h4>
+                    <a href="https://github.com/keyvez/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+                    <a href="https://github.com/keyvez/trm/issues" rel="noopener noreferrer" target="_blank">Issues</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>trm is MIT-licensed open source software.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>
