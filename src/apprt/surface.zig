@@ -5,6 +5,7 @@ const apprt = @import("../apprt.zig");
 const build_config = @import("../build_config.zig");
 const App = @import("../App.zig");
 const Surface = @import("../Surface.zig");
+const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
 const Config = @import("../config.zig").Config;
@@ -182,6 +183,19 @@ pub fn newConfig(
 
     // Our allocator is our config's arena
     const alloc = copy._arena.?.allocator();
+
+    // New windows should always start from the user's home directory.
+    // We intentionally do this before any inheritance logic.
+    if (context == .window) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if ((internal_os.home(&buf) catch null)) |home| {
+            copy.@"working-directory" = try alloc.dupe(u8, home);
+        } else {
+            copy.@"working-directory" = null;
+        }
+
+        return copy;
+    }
 
     // Get our previously focused surface for some inherited values.
     const prev = app.focusedSurface();

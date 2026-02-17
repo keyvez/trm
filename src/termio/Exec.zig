@@ -575,6 +575,11 @@ const Subprocess = struct {
         @cInclude("unistd.h");
     });
 
+    const KILL_RETRY_SLEEP_NS = 10 * std.time.ns_per_ms;
+    const GETPGID_MAX_RETRIES: usize = 100;
+    const SIGHUP_MAX_RETRIES: usize = 200;
+    const SIGKILL_MAX_RETRIES: usize = 200;
+
     arena: std.heap.ArenaAllocator,
     cwd: ?[:0]const u8,
     env: ?EnvMap,
@@ -1145,38 +1150,73 @@ const Subprocess = struct {
     fn killPid(pid: c.pid_t) !void {
         const pgid = getpgid(pid) orelse return;
 
-        // It is possible to send a killpg between the time that
-        // our child process calls setsid but before or simultaneous
-        // to calling execve. In this case, the direct child dies
-        // but grandchildren survive. To work around this, we loop
-        // and repeatedly kill the process group until all
-        // descendents are well and truly dead. We will not rest
-        // until the entire family tree is obliterated.
-        while (true) {
-            switch (posix.errno(c.killpg(pgid, c.SIGHUP))) {
-                .SUCCESS => log.debug("process group killed pgid={}", .{pgid}),
+        if (try signalProcessGroupUntilExit(
+            pid,
+            pgid,
+            c.SIGHUP,
+            SIGHUP_MAX_RETRIES,
+        )) return;
+
+        log.warn(
+            "timed out waiting for process group to exit after SIGHUP pgid={}, escalating to SIGKILL",
+            .{pgid},
+        );
+
+        if (try signalProcessGroupUntilExit(
+            pid,
+            pgid,
+            c.SIGKILL,
+            SIGKILL_MAX_RETRIES,
+        )) return;
+
+        log.warn(
+            "timed out waiting for process group to exit after SIGKILL pgid={}; giving up to avoid hang",
+            .{pgid},
+        );
+        return error.KillFailed;
+    }
+
+    fn signalProcessGroupUntilExit(
+        pid: c.pid_t,
+        pgid: c.pid_t,
+        signal: @TypeOf(c.SIGHUP),
+        retries: usize,
+    ) !bool {
+        var attempt: usize = 0;
+        while (attempt < retries) : (attempt += 1) {
+            switch (posix.errno(c.killpg(pgid, signal))) {
+                .SUCCESS => {},
+                .SRCH => return true,
                 else => |err| killpg: {
                     if ((comptime builtin.target.os.tag.isDarwin()) and
                         err == .PERM)
                     {
-                        log.debug("killpg failed with EPERM, expected on Darwin and ignoring", .{});
+                        log.debug(
+                            "killpg failed with EPERM on Darwin and ignoring signal={} pgid={}",
+                            .{ signal, pgid },
+                        );
                         break :killpg;
                     }
 
-                    log.warn("error killing process group pgid={} err={}", .{ pgid, err });
+                    log.warn(
+                        "error killing process group pgid={} signal={} err={}",
+                        .{ pgid, signal, err },
+                    );
                     return error.KillFailed;
                 },
             }
 
             // See Command.zig wait for why we specify WNOHANG.
-            // The gist is that it lets us detect when children
-            // are still alive without blocking so that we can
-            // kill them again.
+            // The gist is that it lets us detect when children are still
+            // alive without blocking so that we can kill them again.
             const res = posix.waitpid(pid, std.c.W.NOHANG);
-            log.debug("waitpid result={}", .{res.pid});
-            if (res.pid != 0) break;
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            log.debug("waitpid result={} signal={}", .{ res.pid, signal });
+            if (res.pid != 0) return true;
+            std.Thread.sleep(KILL_RETRY_SLEEP_NS);
         }
+
+        const res = posix.waitpid(pid, std.c.W.NOHANG);
+        return res.pid != 0;
     }
 
     fn getpgid(pid: c.pid_t) ?c.pid_t {
@@ -1185,31 +1225,49 @@ const Subprocess = struct {
         // we may be calling this before setsid if we are killing a surface
         // VERY quickly after starting it.
         const my_pgid = c.getpgid(0);
+        switch (posix.errno(my_pgid)) {
+            .SUCCESS => {},
+            else => |err| {
+                log.warn("error getting current pgid err={}", .{err});
+                return null;
+            },
+        }
 
         // We loop while pgid == my_pgid. The expectation if we have a valid
         // pid is that setsid will eventually be called because it is the
         // FIRST thing the child process does and as far as I can tell,
         // setsid cannot fail. I'm sure that's not true, but I'd rather
         // have a bug reported than defensively program against it now.
+        var retries: usize = 0;
         while (true) {
             const pgid = c.getpgid(pid);
+            switch (posix.errno(pgid)) {
+                .SUCCESS => {},
+                .SRCH => return null,
+                .INTR => continue,
+                else => |err| {
+                    log.warn("error getting pgid for kill pid={} err={}", .{ pid, err });
+                    return null;
+                },
+            }
+
             if (pgid == my_pgid) {
+                if (retries >= GETPGID_MAX_RETRIES) {
+                    log.warn(
+                        "timed out waiting for child to leave parent process group pid={} pgid={}",
+                        .{ pid, my_pgid },
+                    );
+                    return null;
+                }
+
+                retries += 1;
                 log.warn("pgid is our own, retrying", .{});
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                std.Thread.sleep(KILL_RETRY_SLEEP_NS);
                 continue;
             }
 
             // Don't know why it would be zero but its not a valid pid
             if (pgid == 0) return null;
-
-            // If the pid doesn't exist then... we're done!
-            if (pgid == c.ESRCH) return null;
-
-            // If we have an error we're done.
-            if (pgid < 0) {
-                log.warn("error getting pgid for kill", .{});
-                return null;
-            }
 
             return pgid;
         }
