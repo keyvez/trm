@@ -12,7 +12,7 @@ jobs:
   check:
     runs-on: namespace-profile-ghostty-xsm
     steps:
-      - uses: mitchellh/vouch/action/check-pr@8c4f29bb7f2ddfa0b8dbc1bb6575e3f27c95d10a # v1.2.0
+      - uses: mitchellh/vouch/action/check-pr@6803dde571265e13489c3f118200f60b6ab59e4d # v1.3.1
         with:
           pr-number: ${{ github.event.pull_request.number }}
           auto-close: true
