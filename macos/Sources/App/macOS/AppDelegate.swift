@@ -447,8 +447,7 @@ class AppDelegate: NSObject,
         var config = Ghostty.SurfaceConfiguration()
         
         if (isDirectory.boolValue) {
-            // When opening a directory, check the configuration to decide
-            // whether to open in a new tab or new window.
+            // Opening a directory should create a new window rooted at that path.
             config.workingDirectory = filename
         } else {
             // Unconditionally require confirmation in the file execution case.
@@ -492,7 +491,14 @@ class AppDelegate: NSObject,
                 return false
             }
         }
-        
+
+        // Opening a directory should always create a new window rooted at that
+        // directory, regardless of dock-drop behavior.
+        if isDirectory.boolValue {
+            _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
+            return true
+        }
+
         switch ghostty.config.macosDockDropBehavior {
         case .new_tab:
             _ = TerminalController.newTab(
@@ -500,10 +506,136 @@ class AppDelegate: NSObject,
                 from: TerminalController.preferredParent?.window,
                 withBaseConfig: config
             )
-        case .new_window: _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
+        case .new_window:
+            _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
         }
         
         return true
+    }
+
+    /// Handle URL-open Apple Events (e.g. custom `trm://...` links).
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            if handleIncomingURL(url) {
+                continue
+            }
+
+            // Fallback behavior for non-web URLs.
+            if url.isFileURL {
+                _ = self.application(application, openFile: url.path)
+            } else {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
+    private func handleIncomingURL(_ url: URL) -> Bool {
+        if let scheme = url.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" {
+            openURLInPane(url)
+            return true
+        }
+
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "trm" else { return false }
+
+        let route = (url.host ?? "").lowercased()
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return false
+        }
+        let items = components.queryItems ?? []
+
+        if route == "new-window" {
+            var cwd: String? = nil
+
+            if let b64 = items.first(where: { $0.name == "cwd_b64" })?.value,
+               let data = Data(base64Encoded: b64),
+               let str = String(data: data, encoding: .utf8) {
+                cwd = str
+            } else if let str = items.first(where: { $0.name == "cwd" })?.value {
+                cwd = str
+            }
+
+            openNewWindow(cwd: cwd)
+            return true
+        }
+
+        guard route == "open-url" else { return false }
+
+        // Preferred payload is base64 encoded to avoid shell escaping issues.
+        if let b64 = items.first(where: { $0.name == "b64" })?.value,
+           let data = Data(base64Encoded: b64),
+           let str = String(data: data, encoding: .utf8),
+           let target = URL(string: str),
+           let targetScheme = target.scheme?.lowercased(),
+           targetScheme == "http" || targetScheme == "https" {
+            openURLInPane(target)
+            return true
+        }
+
+        // Fallback payload when query item contains a direct URL.
+        if let str = items.first(where: { $0.name == "url" })?.value,
+           let target = URL(string: str),
+           let targetScheme = target.scheme?.lowercased(),
+           targetScheme == "http" || targetScheme == "https" {
+            openURLInPane(target)
+            return true
+        }
+
+        return false
+    }
+
+    private func openNewWindow(cwd: String?) {
+        var config: Ghostty.SurfaceConfiguration? = nil
+        var gridConfig: Trm.TrmGridConfig? = nil
+        var trmConfigPath: String? = nil
+        if let cwd,
+           !cwd.isEmpty {
+            var isDirectory = ObjCBool(false)
+            if FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                var c = Ghostty.SurfaceConfiguration()
+                c.workingDirectory = cwd
+                config = c
+
+                // If this directory has a project-local trm.toml, use that
+                // config for the newly opened window.
+                let configPath = (cwd as NSString).appendingPathComponent("trm.toml")
+                if FileManager.default.fileExists(atPath: configPath) {
+                    gridConfig = Trm.gridConfig(fromConfigPath: configPath)
+                    trmConfigPath = configPath
+                }
+            }
+        }
+
+        _ = TerminalController.newWindow(
+            ghostty,
+            withBaseConfig: config,
+            withGridConfig: gridConfig,
+            withConfigPath: trmConfigPath
+        )
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private func openURLInPane(_ url: URL) {
+        let post = {
+            NotificationCenter.default.post(
+                name: .ghosttyOpenURLInPane,
+                object: nil,
+                userInfo: [
+                    Foundation.Notification.Name.OpenURLInPaneURLKey: url,
+                ]
+            )
+        }
+
+        if TerminalController.all.isEmpty {
+            _ = TerminalController.newWindow(ghostty)
+            DispatchQueue.main.async(execute: post)
+        } else {
+            post()
+        }
     }
 
     /// This is called for the dock right-click menu.
@@ -835,7 +967,7 @@ class AppDelegate: NSObject,
                 autoUpdate == .download
             /**
              To test `auto-update` easily, uncomment the line below and
-             delete `SUEnableAutomaticChecks` in Ghostty-Info.plist.
+             delete `SUEnableAutomaticChecks` in trm-Info.plist.
 
              Note: When `auto-update = download`, you may need to
              `Clean Build Folder` if a background install has already begun.
@@ -1115,7 +1247,7 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func showHelp(_ sender: Any) {
-        guard let url = URL(string: "https://ghostty.org/docs") else { return }
+        guard let url = URL(string: "https://github.com/keyvez/trm#readme") else { return }
         NSWorkspace.shared.open(url)
     }
 

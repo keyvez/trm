@@ -64,6 +64,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
+         withGridConfig gridConfig: Trm.TrmGridConfig? = nil,
+         withConfigPath configPath: String? = nil,
          parent: NSWindow? = nil
     ) {
         // The window we manage is not restorable if we've specified a command
@@ -72,11 +74,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // as the script. We may want to revisit this behavior when we have scrollback
         // restoration.
         self.restorable = (base?.command ?? "") == ""
-        
+
         // Setup our initial derived config based on the current app config
         self.derivedConfig = DerivedConfig(ghostty.config)
-        
-        super.init(ghostty, baseConfig: base, surfaceTree: tree)
+
+        super.init(ghostty, baseConfig: base, surfaceTree: tree, gridConfig: gridConfig, configPath: configPath)
         
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -159,8 +161,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             window.surfaceIsZoomed = to.zoomed != nil
         }
         
-        // If our surface tree is now nil then we close our window.
-        if (to.isEmpty) {
+        // If we have no panes left at all then close our window.
+        if to.isEmpty && webviewPanes.isEmpty && pluginPanes.isEmpty {
             self.window?.close()
         }
     }
@@ -171,9 +173,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         moveFocusFrom oldView: Ghostty.SurfaceView? = nil,
         undoAction: String? = nil
     ) {
-        // We have a special case if our tree is empty to close our tab immediately.
+        // If we have no panes left at all then close our tab immediately.
         // This makes it so that undo is handled properly.
-        if newTree.isEmpty {
+        if newTree.isEmpty && webviewPanes.isEmpty && pluginPanes.isEmpty {
             closeTabImmediately()
             return
         }
@@ -216,9 +218,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     static func newWindow(
         _ ghostty: Ghostty.App,
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        withGridConfig gridConfig: Trm.TrmGridConfig? = nil,
+        withConfigPath configPath: String? = nil,
         withParent explicitParent: NSWindow? = nil
     ) -> TerminalController {
-        let c = TerminalController.init(ghostty, withBaseConfig: baseConfig)
+        let c = TerminalController.init(
+            ghostty,
+            withBaseConfig: baseConfig,
+            withGridConfig: gridConfig,
+            withConfigPath: configPath
+        )
 
         // Get our parent. Our parent is the one explicitly given to us,
         // otherwise the focused terminal, otherwise an arbitrary one.
@@ -287,6 +296,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     _ = TerminalController.newWindow(
                         ghostty,
                         withBaseConfig: baseConfig,
+                        withGridConfig: gridConfig,
+                        withConfigPath: configPath,
                         withParent: explicitParent)
                 }
             }
@@ -618,6 +629,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ node: SplitTree<Ghostty.SurfaceView>.Node,
         withConfirmation: Bool = true
     ) {
+        // Programmatic pane operations (e.g. moving panes between windows) use
+        // `withConfirmation: false` and must bypass tab/window-level close
+        // confirmation flows.
+        if !withConfirmation {
+            super.closeSurface(node, withConfirmation: false)
+            return
+        }
+
         // If this isn't the root then we're dealing with a split closure.
         if surfaceTree.root != node {
             super.closeSurface(node, withConfirmation: withConfirmation)
