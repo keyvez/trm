@@ -89,7 +89,22 @@ const CApp = struct {
     font_family_buf: [256]u8 = undefined,
     font_family_len: usize = 0,
 
+    // Pending send commands from text tap, to be drained by Swift.
+    // Each entry is (pane_index, text). We buffer up to 8 commands.
+    send_queue_panes: [8]u32 = .{0} ** 8,
+    send_queue_texts: [8][1024]u8 = undefined,
+    send_queue_lens: [8]u32 = .{0} ** 8,
+    send_queue_count: u32 = 0,
+
     fn init(allocator: std.mem.Allocator) !*CApp {
+        return initInternal(allocator, true);
+    }
+
+    fn initConfigOnly(allocator: std.mem.Allocator) !*CApp {
+        return initInternal(allocator, false);
+    }
+
+    fn initInternal(allocator: std.mem.Allocator, start_services: bool) !*CApp {
         const self = try allocator.create(CApp);
 
         const cfg = config_mod.loadConfig();
@@ -121,7 +136,7 @@ const CApp = struct {
 
         var tap = text_tap_mod.TextTapServer.init(allocator, cfg.text_tap.socket_path);
         tap.setPaneCount(total_panes);
-        if (cfg.text_tap.enabled) tap.start() catch {};
+        if (start_services and cfg.text_tap.enabled) tap.start() catch {};
 
         self.* = .{
             .allocator = allocator,
@@ -177,6 +192,8 @@ const CApp = struct {
 export fn termania_create_with_config(config_path: ?[*:0]const u8) ?*anyopaque {
     if (config_path) |p| {
         config_mod.setConfigPath(std.mem.sliceTo(p, 0));
+    } else {
+        config_mod.clearConfigPath();
     }
     const allocator = std.heap.c_allocator;
     const app = CApp.init(allocator) catch return null;
@@ -186,6 +203,20 @@ export fn termania_create_with_config(config_path: ?[*:0]const u8) ?*anyopaque {
 /// Create the Termania application with default config. Returns an opaque pointer.
 export fn termania_create() ?*anyopaque {
     return termania_create_with_config(null);
+}
+
+/// Create a lightweight Termania instance for config reading only.
+/// Does NOT start the text tap server or other services, so it won't
+/// interfere with the primary running instance's socket.
+export fn termania_create_config_only(config_path: ?[*:0]const u8) ?*anyopaque {
+    if (config_path) |p| {
+        config_mod.setConfigPath(std.mem.sliceTo(p, 0));
+    } else {
+        config_mod.clearConfigPath();
+    }
+    const allocator = std.heap.c_allocator;
+    const app = CApp.initConfigOnly(allocator) catch return null;
+    return @ptrCast(app);
 }
 
 /// Destroy the Termania application and free all resources.
@@ -204,24 +235,33 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
         if (p.poll()) dirty += 1;
     }
 
+    // Poll text tap socket for new connections and incoming data.
+    app.text_tap.poll();
+
     // Process text tap commands
     const cmds = app.text_tap.drainCommands();
     defer app.allocator.free(cmds);
     for (cmds) |cmd| {
         switch (cmd) {
             .send => |s| {
-                switch (s.target) {
-                    .pane => |idx| {
-                        if (idx < app.plugins.items.len) {
-                            app.plugins.items[idx].writeInput(s.input);
-                        }
-                    },
-                    .all => {
-                        for (app.plugins.items) |p| {
-                            p.writeInput(s.input);
-                        }
-                    },
+                // Buffer send commands for Swift to drain via termania_drain_send.
+                // Swift routes them to the correct ghostty surface PTY.
+                if (app.send_queue_count < 8) {
+                    const qi = app.send_queue_count;
+                    switch (s.target) {
+                        .pane => |idx| {
+                            app.send_queue_panes[qi] = @intCast(idx);
+                        },
+                        .all => {
+                            app.send_queue_panes[qi] = 0xFFFFFFFF; // sentinel for "all"
+                        },
+                    }
+                    const tlen = @min(s.input.len, app.send_queue_texts[qi].len);
+                    @memcpy(app.send_queue_texts[qi][0..tlen], s.input[0..tlen]);
+                    app.send_queue_lens[qi] = @intCast(tlen);
+                    app.send_queue_count += 1;
                 }
+                app.allocator.free(s.input);
             },
             .action => |action| {
                 switch (action) {
@@ -265,6 +305,45 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
     }
 
     return dirty;
+}
+
+/// Drain one pending send command from the text tap queue.
+/// Returns 1 if a command was available, 0 otherwise.
+/// pane_out: receives the target pane index (0xFFFFFFFF = all panes).
+/// text_buf/text_max: buffer to receive the text to send.
+/// text_len_out: receives the actual text length.
+export fn termania_drain_send(
+    handle: ?*anyopaque,
+    pane_out: ?*u32,
+    text_buf: ?[*]u8,
+    text_max: u32,
+    text_len_out: ?*u32,
+) u8 {
+    const app = getApp(handle) orelse return 0;
+    if (app.send_queue_count == 0) return 0;
+
+    const p_out = pane_out orelse return 0;
+    const t_out = text_buf orelse return 0;
+    const tl_out = text_len_out orelse return 0;
+
+    // Pop the first entry
+    p_out.* = app.send_queue_panes[0];
+    const tlen = @min(@as(usize, app.send_queue_lens[0]), @as(usize, text_max));
+    @memcpy(t_out[0..tlen], app.send_queue_texts[0][0..tlen]);
+    tl_out.* = @intCast(tlen);
+
+    // Shift remaining entries down
+    app.send_queue_count -= 1;
+    const remaining = app.send_queue_count;
+    if (remaining > 0) {
+        for (0..remaining) |i| {
+            app.send_queue_panes[i] = app.send_queue_panes[i + 1];
+            app.send_queue_texts[i] = app.send_queue_texts[i + 1];
+            app.send_queue_lens[i] = app.send_queue_lens[i + 1];
+        }
+    }
+
+    return 1;
 }
 
 /// Poll for a pending notification. Returns 1 if a notification is available
@@ -775,12 +854,14 @@ export fn termania_add_overlay(handle: ?*anyopaque, fg_idx: u32, ptype: ?[*]cons
     // Don't add overlay if one already exists
     if (app.overlay_map.get(idx) != null) return 0;
 
-    const type_str = if (ptype) |p| p[0..@as(usize, ptype_len)] else "terminal";
+    const requested_type = if (ptype) |p| p[0..@as(usize, ptype_len)] else "terminal";
+    const type_str = if (plugin_registry.hasType(requested_type)) requested_type else "terminal";
 
     // Create a new background pane
     const bg_idx = app.plugins.items.len;
-    const p = plugin_mod.createPlugin(app.allocator, bg_idx, null) catch return 0;
-    _ = type_str;
+    var pc = config_mod.PaneConfig{};
+    pc.pane_type = type_str;
+    const p = plugin_mod.createPlugin(app.allocator, bg_idx, &pc) catch return 0;
     app.plugins.append(p) catch return 0;
 
     app.overlay_map.put(idx, bg_idx) catch return 0;
@@ -893,7 +974,10 @@ export fn termania_config_pane_count(handle: ?*anyopaque) u32 {
     return @intCast(panes.len);
 }
 
-/// Get pane config field as string. field: 0=command, 1=cwd, 2=watermark, 3=title
+/// Get pane config field as string.
+/// field:
+///   0=command, 1=cwd, 2=watermark, 3=title, 4=pane_type, 5=url, 6=file,
+///   7=content, 8=target, 9=target_title, 10=path, 11=refresh_ms, 12=repo
 export fn termania_config_pane_field(handle: ?*anyopaque, idx: u32, field: u8, buf: ?[*]u8, max: u32) u32 {
     const app = getApp(handle) orelse return 0;
     const out = buf orelse return 0;
@@ -901,11 +985,28 @@ export fn termania_config_pane_field(handle: ?*anyopaque, idx: u32, field: u8, b
     if (idx >= panes.len) return 0;
     const pc = &panes[idx];
 
+    if (field == 11) {
+        const refresh = pc.refresh_ms orelse return 0;
+        var tmp: [32]u8 = undefined;
+        const str = std.fmt.bufPrint(&tmp, "{d}", .{refresh}) catch return 0;
+        const n = @min(str.len, @as(usize, max));
+        @memcpy(out[0..n], str[0..n]);
+        return @intCast(n);
+    }
+
     const value: ?[]const u8 = switch (field) {
         0 => pc.command,
         1 => pc.cwd,
         2 => pc.watermark,
         3 => pc.title,
+        4 => pc.pane_type,
+        5 => pc.url,
+        6 => pc.file,
+        7 => pc.content,
+        8 => pc.target,
+        9 => pc.target_title,
+        10 => pc.path,
+        12 => pc.repo,
         else => null,
     };
 
@@ -933,6 +1034,29 @@ export fn termania_config_pane_initial_cmd(handle: ?*anyopaque, pane_idx: u32, c
     const cmds = panes[pane_idx].initial_commands orelse return 0;
     if (cmd_idx >= cmds.len) return 0;
     const str = cmds[cmd_idx];
+    const n = @min(str.len, @as(usize, max));
+    @memcpy(out[0..n], str[0..n]);
+    return @intCast(n);
+}
+
+/// Get the number of custom patterns for a pane.
+export fn termania_config_pane_patterns_count(handle: ?*anyopaque, idx: u32) u32 {
+    const app = getApp(handle) orelse return 0;
+    const panes = app.config.effectivePanes(null);
+    if (idx >= panes.len) return 0;
+    const pats = panes[idx].patterns orelse return 0;
+    return @intCast(pats.len);
+}
+
+/// Get a custom pattern string for a pane by pattern index.
+export fn termania_config_pane_pattern(handle: ?*anyopaque, pane_idx: u32, pat_idx: u32, buf: ?[*]u8, max: u32) u32 {
+    const app = getApp(handle) orelse return 0;
+    const out = buf orelse return 0;
+    const panes = app.config.effectivePanes(null);
+    if (pane_idx >= panes.len) return 0;
+    const pats = panes[pane_idx].patterns orelse return 0;
+    if (pat_idx >= pats.len) return 0;
+    const str = pats[pat_idx];
     const n = @min(str.len, @as(usize, max));
     @memcpy(out[0..n], str[0..n]);
     return @intCast(n);
@@ -1038,4 +1162,21 @@ export fn termania_context_session_id(handle: ?*anyopaque, buf: ?[*]u8, max: u32
 export fn termania_context_last_update(handle: ?*anyopaque) i64 {
     const app = getApp(handle) orelse return 0;
     return app.context_last_update_time;
+}
+
+/// Get the child PID of a pane (the shell process). Returns 0 if unavailable.
+export fn termania_pane_child_pid(handle: ?*anyopaque, pane_index: u32) u32 {
+    const app = getApp(handle) orelse return 0;
+    if (pane_index >= app.plugins.items.len) return 0;
+    return app.plugins.items[pane_index].childPid() orelse 0;
+}
+
+/// Return a bitset of panes that have been targeted by Text Tap send commands.
+/// Bit N is set if pane N received a send/send_command. Does NOT clear the bitset.
+/// Also polls the text tap socket for new connections and incoming data so that
+/// the bitset stays up to date even when termania_poll is not called.
+export fn termania_text_tap_active_panes(handle: ?*anyopaque) u64 {
+    const app = getApp(handle) orelse return 0;
+    app.text_tap.poll();
+    return app.text_tap.getActiveSendPanes() | app.text_tap.getConnectedPanes();
 }

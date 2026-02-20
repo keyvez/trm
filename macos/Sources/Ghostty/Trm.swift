@@ -88,10 +88,41 @@ final class Trm {
         set { UserDefaults.standard.set(newValue, forKey: Self.apiKeyDefaultsKey) }
     }
 
-    /// Whether a Claude API key is configured.
+    /// Whether an API token is configured (TOML config, OAuth, or UserDefaults).
     var hasAPIKey: Bool {
+        // Check TOML config first
+        if let configKey = llmConfig().apiKey, !configKey.isEmpty {
+            return true
+        }
+        // Check OAuth Keychain credentials
+        if OAuthTokenManager.shared.isAvailable {
+            return true
+        }
+        // Fall back to UserDefaults
         guard let key = claudeAPIKey else { return false }
         return !key.isEmpty
+    }
+
+    /// Resolve the best available API key, preferring OAuth tokens.
+    /// Priority: TOML config > OAuth Keychain > UserDefaults > env var.
+    func resolvedAPIKey() async -> String? {
+        // 1. TOML config always wins
+        if let configKey = llmConfig().apiKey, !configKey.isEmpty {
+            return configKey
+        }
+        // 2. OAuth token from Keychain
+        if let token = try? await OAuthTokenManager.shared.validAccessToken() {
+            return token
+        }
+        // 3. UserDefaults stored key
+        if let key = claudeAPIKey, !key.isEmpty {
+            return key
+        }
+        // 4. Environment variable
+        if let envKey = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"], !envKey.isEmpty {
+            return envKey
+        }
+        return nil
     }
 
     // MARK: - LLM Integration
@@ -195,6 +226,30 @@ final class Trm {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
+    /// Poll the C backend: reads pty output, processes text tap commands (send),
+    /// and performs periodic health checks on the text tap socket.
+    func poll() {
+        guard let h = handle else { return }
+        _ = termania_poll(h)
+    }
+
+    /// Drain pending send commands from the text tap queue.
+    /// Returns an array of (paneIndex, text) tuples. paneIndex == -1 means "all panes".
+    func drainSendCommands() -> [(pane: Int, text: String)] {
+        guard let h = handle else { return [] }
+        var results: [(pane: Int, text: String)] = []
+        var paneIndex: UInt32 = 0
+        var textBuf = [CChar](repeating: 0, count: 1025)
+        var textLen: UInt32 = 0
+        while termania_drain_send(h, &paneIndex, &textBuf, UInt32(textBuf.count - 1), &textLen) != 0 {
+            let text = String(bytes: textBuf.prefix(Int(textLen)).map { UInt8(bitPattern: $0) }, encoding: .utf8) ?? ""
+            let pane = paneIndex == 0xFFFFFFFF ? -1 : Int(paneIndex)
+            results.append((pane: pane, text: text))
+            textLen = 0
+        }
+        return results
+    }
+
     /// Poll the C API for a pending notification. Returns (title, body) or nil.
     func pollNotification() -> (title: String, body: String)? {
         guard let h = handle else { return nil }
@@ -228,8 +283,28 @@ final class Trm {
         requestNotificationPermission()
         notificationTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self = self else { return }
+            _ = self.poll()
+            let sendCmds = self.drainSendCommands()
+            for cmd in sendCmds {
+                NotificationCenter.default.post(
+                    name: .trmTextTapSend,
+                    object: nil,
+                    userInfo: ["pane": cmd.pane, "text": cmd.text]
+                )
+            }
             if let notification = self.pollNotification() {
                 self.showNotification(title: notification.title, body: notification.body)
+                let paneIndex: Int
+                if let h = self.handle {
+                    paneIndex = Int(termania_focused_pane(h))
+                } else {
+                    paneIndex = 0
+                }
+                NotificationCenter.default.post(
+                    name: .trmClaudeNeedsAttention,
+                    object: nil,
+                    userInfo: ["paneIndex": paneIndex]
+                )
             }
         }
     }
@@ -324,6 +399,29 @@ final class Trm {
         )
     }
 
+    // MARK: - Process Info
+
+    /// Get the child PID (shell process) for a pane.
+    func paneChildPid(at index: UInt32) -> pid_t {
+        guard let h = handle else { return 0 }
+        return pid_t(termania_pane_child_pid(h, index))
+    }
+
+    // MARK: - Text Tap
+
+    /// Returns a bitset of panes that have been targeted by Text Tap send commands.
+    /// Bit N is set if pane N received a send/send_command from a socket client.
+    func textTapActivePanes() -> UInt64 {
+        guard let h = handle else { return 0 }
+        return termania_text_tap_active_panes(h)
+    }
+
+    /// Check if a specific pane is targeted by a Text Tap client.
+    func isTextTapActive(pane index: Int) -> Bool {
+        guard index >= 0, index < 64 else { return false }
+        return (textTapActivePanes() >> UInt64(index)) & 1 != 0
+    }
+
     // MARK: - Watermarks
 
     /// Get the watermark text for a pane.
@@ -336,23 +434,37 @@ final class Trm {
         return String(cString: buf)
     }
 
+    /// Notification posted when any pane watermark changes.
+    static let watermarkDidChange = Notification.Name("TrmWatermarkDidChange")
+
     /// Set the watermark text for a pane.
     func setWatermark(forPane index: UInt32, text: String) {
         guard let h = handle else { return }
         text.withCString { cstr in
             termania_set_watermark(h, index, cstr, UInt32(text.utf8.count))
         }
+        NotificationCenter.default.post(name: Trm.watermarkDidChange, object: nil)
     }
 
     // MARK: - Session / Grid Config
 
     /// Configured pane config from termania.toml.
     struct TrmPaneConfig {
+        let paneType: String
         let command: String?
         let cwd: String?
         let watermark: String?
         let title: String?
+        let url: String?
+        let file: String?
+        let content: String?
+        let target: String?
+        let targetTitle: String?
+        let path: String?
+        let refreshMs: UInt64?
+        let repo: String?
         let initialCommands: [String]
+        let patterns: [String]
     }
 
     /// Grid layout config from termania.toml.
@@ -364,12 +476,27 @@ final class Trm {
         let panes: [TrmPaneConfig]
     }
 
+    /// Read grid/session config from a specific config file path.
+    /// Uses `termania_create_config_only` to avoid starting the text tap
+    /// server, which would steal the socket from the primary instance.
+    static func gridConfig(fromConfigPath path: String) -> TrmGridConfig? {
+        guard let h = path.withCString({ ptr in termania_create_config_only(ptr) }) else {
+            return nil
+        }
+        defer { termania_destroy(h) }
+        return readGridConfig(from: h)
+    }
+
     /// Read the grid/session config from termania.toml.
     func gridConfig() -> TrmGridConfig {
         guard let h = handle else {
             return TrmGridConfig(rows: 1, cols: 1, gap: 4, padding: 4, panes: [])
         }
 
+        return Self.readGridConfig(from: h)
+    }
+
+    private static func readGridConfig(from h: trm_app_t) -> TrmGridConfig {
         let rows = Int(termania_grid_rows(h))
         let cols = Int(termania_grid_cols(h))
         let gap = CGFloat(termania_grid_gap(h))
@@ -378,10 +505,19 @@ final class Trm {
         let paneCount = Int(termania_config_pane_count(h))
         var panes: [TrmPaneConfig] = []
         for i in 0..<UInt32(paneCount) {
+            let paneType = readPaneField(h, pane: i, field: 4) ?? "terminal"
             let command = readPaneField(h, pane: i, field: 0)
             let cwd = readPaneField(h, pane: i, field: 1)
             let watermark = readPaneField(h, pane: i, field: 2)
             let title = readPaneField(h, pane: i, field: 3)
+            let url = readPaneField(h, pane: i, field: 5)
+            let file = readPaneField(h, pane: i, field: 6)
+            let content = readPaneField(h, pane: i, field: 7)
+            let target = readPaneField(h, pane: i, field: 8)
+            let targetTitle = readPaneField(h, pane: i, field: 9)
+            let path = readPaneField(h, pane: i, field: 10)
+            let refreshMs = readPaneField(h, pane: i, field: 11).flatMap(UInt64.init)
+            let repo = readPaneField(h, pane: i, field: 12)
 
             var initialCommands: [String] = []
             let cmdCount = Int(termania_config_pane_initial_cmd_count(h, i))
@@ -391,12 +527,30 @@ final class Trm {
                 }
             }
 
+            var patterns: [String] = []
+            let patCount = Int(termania_config_pane_patterns_count(h, i))
+            for j in 0..<UInt32(patCount) {
+                if let pat = readPanePattern(h, pane: i, patIndex: j) {
+                    patterns.append(pat)
+                }
+            }
+
             panes.append(TrmPaneConfig(
+                paneType: paneType,
                 command: command,
                 cwd: cwd,
                 watermark: watermark,
                 title: title,
-                initialCommands: initialCommands
+                url: url,
+                file: file,
+                content: content,
+                target: target,
+                targetTitle: targetTitle,
+                path: path,
+                refreshMs: refreshMs,
+                repo: repo,
+                initialCommands: initialCommands,
+                patterns: patterns
             ))
         }
 
@@ -418,7 +572,7 @@ final class Trm {
     /// Read the LLM config from the termania C API.
     func llmConfig() -> LLMConfig {
         guard let h = handle else {
-            return LLMConfig(provider: "lmstudio", apiKey: nil, model: nil, baseURL: nil, maxTokens: 1024, systemPrompt: nil)
+            return LLMConfig(provider: "anthropic", apiKey: nil, model: nil, baseURL: nil, maxTokens: 1024, systemPrompt: nil)
         }
 
         let provider = readStringField { buf, max in termania_config_llm_provider(h, buf, max) } ?? "lmstudio"
@@ -447,7 +601,7 @@ final class Trm {
         return String(cString: buf)
     }
 
-    private func readPaneField(_ h: trm_app_t, pane: UInt32, field: UInt8) -> String? {
+    private static func readPaneField(_ h: trm_app_t, pane: UInt32, field: UInt8) -> String? {
         var buf = [CChar](repeating: 0, count: 513)
         let len = termania_config_pane_field(h, pane, field, &buf, UInt32(buf.count - 1))
         guard len > 0 else { return nil }
@@ -455,9 +609,17 @@ final class Trm {
         return String(cString: buf)
     }
 
-    private func readPaneInitialCommand(_ h: trm_app_t, pane: UInt32, cmdIndex: UInt32) -> String? {
+    private static func readPaneInitialCommand(_ h: trm_app_t, pane: UInt32, cmdIndex: UInt32) -> String? {
         var buf = [CChar](repeating: 0, count: 513)
         let len = termania_config_pane_initial_cmd(h, pane, cmdIndex, &buf, UInt32(buf.count - 1))
+        guard len > 0 else { return nil }
+        buf[Int(len)] = 0
+        return String(cString: buf)
+    }
+
+    private static func readPanePattern(_ h: trm_app_t, pane: UInt32, patIndex: UInt32) -> String? {
+        var buf = [CChar](repeating: 0, count: 513)
+        let len = termania_config_pane_pattern(h, pane, patIndex, &buf, UInt32(buf.count - 1))
         guard len > 0 else { return nil }
         buf[Int(len)] = 0
         return String(cString: buf)

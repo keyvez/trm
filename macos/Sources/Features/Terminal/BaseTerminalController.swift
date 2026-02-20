@@ -2,6 +2,8 @@ import Cocoa
 import SwiftUI
 import Combine
 import GhosttyKit
+import UniformTypeIdentifiers
+import os
 
 /// A base class for windows that can contain Ghostty windows. This base class implements
 /// the bare minimum functionality that every terminal window in Ghostty should implement.
@@ -106,11 +108,25 @@ class BaseTerminalController: NSWindowController,
     private var detachedTerminalOrigins: [ObjectIdentifier: PaneRestorePlacement] = [:]
     private var detachedWebviewOrigins: [UUID: PaneRestorePlacement] = [:]
 
-    /// All panes (terminals + webviews) for the grid, in display order.
+    /// Explicit display order of panes. When non-empty, `gridPanes` sorts
+    /// by this order instead of the default terminals → webviews → plugins.
+    @Published var paneDisplayOrder: [ObjectIdentifier] = []
+
+    /// All panes for the grid, in display order.
     var gridPanes: [GridPane] {
-        gridSurfaces.map { .terminal($0) } +
-        webviewPanes.map { .webview($0) } +
-        pluginPanes.map { .plugin($0) }
+        let all: [GridPane] =
+            gridSurfaces.map { .terminal($0) } +
+            webviewPanes.map { .webview($0) } +
+            pluginPanes.map { .plugin($0) }
+
+        guard !paneDisplayOrder.isEmpty else { return all }
+
+        let indexed = Dictionary(uniqueKeysWithValues: paneDisplayOrder.enumerated().map { ($1, $0) })
+        return all.sorted { a, b in
+            let ai = indexed[a.id] ?? Int.max
+            let bi = indexed[b.id] ?? Int.max
+            return ai < bi
+        }
     }
 
     /// This can be set to show/hide the command palette.
@@ -133,6 +149,12 @@ class BaseTerminalController: NSWindowController,
 
     /// The context usage manager for Claude Code context window tracking.
     let contextUsageManager = ContextUsageManager()
+
+    /// Shared AI state for the command palette (persists across open/close).
+    let commandPaletteAIState = CommandPaletteAIState()
+
+    /// Agent monitor for tracking AI agent activity in panes.
+    let agentMonitorService = AgentMonitorService()
 
     /// Whether the terminal surface should focus when the mouse is over it.
     var focusFollowsMouse: Bool {
@@ -284,6 +306,13 @@ class BaseTerminalController: NSWindowController,
             name: .ghosttyMaximizeDidToggle,
             object: nil)
 
+        // Text Tap send commands
+        center.addObserver(
+            self,
+            selector: #selector(onTextTapSend(_:)),
+            name: .trmTextTapSend,
+            object: nil)
+
         // Splits
         center.addObserver(
             self,
@@ -313,6 +342,20 @@ class BaseTerminalController: NSWindowController,
             name: .ghosttyOpenURLInPane,
             object: nil)
 
+        // Quick actions
+        center.addObserver(
+            self,
+            selector: #selector(handleQuickActionExecute(_:)),
+            name: .trmQuickActionExecute,
+            object: nil)
+
+        // Shortcut extractor
+        center.addObserver(
+            self,
+            selector: #selector(handleShortcutExecute(_:)),
+            name: .trmShortcutExecute,
+            object: nil)
+
         // Listen for local events that we need to know of outside of
         // single surface handlers.
         self.eventMonitor = NSEvent.addLocalMonitorForEvents(
@@ -337,9 +380,16 @@ class BaseTerminalController: NSWindowController,
             guard let self else { return [] }
             return self.gridSurfaces.enumerated().map { index, surface in
                 let visibleText = surface.cachedVisibleContents.get()
-                return (index: index, visibleText: visibleText)
+                // Use the stable Zig pane index when available so scanner
+                // indices match what Text Tap and other Zig APIs expect.
+                let effectiveIndex = surface.zigPaneIndex ?? index
+                return (index: effectiveIndex, visibleText: visibleText)
             }
         }
+
+        // Wire agent monitor to scanner and AI state.
+        agentMonitorService.aiState = commandPaletteAIState
+        terminalOutputScanner.addSubscriber(agentMonitorService)
 
         // Register and start all service plugins, then start the config file watcher.
         setupServicePlugins()
@@ -371,8 +421,29 @@ class BaseTerminalController: NSWindowController,
         servicePluginRegistry.register(claudeAttentionPlugin)
 
         let sendTextPlugin = SendTextIndicatorPlugin()
-        sendTextPlugin.watchedProcessNames = ["claude"]
         servicePluginRegistry.register(sendTextPlugin)
+
+        let quickActionsPlugin = QuickActionsPlugin()
+        if let configDir = configFilePath.flatMap({
+            ($0 as NSString).deletingLastPathComponent
+        }) {
+            quickActionsPlugin.actionsFilePath = (configDir as NSString)
+                .appendingPathComponent(".trm-actions.toml")
+        }
+        servicePluginRegistry.register(quickActionsPlugin)
+
+        let shortcutExtractorPlugin = ShortcutExtractorPlugin()
+        servicePluginRegistry.register(shortcutExtractorPlugin)
+
+        // Subprocess plugin example (Phase 2/3 integration path):
+        //
+        // let subprocessPlugin = SubprocessPluginHost(
+        //     id: "my_scanner",
+        //     name: "My Custom Scanner",
+        //     executablePath: "/path/to/plugin-executable",
+        //     config: HostConfigPayload(patterns: ["custom_regex"])
+        // )
+        // servicePluginRegistry.register(subprocessPlugin)
     }
 
     /// Tear down all plugins, re-read the config file, and re-register fresh plugins.
@@ -528,6 +599,94 @@ class BaseTerminalController: NSWindowController,
     /// Resolve the current terminal pane index for a specific surface.
     func paneIndex(for surface: Ghostty.SurfaceView) -> Int? {
         gridSurfaces.firstIndex(where: { $0 === surface })
+    }
+
+    // MARK: - Pane Display Order
+
+    /// Ensure `paneDisplayOrder` reflects the current pane set.
+    /// Called lazily before the first move or when needed.
+    private func ensurePaneDisplayOrder() {
+        let allIDs = gridPanes.map(\.id)
+        if paneDisplayOrder.count == allIDs.count {
+            return
+        }
+        paneDisplayOrder = allIDs
+    }
+
+    /// Append a new pane ID to the display order. If the order array
+    /// hasn't been initialized yet, build it from the current panes first.
+    private func appendToPaneDisplayOrder(_ id: ObjectIdentifier) {
+        if paneDisplayOrder.isEmpty && gridPanes.count > 1 {
+            // Rebuild from all panes except the one we're about to add
+            // (it's already in the sub-array but gridPanes re-derives).
+            paneDisplayOrder = gridPanes.map(\.id)
+            if !paneDisplayOrder.contains(id) {
+                paneDisplayOrder.append(id)
+            }
+        } else if !paneDisplayOrder.isEmpty {
+            if !paneDisplayOrder.contains(id) {
+                paneDisplayOrder.append(id)
+            }
+        }
+    }
+
+    /// Move pane in the given direction within the grid.
+    enum PaneMoveDirection {
+        case left, right, up, down
+    }
+
+    func movePane(_ pane: GridPane, direction: PaneMoveDirection) {
+        ensurePaneDisplayOrder()
+        let panes = gridPanes
+        guard panes.count > 1 else { return }
+
+        guard let flatIndex = panes.firstIndex(where: { $0.id == pane.id }) else { return }
+        let (row, col) = gridPosition(flatIndex: flatIndex)
+
+        let targetIndex: Int?
+        switch direction {
+        case .left:
+            targetIndex = col > 0 ? flatIndex - 1 : nil
+        case .right:
+            let rowCols = row < gridRowCols.count ? gridRowCols[row] : 1
+            targetIndex = col < rowCols - 1 ? flatIndex + 1 : nil
+        case .up:
+            if row > 0 {
+                // Move to the row above at the same column (clamped).
+                let aboveCols = gridRowCols[row - 1]
+                let aboveCol = min(col, aboveCols - 1)
+                targetIndex = flatIndexFor(row: row - 1, col: aboveCol)
+            } else {
+                targetIndex = nil
+            }
+        case .down:
+            if row < gridRowCols.count - 1 {
+                let belowCols = gridRowCols[row + 1]
+                let belowCol = min(col, belowCols - 1)
+                targetIndex = flatIndexFor(row: row + 1, col: belowCol)
+            } else {
+                targetIndex = nil
+            }
+        }
+
+        guard let target = targetIndex, target != flatIndex else { return }
+
+        // Swap in the display order array
+        let srcID = panes[flatIndex].id
+        let dstID = panes[target].id
+        guard let srcOrderIdx = paneDisplayOrder.firstIndex(of: srcID),
+              let dstOrderIdx = paneDisplayOrder.firstIndex(of: dstID) else { return }
+        paneDisplayOrder.swapAt(srcOrderIdx, dstOrderIdx)
+    }
+
+    private func flatIndexFor(row: Int, col: Int) -> Int {
+        var offset = 0
+        for r in 0..<row {
+            if r < gridRowCols.count {
+                offset += gridRowCols[r]
+            }
+        }
+        return offset + col
     }
 
     private func capturePlacement(forTerminal surface: Ghostty.SurfaceView) -> PaneRestorePlacement? {
@@ -752,6 +911,7 @@ class BaseTerminalController: NSWindowController,
     private func insertWebviewPane(_ pane: WebViewPane, at index: Int? = nil, preferredRow: Int? = nil) {
         let insertAt = min(max(index ?? webviewPanes.count, 0), webviewPanes.count)
         webviewPanes.insert(pane, at: insertAt)
+        appendToPaneDisplayOrder(ObjectIdentifier(pane))
 
         if let preferredRow {
             applyRestoredRowInsert(preferredRow)
@@ -767,6 +927,7 @@ class BaseTerminalController: NSWindowController,
     private func insertPluginPane(_ pane: PluginPane, at index: Int? = nil, preferredRow: Int? = nil) {
         let insertAt = min(max(index ?? pluginPanes.count, 0), pluginPanes.count)
         pluginPanes.insert(pane, at: insertAt)
+        appendToPaneDisplayOrder(ObjectIdentifier(pane))
 
         if let preferredRow {
             applyRestoredRowInsert(preferredRow)
@@ -785,6 +946,7 @@ class BaseTerminalController: NSWindowController,
         let flatIndex = gridSurfaces.count + idx
         let (row, _) = gridPosition(flatIndex: flatIndex)
         webviewPanes.remove(at: idx)
+        paneDisplayOrder.removeAll { $0 == ObjectIdentifier(pane) }
 
         if row < gridRowCols.count {
             if gridRowCols[row] > 1 {
@@ -804,6 +966,7 @@ class BaseTerminalController: NSWindowController,
         let flatIndex = gridSurfaces.count + webviewPanes.count + idx
         let (row, _) = gridPosition(flatIndex: flatIndex)
         pluginPanes.remove(at: idx)
+        paneDisplayOrder.removeAll { $0 == ObjectIdentifier(pane) }
 
         if row < gridRowCols.count {
             if gridRowCols[row] > 1 {
@@ -1324,6 +1487,46 @@ class BaseTerminalController: NSWindowController,
 
     // MARK: Notifications
 
+    @objc private func onTextTapSend(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let pane = userInfo["pane"] as? Int,
+              let text = userInfo["text"] as? String else { return }
+
+        let surfaces = gridSurfaces
+        guard !surfaces.isEmpty else { return }
+
+        // Split trailing CR/LF from the body so that programs using raw input
+        // mode (e.g. Claude Code) receive the Enter as a separate write.
+        let trailing = text.hasSuffix("\r") ? "\r" : text.hasSuffix("\n") ? "\n" : nil
+        let body = trailing != nil ? String(text.dropLast()) : text
+
+        let targets: [Ghostty.SurfaceView]
+        if pane == -1 {
+            targets = surfaces
+        } else if pane < surfaces.count {
+            targets = [surfaces[pane]]
+        } else {
+            return
+        }
+
+        // Send the body text.
+        if !body.isEmpty {
+            for surface in targets {
+                sendTextToSurface(surface, text: body)
+            }
+        }
+
+        // Send the trailing Enter after a short delay so the target program
+        // can process the text first.
+        if let cr = trailing {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                for surface in targets {
+                    self?.sendTextToSurface(surface, text: cr)
+                }
+            }
+        }
+    }
+
     @objc private func didChangeScreenParametersNotification(_ notification: Notification) {
         // If we have a window that is visible and it is outside the bounds of the
         // screen then we clamp it back to within the screen.
@@ -1452,6 +1655,34 @@ class BaseTerminalController: NSWindowController,
 
         let pane = WebViewPane(url: url)
         insertWebviewPane(pane)
+    }
+
+    // MARK: Quick Actions
+
+    /// Accessor for the quick-actions plugin registered in the service plugin registry.
+    var quickActionsPlugin: QuickActionsPlugin? {
+        servicePluginRegistry.plugins["quick_actions"] as? QuickActionsPlugin
+    }
+
+    @objc private func handleQuickActionExecute(_ notification: Notification) {
+        guard window?.isKeyWindow == true else { return }
+        guard let command = notification.userInfo?["command"] as? String,
+              let paneIndex = notification.userInfo?["paneIndex"] as? Int else { return }
+        let surfaces = gridSurfaces
+        guard paneIndex >= 0, paneIndex < surfaces.count else { return }
+        sendTextToSurface(surfaces[paneIndex], text: command + "\n")
+    }
+
+    // MARK: Shortcut Extractor
+
+    @objc private func handleShortcutExecute(_ notification: Notification) {
+        guard window?.isKeyWindow == true else { return }
+        guard let key = notification.userInfo?["key"] as? String,
+              let paneIndex = notification.userInfo?["paneIndex"] as? Int else { return }
+        let surfaces = gridSurfaces
+        guard paneIndex >= 0, paneIndex < surfaces.count else { return }
+        // Send raw keystroke without newline — dev tools read stdin char-by-char.
+        sendTextToSurface(surfaces[paneIndex], text: key)
     }
 
     /// Close and remove a webview pane from the grid.
@@ -1735,6 +1966,8 @@ class BaseTerminalController: NSWindowController,
 
     private enum InternalCommand {
         case loadToml(pathArg: String?)
+        case saveToml(pathArg: String?)
+        case addPane(type: String)
     }
 
     private func handleInternalCommand(_ action: String, on surfaceView: Ghostty.SurfaceView) -> Bool {
@@ -1743,6 +1976,12 @@ class BaseTerminalController: NSWindowController,
         switch command {
         case .loadToml(let pathArg):
             loadTomlConfig(pathArg: pathArg, on: surfaceView)
+            return true
+        case .saveToml(let pathArg):
+            saveTomlConfig(pathArg: pathArg, on: surfaceView)
+            return true
+        case .addPane(let type):
+            addPaneOfType(type, on: surfaceView)
             return true
         }
     }
@@ -1764,6 +2003,31 @@ class BaseTerminalController: NSWindowController,
             let arg = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
             let normalized = normalizeQuotedArgument(arg)
             return .loadToml(pathArg: normalized.isEmpty ? nil : normalized)
+        }
+
+        let bareSaveNames: Set<String> = ["trm.save", "trm.save_toml", "save_toml"]
+        if bareSaveNames.contains(trimmed) {
+            return .saveToml(pathArg: nil)
+        }
+
+        for prefix in ["trm.save ", "trm.save_toml ", "save_toml "] {
+            guard trimmed.hasPrefix(prefix) else { continue }
+            let arg = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = normalizeQuotedArgument(arg)
+            return .saveToml(pathArg: normalized.isEmpty ? nil : normalized)
+        }
+
+        // trm.add_pane <type> [arg] / trm.add <type> [arg]
+        let bareAddNames: Set<String> = ["trm.add_pane", "trm.add"]
+        if bareAddNames.contains(trimmed) {
+            return nil  // type argument required
+        }
+
+        for prefix in ["trm.add_pane ", "trm.add "] {
+            guard trimmed.hasPrefix(prefix) else { continue }
+            let arg = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !arg.isEmpty else { continue }
+            return .addPane(type: arg)
         }
 
         return nil
@@ -1802,6 +2066,212 @@ class BaseTerminalController: NSWindowController,
 
         runtimeGridConfig = config
         setupInitialPanes(from: config)
+    }
+
+    private func saveTomlConfig(pathArg: String?, on surfaceView: Ghostty.SurfaceView) {
+        let toml = buildCurrentConfigToml()
+
+        if let pathArg {
+            let resolvedPath = resolveTomlPath(pathArg, on: surfaceView)
+            do {
+                try toml.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+            } catch {
+                presentInternalCommandError(
+                    title: "Could Not Save TOML",
+                    message: "Failed to write:\n\(resolvedPath)\n\n\(error.localizedDescription)"
+                )
+            }
+            return
+        }
+
+        guard let window else { return }
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "trm.toml"
+        panel.allowedContentTypes = [UTType(filenameExtension: "toml") ?? .plainText]
+        panel.directoryURL = URL(fileURLWithPath: resolveCommandWorkingDirectory(for: surfaceView), isDirectory: true)
+
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try toml.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                self?.presentInternalCommandError(
+                    title: "Could Not Save TOML",
+                    message: "Failed to write:\n\(url.path)\n\n\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func addPaneOfType(_ typeArg: String, on surfaceView: Ghostty.SurfaceView) {
+        // Split into pane type and optional remainder (URL, content, path, etc.)
+        let parts = typeArg.split(separator: " ", maxSplits: 1)
+        let rawType = String(parts[0]).lowercased()
+        let extraArg = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : nil
+
+        switch rawType {
+        case "terminal", "terminal_pane":
+            newGridPane(at: surfaceView, direction: .right)
+            return
+
+        case "webview", "browser":
+            let urlString = extraArg ?? "about:blank"
+            let url = URL(string: urlString) ?? URL(string: "about:blank")!
+            let pane = WebViewPane(url: url)
+            insertWebviewPane(pane)
+            return
+
+        default:
+            break
+        }
+
+        // Try plugin pane kinds
+        guard let kind = PluginPaneKind.fromPaneType(rawType) else {
+            presentInternalCommandError(
+                title: "Unknown Pane Type",
+                message: "'\(rawType)' is not a recognized pane type.\n\nAvailable types: terminal, webview, notes, git_status, file_browser, log_viewer, process_monitor, markdown_preview, system_info, screen_capture"
+            )
+            return
+        }
+
+        // Map extraArg to the appropriate config field based on kind
+        var content: String? = nil
+        var repo: String? = nil
+        var path: String? = nil
+        var file: String? = nil
+
+        if let extraArg {
+            switch kind {
+            case .notes:
+                content = extraArg
+            case .gitStatus:
+                repo = extraArg
+            case .fileBrowser, .logViewer:
+                path = extraArg
+            case .markdownPreview:
+                file = extraArg
+            default:
+                break
+            }
+        }
+
+        let config = Trm.TrmPaneConfig(
+            paneType: rawType,
+            command: nil,
+            cwd: nil,
+            watermark: nil,
+            title: nil,
+            url: nil,
+            file: file,
+            content: content,
+            target: nil,
+            targetTitle: nil,
+            path: path,
+            refreshMs: nil,
+            repo: repo,
+            initialCommands: [],
+            patterns: []
+        )
+        let pane = PluginPane(kind: kind, config: config)
+        insertPluginPane(pane)
+    }
+
+    private func buildCurrentConfigToml() -> String {
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime]
+        let timestamp = dateFormatter.string(from: Date())
+
+        var lines: [String] = []
+        lines.append("# trm session config — saved \(timestamp)")
+        lines.append("")
+
+        // [grid] section
+        let rows = gridRowCols.count
+        let cols = gridRowCols.max() ?? 1
+        lines.append("[grid]")
+        lines.append("rows = \(rows)")
+        lines.append("cols = \(cols)")
+        lines.append("gap = \(Int(gridGap))")
+        lines.append("outer_padding = \(Int(gridPadding))")
+        lines.append("")
+
+        // Terminal panes
+        let surfaces = gridSurfaces
+        for (index, surface) in surfaces.enumerated() {
+            lines.append("[[panes]]")
+            lines.append("pane_type = \"terminal\"")
+            if let pwd = surface.pwd, !pwd.isEmpty {
+                lines.append("cwd = \(tomlQuote(pwd))")
+            }
+            let watermark = Trm.shared.watermark(forPane: UInt32(index))
+            if let watermark, !watermark.isEmpty {
+                lines.append("watermark = \(tomlQuote(watermark))")
+            }
+            lines.append("")
+        }
+
+        // Webview panes
+        for pane in webviewPanes {
+            lines.append("[[panes]]")
+            lines.append("pane_type = \"webview\"")
+            let url = pane.currentURL ?? pane.initialURL
+            lines.append("url = \(tomlQuote(url.absoluteString))")
+            if !pane.title.isEmpty {
+                lines.append("title = \(tomlQuote(pane.title))")
+            }
+            lines.append("")
+        }
+
+        // Plugin panes
+        for pane in pluginPanes {
+            lines.append("[[panes]]")
+            lines.append("pane_type = \(tomlQuote(pane.kind.rawValue))")
+            if let title = pane.configuredTitle, !title.isEmpty {
+                lines.append("title = \(tomlQuote(title))")
+            }
+            if let cwd = pane.cwd, !cwd.isEmpty {
+                lines.append("cwd = \(tomlQuote(cwd))")
+            }
+            if let file = pane.file, !file.isEmpty {
+                lines.append("file = \(tomlQuote(file))")
+            }
+            // For notes panes, save current text instead of original content
+            if pane.kind == .notes {
+                if !pane.notesText.isEmpty {
+                    lines.append("content = \(tomlQuote(pane.notesText))")
+                }
+            } else if let content = pane.content, !content.isEmpty {
+                lines.append("content = \(tomlQuote(content))")
+            }
+            if let target = pane.target, !target.isEmpty {
+                lines.append("target = \(tomlQuote(target))")
+            }
+            if let targetTitle = pane.targetTitle, !targetTitle.isEmpty {
+                lines.append("target_title = \(tomlQuote(targetTitle))")
+            }
+            if let path = pane.path, !path.isEmpty {
+                lines.append("path = \(tomlQuote(path))")
+            }
+            if let repo = pane.repo, !repo.isEmpty {
+                lines.append("repo = \(tomlQuote(repo))")
+            }
+            if let refreshMs = pane.refreshMs {
+                lines.append("refresh_ms = \(refreshMs)")
+            }
+            lines.append("")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func tomlQuote(_ value: String) -> String {
+        var escaped = value
+        escaped = escaped.replacingOccurrences(of: "\\", with: "\\\\")
+        escaped = escaped.replacingOccurrences(of: "\"", with: "\\\"")
+        escaped = escaped.replacingOccurrences(of: "\n", with: "\\n")
+        escaped = escaped.replacingOccurrences(of: "\t", with: "\\t")
+        return "\"\(escaped)\""
     }
 
     private func resolveTomlPath(_ path: String, on surfaceView: Ghostty.SurfaceView) -> String {
@@ -1979,7 +2449,9 @@ class BaseTerminalController: NSWindowController,
             state: state,
             delegate: self
         )
-        window.beginSheet(self.clipboardConfirmation!.window!)
+        if let ccWindow = self.clipboardConfirmation?.window {
+            window.beginSheet(ccWindow)
+        }
     }
 
     func clipboardConfirmationComplete(_ action: ClipboardConfirmationView.Action, _ request: Ghostty.ClipboardRequest) {
@@ -2047,6 +2519,7 @@ class BaseTerminalController: NSWindowController,
 
     /// Apply a concrete grid config and create the pane layout in-place.
     private func setupInitialPanes(from config: Trm.TrmGridConfig) {
+        paneDisplayOrder = []
 
         let paneConfigs: [Trm.TrmPaneConfig] = {
             if !config.panes.isEmpty {
@@ -2095,8 +2568,15 @@ class BaseTerminalController: NSWindowController,
             }
         }
 
-        let terminalConfigs = paneConfigs.filter { normalizedPaneType($0.paneType) == "terminal" }
-        rebuildTerminalSurfaces(terminalConfigs)
+        // Build (zigIndex, config) pairs for terminal panes so each surface
+        // knows its position in the Zig `app.plugins.items` array.
+        var terminalConfigsWithZigIndex: [(zigIndex: Int, config: Trm.TrmPaneConfig)] = []
+        for (i, paneConfig) in paneConfigs.enumerated() {
+            if normalizedPaneType(paneConfig.paneType) == "terminal" {
+                terminalConfigsWithZigIndex.append((zigIndex: i, config: paneConfig))
+            }
+        }
+        rebuildTerminalSurfaces(terminalConfigsWithZigIndex)
 
         // Apply per-pane config (watermarks, initial commands) for terminal panes.
         applyPaneConfig(paneConfigs)
@@ -2110,14 +2590,16 @@ class BaseTerminalController: NSWindowController,
             guard normalizedPaneType(paneConfig.paneType) == "terminal" else { continue }
             guard surfaceIndex < surfaces.count else { break }
 
+            let surface = surfaces[surfaceIndex]
+            let zigIdx = surface.zigPaneIndex ?? surfaceIndex
+
             // Set watermark
             if let watermark = paneConfig.watermark, !watermark.isEmpty {
-                Trm.shared.setWatermark(forPane: UInt32(surfaceIndex), text: watermark)
+                Trm.shared.setWatermark(forPane: UInt32(zigIdx), text: watermark)
             }
 
             // Send initial commands after a short delay to let the shell start
             if !paneConfig.initialCommands.isEmpty {
-                let surface = surfaces[surfaceIndex]
                 let commands = paneConfig.initialCommands
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     self?.sendInitialCommandsWhenReady(commands, to: surface)
@@ -2167,7 +2649,7 @@ class BaseTerminalController: NSWindowController,
         return URL(string: "about:blank")!
     }
 
-    private func rebuildTerminalSurfaces(_ paneConfigs: [Trm.TrmPaneConfig]) {
+    private func rebuildTerminalSurfaces(_ paneConfigs: [(zigIndex: Int, config: Trm.TrmPaneConfig)]) {
         guard let ghosttyApp = ghostty.app else { return }
 
         if paneConfigs.isEmpty {
@@ -2178,18 +2660,19 @@ class BaseTerminalController: NSWindowController,
         var newViews: [Ghostty.SurfaceView] = []
         newViews.reserveCapacity(paneConfigs.count)
 
-        for paneConfig in paneConfigs {
+        for entry in paneConfigs {
             var surfaceConfig = Ghostty.SurfaceConfiguration()
-            if let cwd = paneConfig.cwd, !cwd.isEmpty {
+            if let cwd = entry.config.cwd, !cwd.isEmpty {
                 surfaceConfig.workingDirectory = NSString(string: cwd).expandingTildeInPath
             } else {
                 // Default to home to avoid macOS Documents permission prompts.
                 surfaceConfig.workingDirectory = NSHomeDirectory()
             }
-            if let command = paneConfig.command, !command.isEmpty {
+            if let command = entry.config.command, !command.isEmpty {
                 surfaceConfig.command = command
             }
             let view = Ghostty.SurfaceView(ghosttyApp, baseConfig: surfaceConfig)
+            view.zigPaneIndex = entry.zigIndex
             newViews.append(view)
         }
 

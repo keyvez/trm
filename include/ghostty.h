@@ -1198,10 +1198,12 @@ typedef struct {
 // App lifecycle
 trm_app_t termania_create(void);
 trm_app_t termania_create_with_config(const char* config_path);
+trm_app_t termania_create_config_only(const char* config_path);
 void termania_destroy(trm_app_t);
 
 // Polling and pane management
 uint32_t termania_poll(trm_app_t);
+uint8_t  termania_drain_send(trm_app_t, uint32_t*, char*, uint32_t, uint32_t*);
 uint8_t  termania_poll_notification(trm_app_t, char*, uint32_t, char*, uint32_t);
 uint32_t termania_pane_count(trm_app_t);
 uint8_t  termania_pane_info(trm_app_t, uint32_t, termania_pane_info_s*);
@@ -1272,11 +1274,19 @@ uint32_t termania_config_pane_count(trm_app_t);
 uint32_t termania_config_pane_field(trm_app_t, uint32_t, uint8_t, char*, uint32_t);
 uint32_t termania_config_pane_initial_cmd_count(trm_app_t, uint32_t);
 uint32_t termania_config_pane_initial_cmd(trm_app_t, uint32_t, uint32_t, char*, uint32_t);
+uint32_t termania_config_pane_patterns_count(trm_app_t, uint32_t);
+uint32_t termania_config_pane_pattern(trm_app_t, uint32_t, uint32_t, char*, uint32_t);
 
 // Context usage tracking
 uint8_t  termania_context_usage(trm_app_t, uint64_t*, uint64_t*, uint8_t*, uint8_t*);
 uint32_t termania_context_session_id(trm_app_t, char*, uint32_t);
 int64_t  termania_context_last_update(trm_app_t);
+
+// Process info
+uint32_t termania_pane_child_pid(trm_app_t, uint32_t);
+
+// Text Tap active panes — bitset of panes targeted by send commands
+uint64_t termania_text_tap_active_panes(trm_app_t);
 
 // LLM config accessors
 uint32_t termania_config_llm_provider(trm_app_t, char*, uint32_t);
