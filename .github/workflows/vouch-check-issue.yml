@@ -12,7 +12,7 @@ jobs:
   check:
     runs-on: namespace-profile-ghostty-xsm
     steps:
-      - uses: mitchellh/vouch/action/check-issue@8c4f29bb7f2ddfa0b8dbc1bb6575e3f27c95d10a # v1.2.0
+      - uses: mitchellh/vouch/action/check-issue@daa39f90448eb4054ad334d7f53959a7efb5005b # v1.4.0
         with:
           issue-number: ${{ github.event.issue.number }}
           auto-close: true
