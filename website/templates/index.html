@@ -58,7 +58,7 @@
             <div class="feature-card">
                 <div class="feature-icon">&#x2728;</div>
                 <h3>AI Command Palette</h3>
-                <p>Ask AI to run commands, explain errors, or control your terminal. Built into the command palette with search and raw command modes.</p>
+                <p>Ask AI to run commands, explain errors, or control your terminal. Streaming responses, pane addressing with <code>#0</code> or <code>#watermark</code>, and a floating status bar that tracks progress when the palette is dismissed.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F9E0;</div>
@@ -111,9 +111,101 @@
                 <p>Real-time Claude Code context window gauge with color-coded warnings. Track daily and weekly token usage with persistent history. Auto-compact alerts built in.</p>
             </div>
             <div class="feature-card">
+                <div class="feature-icon">&#x1F441;</div>
+                <h3>Agent Monitor</h3>
+                <p>Real-time activity tracking for AI agents running in your panes. See one-liner summaries like &ldquo;Reading config.zig&rdquo; or &ldquo;Running tests&rdquo; in a floating status pill &mdash; even when the command palette is closed.</p>
+            </div>
+            <div class="feature-card">
                 <div class="feature-icon">&#x1F310;</div>
                 <h3>Inline Webview Panes</h3>
                 <p>HTTP/HTTPS links open inside a webview pane in the grid instead of jumping to your browser. Stay in context while reading docs, PRs, or dashboards.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F517;</div>
+                <h3>Server URL Detection</h3>
+                <p>Automatically detects dev-server URLs in terminal output and shows a clickable banner. One click opens the server in an inline webview. Supports custom regex patterns for tunnels and proxies.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F4E8;</div>
+                <h3>Send to Pane</h3>
+                <p>Type keystrokes into any pane from an external process. User taps feedback in a Flutter app &rarr; MCP server fires &rarr; <code>process_queue</code> appears in the Claude Code pane &mdash; under one second, fully automatic. Works with shell scripts, Dart, or any Unix socket client.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x26A1;</div>
+                <h3>Quick Actions</h3>
+                <p>Save frequently-used commands as persistent pill buttons on any pane. Select text, right-click, name it &mdash; one click to re-run. Stored in <code>.trm-actions.toml</code> with hot-reload and session persistence.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Crash Safety -->
+<section class="crash-safety" id="crash-safety">
+    <div class="section-inner">
+        <h2 class="section-title">Crash-Safe Plugin Isolation</h2>
+        <p class="crash-safety-sub">Plugins run as subprocesses. If one crashes, trm keeps running. No reload, no restart, no lost work.</p>
+        <div class="crash-safety-diagram">
+            <div class="crash-safety-host">
+                <div class="crash-safety-host-label">trm (host process)</div>
+                <div class="crash-safety-plugins">
+                    <div class="crash-safety-plugin in-process">
+                        <div class="crash-safety-dot green"></div>
+                        <span>URL Detector</span>
+                        <span class="crash-safety-tag">in-process</span>
+                    </div>
+                    <div class="crash-safety-plugin in-process">
+                        <div class="crash-safety-dot green"></div>
+                        <span>Attention Icon</span>
+                        <span class="crash-safety-tag">in-process</span>
+                    </div>
+                    <div class="crash-safety-plugin in-process">
+                        <div class="crash-safety-dot green"></div>
+                        <span>Send Text Indicator</span>
+                        <span class="crash-safety-tag">in-process</span>
+                    </div>
+                    <div class="crash-safety-plugin in-process">
+                        <div class="crash-safety-dot green"></div>
+                        <span>Quick Actions</span>
+                        <span class="crash-safety-tag">in-process</span>
+                    </div>
+                    <div class="crash-safety-plugin subprocess">
+                        <div class="crash-safety-dot blue"></div>
+                        <span>Your Plugin</span>
+                        <span class="crash-safety-tag sub">subprocess</span>
+                        <span class="crash-safety-pipe">stdin/stdout JSON</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="crash-safety-grid">
+            <div class="crash-safety-card">
+                <div class="crash-safety-card-icon">&#x1F6E1;</div>
+                <h3>Isolated Processes</h3>
+                <p>Each subprocess plugin runs in its own process with stdin/stdout JSON pipes. A crash is just a pipe EOF &mdash; the host detects it instantly.</p>
+            </div>
+            <div class="crash-safety-card">
+                <div class="crash-safety-card-icon">&#x1F504;</div>
+                <h3>Auto-Restart</h3>
+                <p>Crashed plugins restart with exponential backoff (2s, 4s, 8s). After 60 seconds of stable running, the retry counter resets. Three strikes and the plugin stays down &mdash; your terminal stays up.</p>
+            </div>
+            <div class="crash-safety-card">
+                <div class="crash-safety-card-icon">&#x1F30D;</div>
+                <h3>Any Language</h3>
+                <p>Subprocess plugins are standalone executables. Write them in Python, Rust, Go, or anything else. Read JSON from stdin, write state to stdout. That's the whole API.</p>
+            </div>
+        </div>
+        <div class="crash-safety-protocol">
+            <div class="crash-safety-protocol-col">
+                <div class="crash-safety-protocol-label">Host &rarr; Plugin (stdin)</div>
+                <pre><code>{"type":"terminal_output","pane":0,"text":"...","hash":"abc"}
+{"type":"notification","name":"needsAttention","pane":0}
+{"type":"stop"}</code></pre>
+            </div>
+            <div class="crash-safety-protocol-col">
+                <div class="crash-safety-protocol-label">Plugin &rarr; Host (stdout)</div>
+                <pre><code>{"type":"ready"}
+{"type":"state","overlay":"server_url_banner","panes":{"0":["http://localhost:3000"]}}
+{"type":"error","message":"regex failed"}</code></pre>
             </div>
         </div>
     </div>
@@ -205,7 +297,7 @@ trm --config path/to/config.toml</code></pre>
                     </tr>
                     <tr>
                         <td>AI command palette</td>
-                        <td class="highlight yes">Built-in (3 modes)</td>
+                        <td class="highlight yes">Streaming + pane addressing</td>
                         <td class="no">No</td>
                         <td class="no">No</td>
                         <td class="no">No</td>
@@ -256,6 +348,27 @@ trm --config path/to/config.toml</code></pre>
                         <td>Embedded web views</td>
                         <td class="highlight yes">WKWebView</td>
                         <td class="no">No</td>
+                        <td class="no">No</td>
+                        <td class="no">No</td>
+                    </tr>
+                    <tr>
+                        <td>Server URL detection</td>
+                        <td class="highlight yes">Auto-detect + custom patterns</td>
+                        <td class="no">No</td>
+                        <td class="no">No</td>
+                        <td class="no">No</td>
+                    </tr>
+                    <tr>
+                        <td>Quick actions</td>
+                        <td class="highlight yes">Persistent command pills</td>
+                        <td class="no">No</td>
+                        <td class="no">No</td>
+                        <td class="no">No</td>
+                    </tr>
+                    <tr>
+                        <td>Crash-safe plugin isolation</td>
+                        <td class="highlight yes">Subprocess sandboxing</td>
+                        <td class="no">No plugins</td>
                         <td class="no">No</td>
                         <td class="no">No</td>
                     </tr>

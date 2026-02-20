@@ -55,18 +55,18 @@ def recv():
 
 ## Client-to-Server Commands
 
-### list
+### list_panes
 
 List the number of available panes.
 
 ```json
-{"list": true}
+{"type": "list_panes"}
 ```
 
 **Response:**
 
 ```json
-{"panes": 9}
+{"pane_count": 9}
 ```
 
 ### subscribe
@@ -97,17 +97,19 @@ Send raw input text to one or more panes. The input is written directly to the p
 
 ```json
 // Send to a specific pane
-{"send": 0, "input": "ls -la\r"}
+{"type": "send", "pane": 0, "text": "ls -la\r"}
 
 // Send to all panes
-{"send": "all", "input": "echo hello\r"}
+{"type": "send_all", "text": "echo hello\r"}
 ```
 
 **Response:**
 
 ```json
-{"ok": true}
+{"status": "queued"}
 ```
+
+> **Note:** trm splits trailing `\r`/`\n` from the text body and sends it as a separate PTY write after a short delay. This ensures programs using raw terminal mode (like Claude Code) correctly distinguish typed text from the Enter key press.
 
 ### action
 
@@ -137,10 +139,10 @@ Sent to subscribed clients when a pane's visible content changes.
 
 ### Pane count
 
-Response to a `list` command.
+Response to a `list_panes` command.
 
 ```json
-{"panes": 9}
+{"pane_count": 9}
 ```
 
 ### Acknowledgment
@@ -148,7 +150,7 @@ Response to a `list` command.
 Response to `send` and `action` commands.
 
 ```json
-{"ok": true}
+{"status": "queued"}
 ```
 
 ### Error
@@ -402,12 +404,12 @@ def main():
     sock = connect()
 
     # List panes
-    send_msg(sock, {"list": True})
+    send_msg(sock, {"type": "list_panes"})
     resp = recv_msg(sock)
     print(f"Panes: {resp['panes']}")
 
     # Send a command to pane 0
-    send_msg(sock, {"send": 0, "input": "echo 'Hello from Text Tap!'\r"})
+    send_msg(sock, {"type": "send", "pane": 0, "text": "echo 'Hello from Text Tap!'\r"})
     resp = recv_msg(sock)
     print(f"Send result: {resp}")
 
