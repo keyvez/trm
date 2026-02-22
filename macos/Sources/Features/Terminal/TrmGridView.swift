@@ -64,51 +64,23 @@ struct TrmGridView: View {
     /// Bumped when a watermark changes to force the overlay to re-evaluate.
     @State private var watermarkVersion: Int = 0
 
-    /// The pane index that was most recently focused, used to trigger
-    /// a brief watermark highlight flash on activation.
-    @State private var highlightedPane: Int? = nil
-    /// When true, the focus-change highlight is suppressed because an
-    /// explicit highlightPane notification is already handling the flash.
-    @State private var suppressFocusHighlight = false
 
     var body: some View {
         content
             .onReceive(NotificationCenter.default.publisher(for: Trm.watermarkDidChange)) { _ in
                 watermarkVersion += 1
             }
-            .onReceive(NotificationCenter.default.publisher(for: Trm.highlightPane)) { notification in
-                guard let pid = notification.userInfo?["paneId"] as? Int else { return }
-                // Only highlight if this pane is in our grid.
-                guard panes.contains(where: {
-                    if case .terminal(let s) = $0 { return s.paneId == pid }
-                    return false
-                }) else { return }
-                suppressFocusHighlight = true
-                highlightedPane = pid
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                    if highlightedPane == pid {
-                        highlightedPane = nil
-                    }
-                    suppressFocusHighlight = false
-                }
-            }
             .onChange(of: focusedSurfaceIdentity) { newIdentity in
-                guard !suppressFocusHighlight else { return }
                 guard panes.count > 1, let newIdentity else { return }
-                // Match the new identity against pane surfaces to find
-                // which pane just gained focus.
-                for (i, pane) in panes.enumerated() {
+                for pane in panes {
                     if case .terminal(let surface) = pane,
-                       ObjectIdentifier(surface) == newIdentity {
-                        let pid = surface.paneId ?? i
-                        highlightedPane = pid
-                        // Reset after the animation completes so
-                        // re-focusing the same pane still flashes.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                            if highlightedPane == pid {
-                                highlightedPane = nil
-                            }
-                        }
+                       ObjectIdentifier(surface) == newIdentity,
+                       let pid = surface.paneId {
+                        NotificationCenter.default.post(
+                            name: Trm.highlightPane,
+                            object: nil,
+                            userInfo: ["paneId": pid]
+                        )
                         break
                     }
                 }
@@ -360,7 +332,7 @@ struct TrmGridView: View {
         // Reference watermarkVersion so SwiftUI re-evaluates when it changes.
         let _ = watermarkVersion
         if let text = Trm.shared.watermark(forPaneId: UInt32(paneId)), !text.isEmpty {
-            WatermarkView(text: text, cellHeight: 14, highlighted: highlightedPane == paneId)
+            WatermarkView(text: text, cellHeight: 14, paneId: paneId)
         }
     }
 
