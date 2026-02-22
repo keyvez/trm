@@ -1206,6 +1206,8 @@ uint32_t termania_poll(trm_app_t);
 uint8_t  termania_drain_send(trm_app_t, uint32_t*, char*, uint32_t, uint32_t*);
 uint8_t  termania_poll_notification(trm_app_t, char*, uint32_t, char*, uint32_t);
 uint32_t termania_pane_count(trm_app_t);
+uint32_t termania_alloc_pane_id(trm_app_t);
+uint32_t termania_grid_slot_pane_id(trm_app_t, uint32_t);
 uint8_t  termania_pane_info(trm_app_t, uint32_t, termania_pane_info_s*);
 uint32_t termania_pane_cells(trm_app_t, uint32_t, termania_cell_s*, uint32_t);
 uint32_t termania_pane_layouts(trm_app_t, uint32_t, uint32_t, float, termania_pane_layout_s*, uint32_t);
@@ -1264,12 +1266,15 @@ uint8_t termania_has_overlay(trm_app_t, uint32_t);
 // Watermark
 uint32_t termania_pane_watermark(trm_app_t, uint32_t, char*, uint32_t);
 void     termania_set_watermark(trm_app_t, uint32_t, const char*, uint32_t);
+void     termania_swap_pane_order(trm_app_t, uint32_t, uint32_t);
 
 // Session / Grid config
 uint32_t termania_grid_rows(trm_app_t);
 uint32_t termania_grid_cols(trm_app_t);
 uint32_t termania_grid_gap(trm_app_t);
 uint32_t termania_grid_padding(trm_app_t);
+uint32_t termania_grid_row_cols_count(trm_app_t);
+uint32_t termania_grid_row_cols_at(trm_app_t, uint32_t);
 uint32_t termania_config_pane_count(trm_app_t);
 uint32_t termania_config_pane_field(trm_app_t, uint32_t, uint8_t, char*, uint32_t);
 uint32_t termania_config_pane_initial_cmd_count(trm_app_t, uint32_t);
@@ -1287,6 +1292,9 @@ uint32_t termania_pane_child_pid(trm_app_t, uint32_t);
 
 // Text Tap active panes — bitset of panes targeted by send commands
 uint64_t termania_text_tap_active_panes(trm_app_t);
+
+// Text Tap client count — number of clients connected to the socket
+uint32_t termania_text_tap_client_count(trm_app_t);
 
 // LLM config accessors
 uint32_t termania_config_llm_provider(trm_app_t, char*, uint32_t);

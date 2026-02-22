@@ -21,6 +21,32 @@ pub const GridConfig = struct {
     outer_padding: u32 = 4,
     title_bar_height: u32 = 24,
     border_radius: u32 = 8,
+
+    /// Per-row column counts for jagged grids (e.g. "10,8,10,9,10").
+    /// When set, overrides rows/cols for grid layout. Stored as a
+    /// comma-separated string; parsed into row_cols_buf on read.
+    row_cols: ?[]const u8 = null,
+
+    /// Parsed per-row column counts (up to 64 rows).
+    row_cols_buf: [64]usize = .{0} ** 64,
+    row_cols_len: usize = 0,
+
+    /// Parse the row_cols string into row_cols_buf. Call after loading config.
+    pub fn parseRowCols(self: *GridConfig) void {
+        const raw = self.row_cols orelse return;
+        if (raw.len == 0) return;
+        var count: usize = 0;
+        var iter = std.mem.splitScalar(u8, raw, ',');
+        while (iter.next()) |tok| {
+            const trimmed = std.mem.trim(u8, tok, " \t");
+            if (trimmed.len == 0) continue;
+            const val = std.fmt.parseInt(usize, trimmed, 10) catch continue;
+            if (count >= self.row_cols_buf.len) break;
+            self.row_cols_buf[count] = val;
+            count += 1;
+        }
+        self.row_cols_len = count;
+    }
 };
 
 pub const WindowConfig = struct {
@@ -30,8 +56,8 @@ pub const WindowConfig = struct {
 };
 
 pub const ColorConfig = struct {
-    background: []const u8 = "#010409",
-    foreground: []const u8 = "#e6edf3",
+    background: []const u8 = "#000000",
+    foreground: []const u8 = "#ffffff",
     cursor: []const u8 = "#f0f6fc",
     selection: []const u8 = "#264f78",
     border: []const u8 = "#30363d",
@@ -49,12 +75,17 @@ pub const ColorConfig = struct {
 };
 
 pub const TextTapConfig = struct {
-    socket_path: []const u8 = "/tmp/termania.sock",
+    socket_path: []const u8 = default_socket_path,
     enabled: bool = true,
+
+    const default_socket_path = switch (@import("builtin").mode) {
+        .Debug => "/tmp/trm-debug.sock",
+        else => "/tmp/trm.sock",
+    };
 };
 
 pub const LlmConfig = struct {
-    provider: []const u8 = "lmstudio",
+    provider: []const u8 = "anthropic",
     api_key: ?[]const u8 = null,
     model: ?[]const u8 = null,
     base_url: ?[]const u8 = null,
@@ -77,6 +108,7 @@ pub const PaneConfig = struct {
     path: ?[]const u8 = null,
     refresh_ms: ?u64 = null,
     repo: ?[]const u8 = null,
+    patterns: ?[]const []const u8 = null,
 };
 
 pub const SessionConfig = struct {
@@ -217,11 +249,12 @@ pub fn loadConfigFromString(content: []const u8) Config {
 /// Internal: parse with error handling so we can return defaults on failure.
 fn loadConfigFromStringAlloc(content: []const u8) ParseError!Config {
     var cfg = Config{};
+    resetParsedStringArrayStorage();
 
     // We use a simple approach: accumulate sessions and panes in
     // fixed-size buffers (max 32 sessions, 64 panes per session).
     const max_sessions = 32;
-    const max_panes = 64;
+    const max_panes = 256;
     var sessions_buf: [max_sessions]SessionConfig = undefined;
     var sessions_count: usize = 0;
 
@@ -332,7 +365,15 @@ fn loadConfigFromStringAlloc(content: []const u8) ParseError!Config {
             },
             .sessions_panes => {
                 if (total_panes > 0) {
-                    setStructField(PaneConfig, &all_panes_buf[total_panes - 1], key, val);
+                    if (std.mem.eql(u8, key, "type")) {
+                        // Back-compat shorthand used in README/examples.
+                        setStructField(PaneConfig, &all_panes_buf[total_panes - 1], "pane_type", val);
+                    } else if (std.mem.eql(u8, key, "initial_command")) {
+                        // Singular alias for initial_commands.
+                        setStructField(PaneConfig, &all_panes_buf[total_panes - 1], "initial_commands", val);
+                    } else {
+                        setStructField(PaneConfig, &all_panes_buf[total_panes - 1], key, val);
+                    }
                 }
             },
             .root => {
@@ -396,6 +437,9 @@ fn loadConfigFromStringAlloc(content: []const u8) ParseError!Config {
         cfg.panes = Static.s_sessions[0].panes;
     }
 
+    // Parse the row_cols string into the integer buffer.
+    cfg.grid.parseRowCols();
+
     return cfg;
 }
 
@@ -449,8 +493,67 @@ fn parseQuotedString(val: []const u8) []const u8 {
     return inner;
 }
 
+/// Backing storage for parsed string arrays (e.g. pane initial_commands).
+const max_parsed_string_array_items = 8192;
+var parsed_string_array_items: [max_parsed_string_array_items][]const u8 = undefined;
+var parsed_string_array_items_len: usize = 0;
+
+fn resetParsedStringArrayStorage() void {
+    parsed_string_array_items_len = 0;
+}
+
+/// Parse a TOML array of quoted strings, like ["pwd", "npm run dev"].
+/// Returns null for invalid syntax or `null` literal.
+fn parseQuotedStringArray(val: []const u8) ?[]const []const u8 {
+    const trimmed = std.mem.trim(u8, val, " \t");
+    if (std.mem.eql(u8, trimmed, "null")) return null;
+    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return null;
+
+    const inner = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t");
+    const start = parsed_string_array_items_len;
+    if (inner.len == 0) return parsed_string_array_items[start..start];
+
+    var i: usize = 0;
+    while (i < inner.len) {
+        while (i < inner.len and (inner[i] == ' ' or inner[i] == '\t')) : (i += 1) {}
+        if (i >= inner.len) break;
+        if (inner[i] != '"') return null;
+
+        var j: usize = i + 1;
+        var escaped = false;
+        while (j < inner.len) : (j += 1) {
+            const ch = inner[j];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '"') break;
+        }
+        if (j >= inner.len or inner[j] != '"') return null;
+        if (parsed_string_array_items_len >= parsed_string_array_items.len) return null;
+
+        const quoted = inner[i .. j + 1];
+        parsed_string_array_items[parsed_string_array_items_len] = parseQuotedString(quoted);
+        parsed_string_array_items_len += 1;
+        i = j + 1;
+
+        while (i < inner.len and (inner[i] == ' ' or inner[i] == '\t')) : (i += 1) {}
+        if (i < inner.len) {
+            if (inner[i] != ',') return null;
+            i += 1;
+        }
+    }
+
+    return parsed_string_array_items[start..parsed_string_array_items_len];
+}
+
 /// Set a field on a struct using comptime reflection.
-/// Handles: []const u8, ?[]const u8, bool, u32, u64, usize, f32, ?usize, ?u64.
+/// Handles: []const u8, ?[]const u8, ?[]const []const u8, bool, u32, u64,
+/// usize, f32, ?usize, ?u64.
 fn setStructField(comptime T: type, ptr: *T, key: []const u8, val: []const u8) void {
     inline for (std.meta.fields(T)) |field| {
         if (std.mem.eql(u8, field.name, key)) {
@@ -471,6 +574,21 @@ fn setTypedField(comptime T: type, comptime FieldType: type, ptr: *T, comptime f
             @field(ptr, field_name) = null;
         } else {
             @field(ptr, field_name) = parsed;
+        }
+    } else if (FieldType == ?[]const []const u8) {
+        if (std.mem.eql(u8, val, "null")) {
+            @field(ptr, field_name) = null;
+        } else if (parseQuotedStringArray(val)) |parsed_arr| {
+            @field(ptr, field_name) = parsed_arr;
+        } else {
+            // Also accept a single quoted string for convenience.
+            const parsed_single = parseQuotedString(val);
+            if (parsed_string_array_items_len < parsed_string_array_items.len and parsed_single.len > 0) {
+                const start = parsed_string_array_items_len;
+                parsed_string_array_items[parsed_string_array_items_len] = parsed_single;
+                parsed_string_array_items_len += 1;
+                @field(ptr, field_name) = parsed_string_array_items[start .. start + 1];
+            }
         }
     } else if (FieldType == bool) {
         @field(ptr, field_name) = std.mem.eql(u8, val, "true");
@@ -495,7 +613,7 @@ fn setTypedField(comptime T: type, comptime FieldType: type, ptr: *T, comptime f
             @field(ptr, field_name) = parseUnsigned(u64, val);
         }
     }
-    // For types we don't handle (like [16][]const u8, ?[]const []const u8),
+    // For types we don't handle (like [16][]const u8),
     // silently skip — these require special handling or an allocator.
 }
 
@@ -518,20 +636,38 @@ fn parseUnsigned(comptime T: type, val: []const u8) T {
 ///
 /// Static buffer for config file content. String fields in Config are slices
 /// into this buffer, so it must outlive the Config struct.
-var config_file_buf: [16384]u8 = undefined;
+var config_file_buf: [65536]u8 = undefined;
 var config_file_len: usize = 0;
+
+/// Separate buffer for global config, used to merge LLM settings when a
+/// local config doesn't define them.
+var global_config_buf: [16384]u8 = undefined;
+var global_config_len: usize = 0;
 
 /// Optional explicit config path, set before calling loadConfig().
 var explicit_config_path: ?[]const u8 = null;
+var explicit_config_path_buf: [std.fs.max_path_bytes]u8 = undefined;
 
 pub fn setConfigPath(path: []const u8) void {
-    explicit_config_path = path;
+    if (path.len == 0) {
+        explicit_config_path = null;
+        return;
+    }
+
+    const copy_len = @min(path.len, explicit_config_path_buf.len - 1);
+    @memcpy(explicit_config_path_buf[0..copy_len], path[0..copy_len]);
+    explicit_config_path_buf[copy_len] = 0;
+    explicit_config_path = explicit_config_path_buf[0..copy_len];
+}
+
+pub fn clearConfigPath() void {
+    explicit_config_path = null;
 }
 
 pub fn loadConfig() Config {
     // 1. Try explicit path (set via setConfigPath / termania_create_with_config)
     if (explicit_config_path) |p| {
-        if (loadConfigFileAbsolute(p)) |cfg| return cfg;
+        if (loadConfigFileAbsolute(p)) |cfg| return mergeGlobalLlm(cfg);
     }
 
     // 2. Try $TRM_CWD/trm.toml (set by the `trm` CLI wrapper to pass the shell's cwd)
@@ -539,12 +675,12 @@ pub fn loadConfig() Config {
         var path_buf2: [512]u8 = undefined;
         const trm_path = std.fmt.bufPrint(&path_buf2, "{s}/trm.toml", .{trm_cwd}) catch null;
         if (trm_path) |p| {
-            if (loadConfigFileAbsolute(p)) |cfg| return cfg;
+            if (loadConfigFileAbsolute(p)) |cfg| return mergeGlobalLlm(cfg);
         }
     }
 
     // 3. Try ./trm.toml in the current working directory
-    if (loadConfigFile("trm.toml")) |cfg| return cfg;
+    if (loadConfigFile("trm.toml")) |cfg| return mergeGlobalLlm(cfg);
 
     // 4. Try ~/.config/trm/config.toml
     const home = std.posix.getenv("HOME") orelse return Config{};
@@ -553,6 +689,93 @@ pub fn loadConfig() Config {
     if (loadConfigFileAbsolute(path)) |cfg| return cfg;
 
     return Config{};
+}
+
+/// If a local config doesn't define [llm] settings, inherit them from the
+/// global config (~/.config/trm/config.toml). This allows users to set their
+/// API token once globally and have it work across all projects.
+fn mergeGlobalLlm(local: Config) Config {
+    // If local config already has an api_key, no need to merge
+    if (local.llm.api_key != null) return local;
+
+    const home = std.posix.getenv("HOME") orelse return local;
+    var path_buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/.config/trm/config.toml", .{home}) catch return local;
+
+    const file = std.fs.openFileAbsolute(path, .{}) catch return local;
+    defer file.close();
+    global_config_len = file.readAll(&global_config_buf) catch return local;
+
+    // Parse only the [llm] section from the global config to avoid
+    // overwriting session/pane static buffers from the local config.
+    const global_llm = parseLlmSection(global_config_buf[0..global_config_len]);
+
+    var merged = local;
+    if (local.llm.api_key == null and global_llm.api_key != null) {
+        merged.llm.api_key = global_llm.api_key;
+    }
+    if (local.llm.model == null and global_llm.model != null) {
+        merged.llm.model = global_llm.model;
+    }
+    if (local.llm.base_url == null and global_llm.base_url != null) {
+        merged.llm.base_url = global_llm.base_url;
+    }
+    if (local.llm.system_prompt == null and global_llm.system_prompt != null) {
+        merged.llm.system_prompt = global_llm.system_prompt;
+    }
+    // Merge provider if local still has the default
+    if (std.mem.eql(u8, local.llm.provider, "anthropic") and !std.mem.eql(u8, global_llm.provider, "anthropic")) {
+        merged.llm.provider = global_llm.provider;
+    }
+    // Merge max_tokens if local still has the default
+    if (local.llm.max_tokens == 1024 and global_llm.max_tokens != 1024) {
+        merged.llm.max_tokens = global_llm.max_tokens;
+    }
+    return merged;
+}
+
+/// Parse only the [llm] section from config content. This avoids touching
+/// the shared static pane/session buffers used by the full parser.
+fn parseLlmSection(content: []const u8) LlmConfig {
+    var llm = LlmConfig{};
+    var in_llm_section = false;
+
+    var line_iter = std.mem.splitSequence(u8, content, "\n");
+    while (line_iter.next()) |raw_line| {
+        const line_cr = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trim(u8, line_cr, " \t");
+
+        if (line.len == 0 or line[0] == '#') continue;
+
+        // Detect section headers (skip [[array_of_tables]])
+        if (line[0] == '[') {
+            if (line.len >= 2 and line[1] == '[') {
+                // Array of tables — not [llm]
+                if (in_llm_section) break;
+                in_llm_section = false;
+                continue;
+            }
+            const close = std.mem.indexOfScalar(u8, line, ']') orelse continue;
+            if (close > 1 and std.mem.eql(u8, std.mem.trim(u8, line[1..close], " \t"), "llm")) {
+                in_llm_section = true;
+            } else {
+                if (in_llm_section) break; // Left [llm] section
+                in_llm_section = false;
+            }
+            continue;
+        }
+
+        if (!in_llm_section) continue;
+
+        // Parse key = value
+        const eq = std.mem.indexOf(u8, line, "=") orelse continue;
+        const key = std.mem.trim(u8, line[0..eq], " \t");
+        const raw_val = std.mem.trim(u8, line[eq + 1 ..], " \t");
+        const val = stripInlineComment(raw_val);
+        setStructField(LlmConfig, &llm, key, val);
+    }
+
+    return llm;
 }
 
 fn loadConfigFile(rel_path: []const u8) ?Config {
@@ -965,6 +1188,80 @@ test "parse pane with all optional fields" {
     try testing.expectEqualSlices(u8, "Web View", cfg.panes[0].title.?);
     try testing.expectEqualSlices(u8, "https://example.com", cfg.panes[0].url.?);
     try testing.expectEqual(@as(u64, 5000), cfg.panes[0].refresh_ms.?);
+}
+
+test "parse pane initial_commands array" {
+    const cfg = loadConfigFromString(
+        \\[[sessions]]
+        \\title = "Init Commands"
+        \\
+        \\[[sessions.panes]]
+        \\pane_type = "terminal"
+        \\initial_commands = ["pwd", "echo ready"]
+    );
+    try testing.expectEqual(@as(usize, 1), cfg.panes.len);
+    const initial = cfg.panes[0].initial_commands orelse unreachable;
+    try testing.expectEqual(@as(usize, 2), initial.len);
+    try testing.expectEqualSlices(u8, "pwd", initial[0]);
+    try testing.expectEqualSlices(u8, "echo ready", initial[1]);
+}
+
+test "parse pane initial_commands empty array" {
+    const cfg = loadConfigFromString(
+        \\[[sessions]]
+        \\title = "Init Commands Empty"
+        \\
+        \\[[sessions.panes]]
+        \\pane_type = "terminal"
+        \\initial_commands = []
+    );
+    try testing.expectEqual(@as(usize, 1), cfg.panes.len);
+    const initial = cfg.panes[0].initial_commands orelse unreachable;
+    try testing.expectEqual(@as(usize, 0), initial.len);
+}
+
+test "parse pane initial_commands single string" {
+    const cfg = loadConfigFromString(
+        \\[[sessions]]
+        \\title = "Init Command Single"
+        \\
+        \\[[sessions.panes]]
+        \\pane_type = "terminal"
+        \\initial_commands = "npm run dev"
+    );
+    try testing.expectEqual(@as(usize, 1), cfg.panes.len);
+    const initial = cfg.panes[0].initial_commands orelse unreachable;
+    try testing.expectEqual(@as(usize, 1), initial.len);
+    try testing.expectEqualSlices(u8, "npm run dev", initial[0]);
+}
+
+test "parse pane initial_command alias" {
+    const cfg = loadConfigFromString(
+        \\[[sessions]]
+        \\title = "Init Command Alias"
+        \\
+        \\[[sessions.panes]]
+        \\pane_type = "terminal"
+        \\initial_command = "echo ready"
+    );
+    try testing.expectEqual(@as(usize, 1), cfg.panes.len);
+    const initial = cfg.panes[0].initial_commands orelse unreachable;
+    try testing.expectEqual(@as(usize, 1), initial.len);
+    try testing.expectEqualSlices(u8, "echo ready", initial[0]);
+}
+
+test "parse pane type alias maps to pane_type" {
+    const cfg = loadConfigFromString(
+        \\[[sessions]]
+        \\title = "Type Alias"
+        \\
+        \\[[sessions.panes]]
+        \\type = "webview"
+        \\title = "Docs"
+    );
+    try testing.expectEqual(@as(usize, 1), cfg.panes.len);
+    try testing.expectEqualSlices(u8, "webview", cfg.panes[0].pane_type);
+    try testing.expectEqualSlices(u8, "Docs", cfg.panes[0].title.?);
 }
 
 test "parse bold_family optional string" {

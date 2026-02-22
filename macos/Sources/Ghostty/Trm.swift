@@ -12,6 +12,15 @@ final class Trm {
     private(set) var handle: trm_app_t?
 
     private init() {
+        // Check for --config <path> CLI argument first.
+        if let configPath = Ghostty.Config.parseTrmConfigPath(),
+           FileManager.default.fileExists(atPath: configPath) {
+            handle = configPath.withCString { ptr in
+                termania_create_with_config(ptr)
+            }
+            return
+        }
+
         // Check if TRM_CWD was passed (from the `trm` CLI wrapper) and look
         // for trm.toml in that directory.
         if let cwd = ProcessInfo.processInfo.environment["TRM_CWD"] {
@@ -188,35 +197,35 @@ final class Trm {
 
     /// Add an overlay pane of the given type on top of fg pane.
     @discardableResult
-    func addOverlay(fgIndex: UInt32, paneType: String = "terminal") -> Bool {
+    func addOverlay(fgPaneId: UInt32, paneType: String = "terminal") -> Bool {
         guard let h = handle else { return false }
         return paneType.withCString { cstr in
-            termania_add_overlay(h, fgIndex, cstr, UInt32(paneType.utf8.count)) != 0
+            termania_add_overlay(h, fgPaneId, cstr, UInt32(paneType.utf8.count)) != 0
         }
     }
 
     /// Remove overlay from fg pane.
-    func removeOverlay(fgIndex: UInt32) {
+    func removeOverlay(fgPaneId: UInt32) {
         guard let h = handle else { return }
-        termania_remove_overlay(h, fgIndex)
+        termania_remove_overlay(h, fgPaneId)
     }
 
     /// Swap overlay layers.
-    func swapOverlay(fgIndex: UInt32) {
+    func swapOverlay(fgPaneId: UInt32) {
         guard let h = handle else { return }
-        termania_swap_overlay(h, fgIndex)
+        termania_swap_overlay(h, fgPaneId)
     }
 
     /// Toggle focus between overlay layers.
-    func toggleOverlayFocus(fgIndex: UInt32) {
+    func toggleOverlayFocus(fgPaneId: UInt32) {
         guard let h = handle else { return }
-        termania_toggle_overlay_focus(h, fgIndex)
+        termania_toggle_overlay_focus(h, fgPaneId)
     }
 
     /// Check if a pane has an overlay.
-    func hasOverlay(fgIndex: UInt32) -> Bool {
+    func hasOverlay(fgPaneId: UInt32) -> Bool {
         guard let h = handle else { return false }
-        return termania_has_overlay(h, fgIndex) != 0
+        return termania_has_overlay(h, fgPaneId) != 0
     }
 
     // MARK: - Notifications
@@ -234,16 +243,16 @@ final class Trm {
     }
 
     /// Drain pending send commands from the text tap queue.
-    /// Returns an array of (paneIndex, text) tuples. paneIndex == -1 means "all panes".
+    /// Returns an array of (paneId, text) tuples. paneId == -1 means "all panes".
     func drainSendCommands() -> [(pane: Int, text: String)] {
         guard let h = handle else { return [] }
         var results: [(pane: Int, text: String)] = []
-        var paneIndex: UInt32 = 0
+        var paneId: UInt32 = 0
         var textBuf = [CChar](repeating: 0, count: 1025)
         var textLen: UInt32 = 0
-        while termania_drain_send(h, &paneIndex, &textBuf, UInt32(textBuf.count - 1), &textLen) != 0 {
+        while termania_drain_send(h, &paneId, &textBuf, UInt32(textBuf.count - 1), &textLen) != 0 {
             let text = String(bytes: textBuf.prefix(Int(textLen)).map { UInt8(bitPattern: $0) }, encoding: .utf8) ?? ""
-            let pane = paneIndex == 0xFFFFFFFF ? -1 : Int(paneIndex)
+            let pane = paneId == 0xFFFFFFFF ? -1 : Int(paneId)
             results.append((pane: pane, text: text))
             textLen = 0
         }
@@ -294,16 +303,16 @@ final class Trm {
             }
             if let notification = self.pollNotification() {
                 self.showNotification(title: notification.title, body: notification.body)
-                let paneIndex: Int
+                let paneId: Int
                 if let h = self.handle {
-                    paneIndex = Int(termania_focused_pane(h))
+                    paneId = Int(termania_focused_pane(h))
                 } else {
-                    paneIndex = 0
+                    paneId = 0
                 }
                 NotificationCenter.default.post(
                     name: .trmClaudeNeedsAttention,
                     object: nil,
-                    userInfo: ["paneIndex": paneIndex]
+                    userInfo: ["paneId": paneId]
                 )
             }
         }
@@ -399,12 +408,30 @@ final class Trm {
         )
     }
 
+    // MARK: - Pane ID Allocation
+
+    /// Allocate a globally unique pane ID from the Zig backend.
+    /// Each call returns a fresh ID that won't collide with any other pane
+    /// across all windows (main terminal, quick terminal, etc.).
+    func allocPaneId() -> Int {
+        guard let h = handle else { return 0 }
+        return Int(termania_alloc_pane_id(h))
+    }
+
+    /// Get the stable pane ID for a grid slot index (visual order).
+    /// Returns the Zig-assigned pane ID, or falls back to the index if unavailable.
+    func gridSlotPaneId(gridIndex: Int) -> Int {
+        guard let h = handle else { return gridIndex }
+        let id = termania_grid_slot_pane_id(h, UInt32(gridIndex))
+        return id == 0xFFFFFFFF ? gridIndex : Int(id)
+    }
+
     // MARK: - Process Info
 
     /// Get the child PID (shell process) for a pane.
-    func paneChildPid(at index: UInt32) -> pid_t {
+    func paneChildPid(paneId: UInt32) -> pid_t {
         guard let h = handle else { return 0 }
-        return pid_t(termania_pane_child_pid(h, index))
+        return pid_t(termania_pane_child_pid(h, paneId))
     }
 
     // MARK: - Text Tap
@@ -417,18 +444,24 @@ final class Trm {
     }
 
     /// Check if a specific pane is targeted by a Text Tap client.
-    func isTextTapActive(pane index: Int) -> Bool {
-        guard index >= 0, index < 64 else { return false }
-        return (textTapActivePanes() >> UInt64(index)) & 1 != 0
+    func isTextTapActive(paneId: Int) -> Bool {
+        guard paneId >= 0, paneId < 64 else { return false }
+        return (textTapActivePanes() >> paneId) & 1 != 0
+    }
+
+    /// Returns the number of clients currently connected to the Text Tap socket.
+    func textTapClientCount() -> Int {
+        guard let h = handle else { return 0 }
+        return Int(termania_text_tap_client_count(h))
     }
 
     // MARK: - Watermarks
 
     /// Get the watermark text for a pane.
-    func watermark(forPane index: UInt32) -> String? {
+    func watermark(forPaneId paneId: UInt32) -> String? {
         guard let h = handle else { return nil }
         var buf = [CChar](repeating: 0, count: 129)
-        let len = termania_pane_watermark(h, index, &buf, UInt32(buf.count - 1))
+        let len = termania_pane_watermark(h, paneId, &buf, UInt32(buf.count - 1))
         guard len > 0 else { return nil }
         buf[Int(len)] = 0
         return String(cString: buf)
@@ -437,11 +470,15 @@ final class Trm {
     /// Notification posted when any pane watermark changes.
     static let watermarkDidChange = Notification.Name("TrmWatermarkDidChange")
 
+    /// Notification posted to briefly highlight a pane's watermark.
+    /// The userInfo key "paneId" contains the Int pane ID to highlight.
+    static let highlightPane = Notification.Name("TrmHighlightPane")
+
     /// Set the watermark text for a pane.
-    func setWatermark(forPane index: UInt32, text: String) {
+    func setWatermark(forPaneId paneId: UInt32, text: String) {
         guard let h = handle else { return }
         text.withCString { cstr in
-            termania_set_watermark(h, index, cstr, UInt32(text.utf8.count))
+            termania_set_watermark(h, paneId, cstr, UInt32(text.utf8.count))
         }
         NotificationCenter.default.post(name: Trm.watermarkDidChange, object: nil)
     }
@@ -474,6 +511,8 @@ final class Trm {
         let gap: CGFloat
         let padding: CGFloat
         let panes: [TrmPaneConfig]
+        /// Per-row column counts for jagged grids. Empty means use rows/cols.
+        let rowCols: [Int]
     }
 
     /// Read grid/session config from a specific config file path.
@@ -490,7 +529,7 @@ final class Trm {
     /// Read the grid/session config from termania.toml.
     func gridConfig() -> TrmGridConfig {
         guard let h = handle else {
-            return TrmGridConfig(rows: 1, cols: 1, gap: 4, padding: 4, panes: [])
+            return TrmGridConfig(rows: 1, cols: 1, gap: 4, padding: 4, panes: [], rowCols: [])
         }
 
         return Self.readGridConfig(from: h)
@@ -554,7 +593,17 @@ final class Trm {
             ))
         }
 
-        return TrmGridConfig(rows: rows, cols: cols, gap: gap, padding: padding, panes: panes)
+        // Read per-row column counts for jagged grids.
+        let rcCount = Int(termania_grid_row_cols_count(h))
+        var rowColsArr: [Int] = []
+        if rcCount > 0 {
+            rowColsArr.reserveCapacity(rcCount)
+            for i in 0..<UInt32(rcCount) {
+                rowColsArr.append(Int(termania_grid_row_cols_at(h, i)))
+            }
+        }
+
+        return TrmGridConfig(rows: rows, cols: cols, gap: gap, padding: padding, panes: panes, rowCols: rowColsArr)
     }
 
     // MARK: - LLM Config

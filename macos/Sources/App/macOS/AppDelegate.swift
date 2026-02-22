@@ -138,7 +138,13 @@ class AppDelegate: NSObject,
     /// The custom app icon image that is currently in use.
     @Published private(set) var appIcon: NSImage? = nil
 
+    /// Session config path from `--config` CLI arg, used for the initial window.
+    private var launchConfigPath: String? = nil
+
     override init() {
+        // Parse --config before Ghostty.App init so the args don't confuse Ghostty.
+        launchConfigPath = Ghostty.Config.parseTrmConfigPath()
+
 #if DEBUG
         ghostty = Ghostty.App(configPath: ProcessInfo.processInfo.environment["GHOSTTY_CONFIG_PATH"])
 #else
@@ -327,7 +333,15 @@ class AppDelegate: NSObject,
             //   - if we're restoring from persisted state
             if TerminalController.all.isEmpty && derivedConfig.initialWindow {
                 undoManager.disableUndoRegistration()
-                _ = TerminalController.newWindow(ghostty)
+                if let configPath = launchConfigPath {
+                    // --config was passed: open a window with that session config.
+                    openNewWindow(cwd: FileManager.default.currentDirectoryPath, configPath: configPath)
+                } else if ghostty.config.windowSaveState != "never",
+                          SessionManager.restoreLastSession(ghostty: ghostty) {
+                    // Restored from auto-save — no need to open a blank window.
+                } else {
+                    _ = TerminalController.newWindow(ghostty)
+                }
                 undoManager.enableUndoRegistration()
             }
         }
@@ -402,6 +416,11 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Auto-save all windows so they can be restored on next launch
+        if ghostty.config.windowSaveState != "never" {
+            SessionManager.autoSaveAllWindows()
+        }
+
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be
         // more selective and only remove surface-targeted notifications.
@@ -547,6 +566,7 @@ class AppDelegate: NSObject,
 
         if route == "new-window" {
             var cwd: String? = nil
+            var configPath: String? = nil
 
             if let b64 = items.first(where: { $0.name == "cwd_b64" })?.value,
                let data = Data(base64Encoded: b64),
@@ -556,7 +576,13 @@ class AppDelegate: NSObject,
                 cwd = str
             }
 
-            openNewWindow(cwd: cwd)
+            if let b64 = items.first(where: { $0.name == "config_b64" })?.value,
+               let data = Data(base64Encoded: b64),
+               let str = String(data: data, encoding: .utf8) {
+                configPath = str
+            }
+
+            openNewWindow(cwd: cwd, configPath: configPath)
             return true
         }
 
@@ -585,10 +611,18 @@ class AppDelegate: NSObject,
         return false
     }
 
-    private func openNewWindow(cwd: String?) {
+    private func openNewWindow(cwd: String?, configPath explicitConfigPath: String? = nil) {
         var config: Ghostty.SurfaceConfiguration? = nil
         var gridConfig: Trm.TrmGridConfig? = nil
         var trmConfigPath: String? = nil
+
+        // If an explicit --config path was provided, use it directly.
+        if let explicitConfigPath,
+           FileManager.default.fileExists(atPath: explicitConfigPath) {
+            gridConfig = Trm.gridConfig(fromConfigPath: explicitConfigPath)
+            trmConfigPath = explicitConfigPath
+        }
+
         if let cwd,
            !cwd.isEmpty {
             var isDirectory = ObjCBool(false)
@@ -598,12 +632,13 @@ class AppDelegate: NSObject,
                 c.workingDirectory = cwd
                 config = c
 
-                // If this directory has a project-local trm.toml, use that
-                // config for the newly opened window.
-                let configPath = (cwd as NSString).appendingPathComponent("trm.toml")
-                if FileManager.default.fileExists(atPath: configPath) {
-                    gridConfig = Trm.gridConfig(fromConfigPath: configPath)
-                    trmConfigPath = configPath
+                // If no explicit config was given, check for project-local trm.toml.
+                if trmConfigPath == nil {
+                    let localConfigPath = (cwd as NSString).appendingPathComponent("trm.toml")
+                    if FileManager.default.fileExists(atPath: localConfigPath) {
+                        gridConfig = Trm.gridConfig(fromConfigPath: localConfigPath)
+                        trmConfigPath = localConfigPath
+                    }
                 }
             }
         }

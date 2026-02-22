@@ -13,6 +13,16 @@ final class ServicePluginRegistry: ObservableObject {
     /// Granted capabilities per plugin.
     private var grantedCapabilities: [String: Set<PluginCapability>] = [:]
 
+    /// Per-pane disabled plugins: paneId → set of pluginIds whose overlays/notifications are suppressed.
+    @Published private(set) var disabledPlugins: [Int: Set<String>] = [:]
+
+    /// Plugins that are disabled globally by default (opt-in plugins).
+    /// These are suppressed for all panes unless explicitly enabled per-pane.
+    private(set) var globallyDisabledPlugins: Set<String> = []
+
+    /// Per-pane explicitly enabled plugins (overrides globallyDisabledPlugins).
+    @Published private(set) var enabledPlugins: [Int: Set<String>] = [:]
+
     /// The shared terminal output scanner.
     let scanner: TerminalOutputScanner
 
@@ -21,6 +31,12 @@ final class ServicePluginRegistry: ObservableObject {
 
     init(scanner: TerminalOutputScanner) {
         self.scanner = scanner
+        scanner.disabledPluginFilter = { [weak self] pluginId, paneId in
+            self?.isPluginDisabled(pluginId, forPaneId: paneId) ?? false
+        }
+        scanner.onPaneClose = { [weak self] paneId in
+            self?.clearDisabledPlugins(forPaneId: paneId)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -30,7 +46,10 @@ final class ServicePluginRegistry: ObservableObject {
     /// Register a plugin. Capabilities are granted based on the plugin's
     /// declared requirements, except `.networkAccess` which is denied by
     /// default.
-    func register(_ plugin: any ServicePlugin) {
+    func register(_ plugin: any ServicePlugin, disabledByDefault: Bool = false) {
+        if disabledByDefault {
+            globallyDisabledPlugins.insert(plugin.pluginId)
+        }
         let id = plugin.pluginId
         plugins[id] = plugin
 
@@ -69,6 +88,58 @@ final class ServicePluginRegistry: ObservableObject {
     }
 
     // ------------------------------------------------------------------
+    // MARK: Per-Pane Plugin Toggle
+    // ------------------------------------------------------------------
+
+    /// Whether a plugin's overlay/notifications are suppressed for a specific pane.
+    ///
+    /// For opt-in plugins (registered with `disabledByDefault: true`), the plugin
+    /// is disabled unless the user has explicitly enabled it for this pane.
+    /// For opt-out plugins (the default), the plugin is enabled unless explicitly disabled.
+    func isPluginDisabled(_ pluginId: String, forPaneId paneId: Int) -> Bool {
+        if globallyDisabledPlugins.contains(pluginId) {
+            // Opt-in plugin: disabled unless explicitly enabled for this pane
+            return !(enabledPlugins[paneId]?.contains(pluginId) ?? false)
+        }
+        // Opt-out plugin: enabled unless explicitly disabled for this pane
+        return disabledPlugins[paneId]?.contains(pluginId) ?? false
+    }
+
+    /// Toggle a plugin's disabled state for a specific pane.
+    ///
+    /// For opt-in plugins, toggling adds/removes from the `enabledPlugins` set.
+    /// For opt-out plugins, toggling adds/removes from the `disabledPlugins` set.
+    func togglePlugin(_ pluginId: String, forPaneId paneId: Int) {
+        if globallyDisabledPlugins.contains(pluginId) {
+            // Opt-in plugin: toggle the enabled set
+            if enabledPlugins[paneId]?.contains(pluginId) == true {
+                enabledPlugins[paneId]?.remove(pluginId)
+                if enabledPlugins[paneId]?.isEmpty == true {
+                    enabledPlugins.removeValue(forKey: paneId)
+                }
+            } else {
+                enabledPlugins[paneId, default: []].insert(pluginId)
+            }
+        } else {
+            // Opt-out plugin: toggle the disabled set
+            if disabledPlugins[paneId]?.contains(pluginId) == true {
+                disabledPlugins[paneId]?.remove(pluginId)
+                if disabledPlugins[paneId]?.isEmpty == true {
+                    disabledPlugins.removeValue(forKey: paneId)
+                }
+            } else {
+                disabledPlugins[paneId, default: []].insert(pluginId)
+            }
+        }
+    }
+
+    /// Remove all disabled/enabled plugin state for a pane (called when the pane closes).
+    func clearDisabledPlugins(forPaneId paneId: Int) {
+        disabledPlugins.removeValue(forKey: paneId)
+        enabledPlugins.removeValue(forKey: paneId)
+    }
+
+    // ------------------------------------------------------------------
     // MARK: Lifecycle
     // ------------------------------------------------------------------
 
@@ -94,6 +165,9 @@ final class ServicePluginRegistry: ObservableObject {
         stopAll()
         plugins.removeAll()
         grantedCapabilities.removeAll()
+        disabledPlugins.removeAll()
+        enabledPlugins.removeAll()
+        globallyDisabledPlugins.removeAll()
         objectWillChange.send()
     }
 }

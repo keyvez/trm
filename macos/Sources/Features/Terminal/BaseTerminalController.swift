@@ -39,6 +39,9 @@ class BaseTerminalController: NSWindowController,
         let controller: Weak<BaseTerminalController>
         let row: Int
         let flatIndex: Int
+        /// Index in the visual paneDisplayOrder (may differ from flatIndex
+        /// if panes have been rearranged via move operations).
+        let displayOrderIndex: Int?
     }
 
     /// The app instance that this terminal view will represent.
@@ -107,6 +110,17 @@ class BaseTerminalController: NSWindowController,
     /// Per-pane "move back" targets for panes that were detached into this window.
     private var detachedTerminalOrigins: [ObjectIdentifier: PaneRestorePlacement] = [:]
     private var detachedWebviewOrigins: [UUID: PaneRestorePlacement] = [:]
+
+    /// Set to `true` while a surface is being moved between windows so that
+    /// `ghosttyDidCloseSurface` notifications are suppressed during the transition.
+    /// Internal so that `TerminalController` can check it to avoid auto-closing
+    /// the window while the surface is being transferred.
+    var isMovingSurface = false
+
+    /// Set when the controller was initialized with an existing surface tree
+    /// (e.g., a popped-out pane). When true, `setupInitialPanes` is skipped
+    /// in `windowDidLoad` to avoid replacing the passed-in tree.
+    private var hasExternalSurfaceTree = false
 
     /// Explicit display order of panes. When non-empty, `gridPanes` sorts
     /// by this order instead of the default terminals → webviews → plugins.
@@ -276,7 +290,14 @@ class BaseTerminalController: NSWindowController,
             }
             return cfg
         }()
-        self.surfaceTree = tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: initialConfig))
+        if let tree = tree {
+            self.hasExternalSurfaceTree = true
+            self.surfaceTree = tree
+        } else {
+            let initialView = Ghostty.SurfaceView(ghostty_app, baseConfig: initialConfig)
+            initialView.paneId = Trm.shared.allocPaneId()
+            self.surfaceTree = .init(view: initialView)
+        }
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -363,12 +384,14 @@ class BaseTerminalController: NSWindowController,
         ) { [weak self] event in self?.localEventHandler(event) }
 
         // Wire up the live summary manager's pane content provider.
+        // Use the stable Zig pane index so summaries match overlay rendering.
         liveSummaryManager.paneContentProvider = { [weak self] in
             guard let self else { return [] }
             return self.gridSurfaces.enumerated().map { index, surface in
                 let title = surface.title.isEmpty ? "Shell" : surface.title
                 let visibleText = surface.cachedScreenContents.get()
-                return (index: index, title: title, visibleText: visibleText)
+                let effectivePaneId = surface.paneId ?? index
+                return (paneId: effectivePaneId, title: title, visibleText: visibleText)
             }
         }
 
@@ -380,10 +403,10 @@ class BaseTerminalController: NSWindowController,
             guard let self else { return [] }
             return self.gridSurfaces.enumerated().map { index, surface in
                 let visibleText = surface.cachedVisibleContents.get()
-                // Use the stable Zig pane index when available so scanner
-                // indices match what Text Tap and other Zig APIs expect.
-                let effectiveIndex = surface.zigPaneIndex ?? index
-                return (index: effectiveIndex, visibleText: visibleText)
+                // Use the stable pane ID when available so scanner
+                // IDs match what Text Tap and other Zig APIs expect.
+                let effectivePaneId = surface.paneId ?? index
+                return (paneId: effectivePaneId, visibleText: visibleText)
             }
         }
 
@@ -415,7 +438,7 @@ class BaseTerminalController: NSWindowController,
         if !allCustomPatterns.isEmpty {
             serverURLPlugin.setCustomPatterns(allCustomPatterns)
         }
-        servicePluginRegistry.register(serverURLPlugin)
+        servicePluginRegistry.register(serverURLPlugin, disabledByDefault: true)
 
         let claudeAttentionPlugin = ClaudeAttentionPlugin()
         servicePluginRegistry.register(claudeAttentionPlugin)
@@ -433,7 +456,7 @@ class BaseTerminalController: NSWindowController,
         servicePluginRegistry.register(quickActionsPlugin)
 
         let shortcutExtractorPlugin = ShortcutExtractorPlugin()
-        servicePluginRegistry.register(shortcutExtractorPlugin)
+        servicePluginRegistry.register(shortcutExtractorPlugin, disabledByDefault: true)
 
         // Subprocess plugin example (Phase 2/3 integration path):
         //
@@ -538,40 +561,102 @@ class BaseTerminalController: NSWindowController,
     ) -> Ghostty.SurfaceView? {
         guard let ghostty_app = ghostty.app else { return nil }
         let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
+        newView.paneId = nextAvailablePaneId()
 
-        // We still add the surface to the split tree so all existing lifecycle
-        // management (close, focus, undo, etc.) continues to work. We always
-        // split right to keep leaves() order matching grid order.
+        // Use the VISUAL order (gridPanes respects paneDisplayOrder) to find
+        // which row/col the focused surface occupies on screen.
+        let visualPanes = gridPanes
+        let visualIndex = visualPanes.firstIndex(where: {
+            if case .terminal(let s) = $0 { return s === oldView }
+            return false
+        }) ?? 0
+        let (row, _) = gridPosition(flatIndex: visualIndex)
+
+        // Collect the terminal surfaces in visual order for the current row so
+        // we can determine tree insertion points relative to visual neighbours.
+        let visualRowStart = flatIndexFor(row: row, col: 0)
+        let colsInRow = row < gridRowCols.count ? gridRowCols[row] : 1
+        let visualRowEnd = visualRowStart + colsInRow - 1
+
+        // Helper: extract the SurfaceView from a GridPane (terminal only).
+        func surface(of pane: GridPane) -> Ghostty.SurfaceView? {
+            if case .terminal(let s) = pane { return s }
+            return nil
+        }
+
+        // The tree's flat order. Insertion into the split tree is always
+        // .right (append after), so we need to pick the correct tree-order
+        // neighbour as anchor.
+        let treeSurfaces = Array(surfaceTree)
+        let oldTreeIndex = treeSurfaces.firstIndex(where: { $0 === oldView }) ?? 0
+
+        let insertAfter: Ghostty.SurfaceView
+        switch direction {
+        case .right:
+            insertAfter = oldView
+        case .left:
+            if oldTreeIndex > 0 {
+                insertAfter = treeSurfaces[oldTreeIndex - 1]
+            } else {
+                insertAfter = oldView
+            }
+        case .down:
+            // Insert after the last surface of the current VISUAL row.
+            let lastVisualIdx = min(visualRowEnd, visualPanes.count - 1)
+            if let s = surface(of: visualPanes[lastVisualIdx]) {
+                insertAfter = s
+            } else {
+                insertAfter = oldView
+            }
+        case .up:
+            // Insert before the first surface of the current VISUAL row.
+            if visualRowStart > 0, let s = surface(of: visualPanes[visualRowStart - 1]) {
+                insertAfter = s
+            } else {
+                insertAfter = oldView
+            }
+        }
+
         let newTree: SplitTree<Ghostty.SurfaceView>
         do {
             newTree = try surfaceTree.inserting(
                 view: newView,
-                at: oldView,
+                at: insertAfter,
                 direction: .right)
         } catch {
             Ghostty.logger.warning("failed to insert grid pane: \(error)")
             return nil
         }
 
-        // Find which row the old surface is in
-        let surfaces = Array(surfaceTree)
-        let oldFlatIndex = surfaces.firstIndex(where: { $0 === oldView }) ?? 0
-        let (row, _) = gridPosition(flatIndex: oldFlatIndex)
-
         // Update grid shape based on direction
         switch direction {
         case .right, .left:
-            // Add column to current row
             if row < gridRowCols.count {
                 gridRowCols[row] += 1
             }
         case .down:
-            // Add new row below
             let insertRow = min(row + 1, gridRowCols.count)
             gridRowCols.insert(1, at: insertRow)
         case .up:
-            // Add new row above
             gridRowCols.insert(1, at: row)
+        }
+
+        // Insert the new pane into paneDisplayOrder at the correct visual
+        // position so the grid doesn't reorder existing panes.
+        let newId = ObjectIdentifier(newView)
+        if !paneDisplayOrder.isEmpty {
+            let displayInsertPos: Int
+            switch direction {
+            case .right:
+                displayInsertPos = min(visualIndex + 1, paneDisplayOrder.count)
+            case .left:
+                displayInsertPos = visualIndex
+            case .down:
+                displayInsertPos = min(visualRowEnd + 1, paneDisplayOrder.count)
+            case .up:
+                displayInsertPos = visualRowStart
+            }
+            paneDisplayOrder.insert(newId, at: displayInsertPos)
         }
 
         replaceSurfaceTree(
@@ -599,6 +684,11 @@ class BaseTerminalController: NSWindowController,
     /// Resolve the current terminal pane index for a specific surface.
     func paneIndex(for surface: Ghostty.SurfaceView) -> Int? {
         gridSurfaces.firstIndex(where: { $0 === surface })
+    }
+
+    /// Allocate a globally unique pane ID from the Zig backend.
+    private func nextAvailablePaneId() -> Int {
+        return Trm.shared.allocPaneId()
     }
 
     // MARK: - Pane Display Order
@@ -630,6 +720,34 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
+    /// Insert a new pane ID into display order at the end of the given row.
+    /// If the order array hasn't been initialized yet, build it first.
+    private func insertIntoPaneDisplayOrder(_ id: ObjectIdentifier, atEndOfRow row: Int) {
+        if paneDisplayOrder.isEmpty && gridPanes.count > 1 {
+            paneDisplayOrder = gridPanes.map(\.id)
+        }
+        guard !paneDisplayOrder.isEmpty else { return }
+        guard row >= 0, row < gridRowCols.count else { return }
+        let rowEnd = flatIndexFor(row: row, col: gridRowCols[row] - 1)
+        let insertPos = min(rowEnd, paneDisplayOrder.count)
+        if !paneDisplayOrder.contains(id) {
+            paneDisplayOrder.insert(id, at: insertPos)
+        }
+    }
+
+    /// Determine which row the currently focused surface is in.
+    private func focusedRow() -> Int {
+        guard let surface = focusedSurface else { return max(gridRowCols.count - 1, 0) }
+        let visualPanes = gridPanes
+        if let idx = visualPanes.firstIndex(where: {
+            if case .terminal(let s) = $0 { return s === surface }
+            return false
+        }) {
+            return gridPosition(flatIndex: idx).row
+        }
+        return max(gridRowCols.count - 1, 0)
+    }
+
     /// Move pane in the given direction within the grid.
     enum PaneMoveDirection {
         case left, right, up, down
@@ -641,42 +759,80 @@ class BaseTerminalController: NSWindowController,
         guard panes.count > 1 else { return }
 
         guard let flatIndex = panes.firstIndex(where: { $0.id == pane.id }) else { return }
-        let (row, col) = gridPosition(flatIndex: flatIndex)
+        let (srcRow, col) = gridPosition(flatIndex: flatIndex)
 
-        let targetIndex: Int?
         switch direction {
         case .left:
-            targetIndex = col > 0 ? flatIndex - 1 : nil
+            guard col > 0 else { return }
+            swapPanesInDisplayOrder(panes, flatIndex, flatIndex - 1)
+
         case .right:
-            let rowCols = row < gridRowCols.count ? gridRowCols[row] : 1
-            targetIndex = col < rowCols - 1 ? flatIndex + 1 : nil
+            let rowCols = srcRow < gridRowCols.count ? gridRowCols[srcRow] : 1
+            guard col < rowCols - 1 else { return }
+            swapPanesInDisplayOrder(panes, flatIndex, flatIndex + 1)
+
         case .up:
-            if row > 0 {
-                // Move to the row above at the same column (clamped).
-                let aboveCols = gridRowCols[row - 1]
-                let aboveCol = min(col, aboveCols - 1)
-                targetIndex = flatIndexFor(row: row - 1, col: aboveCol)
-            } else {
-                targetIndex = nil
-            }
+            guard srcRow > 0 else { return }
+            relocatePane(panes, flatIndex: flatIndex, fromRow: srcRow, toRow: srcRow - 1)
+
         case .down:
-            if row < gridRowCols.count - 1 {
-                let belowCols = gridRowCols[row + 1]
-                let belowCol = min(col, belowCols - 1)
-                targetIndex = flatIndexFor(row: row + 1, col: belowCol)
-            } else {
-                targetIndex = nil
-            }
+            guard srcRow < gridRowCols.count - 1 else { return }
+            relocatePane(panes, flatIndex: flatIndex, fromRow: srcRow, toRow: srcRow + 1)
         }
 
-        guard let target = targetIndex, target != flatIndex else { return }
+        // Flash the moved pane's watermark so the user can track it.
+        // Delay slightly so SwiftUI finishes re-laying out the grid before
+        // the highlight triggers — otherwise the view may be recreated at its
+        // new position and miss the onChange transition.
+        if case .terminal(let surface) = pane, let pid = surface.paneId {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                NotificationCenter.default.post(
+                    name: Trm.highlightPane,
+                    object: nil,
+                    userInfo: ["paneId": pid]
+                )
+            }
+        }
+    }
 
-        // Swap in the display order array
-        let srcID = panes[flatIndex].id
-        let dstID = panes[target].id
+    /// Swap two panes within the same row in display order and sync Zig state.
+    private func swapPanesInDisplayOrder(_ panes: [GridPane], _ i: Int, _ j: Int) {
+        let srcID = panes[i].id
+        let dstID = panes[j].id
         guard let srcOrderIdx = paneDisplayOrder.firstIndex(of: srcID),
               let dstOrderIdx = paneDisplayOrder.firstIndex(of: dstID) else { return }
         paneDisplayOrder.swapAt(srcOrderIdx, dstOrderIdx)
+
+        // Keep the Zig-side grid_order in sync so watermarks, Text Tap, and
+        // other pane-indexed features follow the moved pane.
+        if case .terminal(let srcSurface) = panes[i],
+           case .terminal(let dstSurface) = panes[j],
+           let srcPaneId = srcSurface.paneId,
+           let dstPaneId = dstSurface.paneId {
+            if let h = Trm.shared.handle {
+                termania_swap_pane_order(h, UInt32(srcPaneId), UInt32(dstPaneId))
+            }
+        }
+    }
+
+    /// Relocate a pane from one row to another (used for up/down moves).
+    /// Removes the pane from the source row, adjusts `gridRowCols`, and
+    /// appends it to the end of the target row.
+    private func relocatePane(_ panes: [GridPane], flatIndex: Int, fromRow: Int, toRow: Int) {
+        var layout = GridLayout<ObjectIdentifier>(
+            rowCols: gridRowCols,
+            displayOrder: paneDisplayOrder
+        )
+        layout.relocate(flatIndex: flatIndex, fromRow: fromRow, toRow: toRow)
+        gridRowCols = layout.rowCols
+        paneDisplayOrder = layout.displayOrder
+    }
+
+    /// Move the currently focused pane in the given direction.
+    func moveFocusedPane(_ direction: PaneMoveDirection) {
+        guard let surface = focusedSurface else { return }
+        let pane = GridPane.terminal(surface)
+        movePane(pane, direction: direction)
     }
 
     private func flatIndexFor(row: Int, col: Int) -> Int {
@@ -692,14 +848,18 @@ class BaseTerminalController: NSWindowController,
     private func capturePlacement(forTerminal surface: Ghostty.SurfaceView) -> PaneRestorePlacement? {
         guard let flatIndex = gridSurfaces.firstIndex(where: { $0 === surface }) else { return nil }
         let (row, _) = gridPosition(flatIndex: flatIndex)
-        return .init(controller: .init(self), row: row, flatIndex: flatIndex)
+        let displayIdx = paneDisplayOrder.firstIndex(of: ObjectIdentifier(surface))
+        return .init(controller: .init(self), row: row, flatIndex: flatIndex,
+                     displayOrderIndex: displayIdx)
     }
 
     private func capturePlacement(forWebview pane: WebViewPane) -> PaneRestorePlacement? {
         guard let webIdx = webviewPanes.firstIndex(where: { $0.id == pane.id }) else { return nil }
         let flatIndex = gridSurfaces.count + webIdx
         let (row, _) = gridPosition(flatIndex: flatIndex)
-        return .init(controller: .init(self), row: row, flatIndex: flatIndex)
+        let displayIdx = paneDisplayOrder.firstIndex(of: ObjectIdentifier(pane))
+        return .init(controller: .init(self), row: row, flatIndex: flatIndex,
+                     displayOrderIndex: displayIdx)
     }
 
     private func applyRestoredRowInsert(_ row: Int) {
@@ -763,6 +923,14 @@ class BaseTerminalController: NSWindowController,
         guard gridPanes.count > 1 else { return }
         let restorePlacement = capturePlacement(forTerminal: target)
 
+        Ghostty.logger.info("detach: moving surface \(String(describing: ObjectIdentifier(target))) from \(self.gridPanes.count)-pane window")
+
+        // Suppress ghosttyDidCloseSurface notifications during the move so that
+        // close events fired by libghostty in the transition gap don't kill the
+        // surface while it is between windows.
+        isMovingSurface = true
+        defer { isMovingSurface = false }
+
         // If we are removing our focused surface then we move it. We need to
         // keep track of our old one so undo sends focus back to the right place.
         let oldFocusedSurface = focusedSurface
@@ -799,15 +967,44 @@ class BaseTerminalController: NSWindowController,
             }
         }
 
-        replaceSurfaceTree(removedTree, moveFocusFrom: oldFocusedSurface)
+        // Remove the detached surface from paneDisplayOrder so the grid
+        // rendering in the old window doesn't reference a stale entry.
+        if !paneDisplayOrder.isEmpty {
+            paneDisplayOrder.removeAll { $0 == ObjectIdentifier(target) }
+        }
+
+        // Suppress undo registration for the tree replacement in the old window.
+        // The default undo registered by replaceSurfaceTree captures the old tree
+        // (which still contains the moved surface), creating dual-ownership if the
+        // user later undoes. We register a correct undo action below instead.
+        undoManager?.disableUndoRegistration {
+            replaceSurfaceTree(removedTree, moveFocusFrom: oldFocusedSurface)
+        }
+
+        // Open the new window synchronously to minimize the transition gap where
+        // the surface exists in neither window's tree.
         let detached = TerminalController.newWindow(
             ghostty,
             tree: newTree,
             position: position,
-            confirmUndo: false
+            confirmUndo: false,
+            showImmediately: true
         )
         if let restorePlacement {
             detached.detachedTerminalOrigins[ObjectIdentifier(target)] = restorePlacement
+        }
+
+        Ghostty.logger.info("detach: surface moved to new window, old window now has \(self.gridPanes.count) panes")
+
+        // Briefly highlight the popped-out pane in its new window.
+        if let pid = target.paneId {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                NotificationCenter.default.post(
+                    name: Trm.highlightPane,
+                    object: nil,
+                    userInfo: ["paneId": pid]
+                )
+            }
         }
     }
 
@@ -866,10 +1063,19 @@ class BaseTerminalController: NSWindowController,
             return
         }
 
-        // Remove from source.
-        removeSurfaceNode(sourceNode)
+        // Suppress ghosttyDidCloseSurface notifications on both controllers
+        // during the move so that close events fired by libghostty in the
+        // transition gap don't kill the surface while it is between windows.
+        isMovingSurface = true
+        targetController.isMovingSurface = true
+        defer {
+            isMovingSurface = false
+            targetController.isMovingSurface = false
+        }
 
-        // Update target grid shape.
+        // Update target grid shape and tree FIRST, so the surface is owned
+        // by the target before we remove it from the source. This prevents
+        // the surface from being deallocated if the source window closes.
         if let restorePlacement,
            restorePlacement.controller.value === targetController {
             targetController.applyRestoredRowInsert(restorePlacement.row)
@@ -893,12 +1099,88 @@ class BaseTerminalController: NSWindowController,
             targetController.gridRowCols = [max(1, existingExtraCount + 1)]
         }
 
+        // Post the highlight notification synchronously BEFORE the tree swap
+        // so that the suppress flag is set before the focus-change handler fires.
+        if let pid = source.paneId {
+            NotificationCenter.default.post(
+                name: Trm.highlightPane,
+                object: nil,
+                userInfo: ["paneId": pid]
+            )
+        }
+
         targetController.replaceSurfaceTree(
             targetTree,
             moveFocusTo: source,
             moveFocusFrom: targetController.focusedSurface,
             undoAction: "Move Pane"
         )
+
+        // Insert the surface at the correct position in paneDisplayOrder so
+        // that the visual grid order matches the restored position.
+        let sourceId = ObjectIdentifier(source)
+        if !targetController.paneDisplayOrder.isEmpty {
+            targetController.paneDisplayOrder.removeAll { $0 == sourceId }
+            if let restorePlacement,
+               restorePlacement.controller.value === targetController,
+               let displayIdx = restorePlacement.displayOrderIndex {
+                // Restore to the original display order position.
+                let insertPos = min(displayIdx, targetController.paneDisplayOrder.count)
+                targetController.paneDisplayOrder.insert(sourceId, at: insertPos)
+            } else {
+                // No saved position — use the tree flat index as best guess.
+                let newSurfaces = Array(targetTree)
+                let insertedFlatIndex = newSurfaces.firstIndex(where: { $0 === source }) ?? newSurfaces.count - 1
+                let insertPos = min(insertedFlatIndex, targetController.paneDisplayOrder.count)
+                targetController.paneDisplayOrder.insert(sourceId, at: insertPos)
+            }
+        }
+
+        // Now remove from source. The surface is safely owned by the target
+        // tree, so even if the source window closes, the surface survives.
+        // Use direct tree manipulation instead of removeSurfaceNode() to avoid
+        // registering a "Close Terminal" undo and triggering window-close logic
+        // that would deallocate the surface.
+        let oldFocused = focusedSurface
+        if focusedSurface == source {
+            focusedSurface = findNextFocusTargetAfterClosing(node: sourceNode)
+        }
+
+        if useGridLayout {
+            let surfaces = Array(surfaceTree)
+            if let flatIdx = surfaces.firstIndex(where: { $0 === source }) {
+                let (row, _) = gridPosition(flatIndex: flatIdx)
+                if row < gridRowCols.count {
+                    if gridRowCols[row] > 1 {
+                        gridRowCols[row] -= 1
+                    } else if gridRowCols.count > 1 {
+                        gridRowCols.remove(at: row)
+                    }
+                    if gridRowCols.isEmpty {
+                        gridRowCols = [1]
+                    }
+                }
+            }
+        }
+
+        if !paneDisplayOrder.isEmpty {
+            paneDisplayOrder.removeAll { $0 == sourceKey }
+        }
+
+        let removedTree = surfaceTree.removing(sourceNode)
+        undoManager?.disableUndoRegistration {
+            replaceSurfaceTree(removedTree, moveFocusFrom: oldFocused)
+        }
+
+        // If the source window is now empty (this was its only pane), close it.
+        // The surface is safe because the target already owns it.
+        if surfaceTree.isEmpty && webviewPanes.isEmpty && pluginPanes.isEmpty {
+            if let terminal = self as? TerminalController {
+                terminal.closeTabImmediately(registerRedo: false)
+            } else {
+                window?.close()
+            }
+        }
 
         targetController.window?.makeKeyAndOrderFront(nil)
         if !NSApp.isActive {
@@ -911,9 +1193,9 @@ class BaseTerminalController: NSWindowController,
     private func insertWebviewPane(_ pane: WebViewPane, at index: Int? = nil, preferredRow: Int? = nil) {
         let insertAt = min(max(index ?? webviewPanes.count, 0), webviewPanes.count)
         webviewPanes.insert(pane, at: insertAt)
-        appendToPaneDisplayOrder(ObjectIdentifier(pane))
 
         if let preferredRow {
+            appendToPaneDisplayOrder(ObjectIdentifier(pane))
             applyRestoredRowInsert(preferredRow)
             return
         }
@@ -921,15 +1203,17 @@ class BaseTerminalController: NSWindowController,
         if gridRowCols.isEmpty {
             gridRowCols = [1]
         }
-        gridRowCols[gridRowCols.count - 1] += 1
+        let row = focusedRow()
+        gridRowCols[row] += 1
+        insertIntoPaneDisplayOrder(ObjectIdentifier(pane), atEndOfRow: row)
     }
 
     private func insertPluginPane(_ pane: PluginPane, at index: Int? = nil, preferredRow: Int? = nil) {
         let insertAt = min(max(index ?? pluginPanes.count, 0), pluginPanes.count)
         pluginPanes.insert(pane, at: insertAt)
-        appendToPaneDisplayOrder(ObjectIdentifier(pane))
 
         if let preferredRow {
+            appendToPaneDisplayOrder(ObjectIdentifier(pane))
             applyRestoredRowInsert(preferredRow)
             return
         }
@@ -937,7 +1221,9 @@ class BaseTerminalController: NSWindowController,
         if gridRowCols.isEmpty {
             gridRowCols = [1]
         }
-        gridRowCols[gridRowCols.count - 1] += 1
+        let row = focusedRow()
+        gridRowCols[row] += 1
+        insertIntoPaneDisplayOrder(ObjectIdentifier(pane), atEndOfRow: row)
     }
 
     @discardableResult
@@ -1091,7 +1377,7 @@ class BaseTerminalController: NSWindowController,
             let visibleText = surface.cachedScreenContents.get()
 
             return PaneContext(
-                index: index,
+                paneId: surface.paneId ?? index,
                 title: title,
                 isFocused: isFocused,
                 visibleText: visibleText
@@ -1104,33 +1390,30 @@ class BaseTerminalController: NSWindowController,
         let surfaces = gridSurfaces
         for action in actions {
             switch action {
-            case .sendCommand(let pane, let command):
-                guard pane < surfaces.count else { continue }
-                sendTextToSurface(surfaces[pane], text: command + "\n")
+            case .sendCommand(let paneId, let command):
+                guard let surface = surfaces.first(where: { ($0.paneId ?? -1) == paneId }) else { continue }
+                sendTextToSurface(surface, text: command + "\n")
 
             case .sendToAll(let command):
                 for surface in surfaces {
                     sendTextToSurface(surface, text: command + "\n")
                 }
 
-            case .setTitle(let pane, let title):
-                guard pane < surfaces.count else { continue }
-                // Set watermark as a visual title indicator
-                Trm.shared.setWatermark(forPane: UInt32(pane), text: title)
+            case .setTitle(let paneId, let title):
+                Trm.shared.setWatermark(forPaneId: UInt32(paneId), text: title)
 
-            case .setWatermark(let pane, let watermark):
-                guard pane < surfaces.count else { continue }
-                Trm.shared.setWatermark(forPane: UInt32(pane), text: watermark)
+            case .setWatermark(let paneId, let watermark):
+                Trm.shared.setWatermark(forPaneId: UInt32(paneId), text: watermark)
 
-            case .clearWatermark(let pane):
-                guard pane < surfaces.count else { continue }
-                Trm.shared.setWatermark(forPane: UInt32(pane), text: "")
+            case .clearWatermark(let paneId):
+                Trm.shared.setWatermark(forPaneId: UInt32(paneId), text: "")
 
             case .spawnPane:
                 if let current = focusedSurface ?? surfaces.first {
                     newGridPane(at: current, direction: .right)
                 } else if let ghosttyApp = ghostty.app {
                     let newView = Ghostty.SurfaceView(ghosttyApp, baseConfig: nil)
+                    newView.paneId = nextAvailablePaneId()
                     replaceSurfaceTree(
                         .init(view: newView),
                         moveFocusTo: newView,
@@ -1144,13 +1427,13 @@ class BaseTerminalController: NSWindowController,
                     }
                 }
 
-            case .closePane(let pane):
-                guard pane < surfaces.count else { continue }
-                closeSurface(surfaces[pane], withConfirmation: false)
+            case .closePane(let paneId):
+                guard let surface = surfaces.first(where: { ($0.paneId ?? -1) == paneId }) else { continue }
+                closeSurface(surface, withConfirmation: false)
 
-            case .focusPane(let pane):
-                guard pane < surfaces.count else { continue }
-                focusSurface(surfaces[pane])
+            case .focusPane(let paneId):
+                guard let surface = surfaces.first(where: { ($0.paneId ?? -1) == paneId }) else { continue }
+                focusSurface(surface)
 
             case .message:
                 // Messages are displayed in the command palette response area,
@@ -1390,51 +1673,18 @@ class BaseTerminalController: NSWindowController,
             }
         }
 
+        // Clear watermarks for surfaces being permanently closed (not moved).
+        for surface in node {
+            let id = surface.paneId ?? 0
+            Trm.shared.setWatermark(forPaneId: UInt32(id), text: "")
+        }
+
         replaceSurfaceTree(
             surfaceTree.removing(node),
             moveFocusTo: nextFocus,
             moveFocusFrom: focusedSurface,
             undoAction: "Close Terminal"
         )
-    }
-
-    /// Snapshot non-empty terminal watermarks keyed by stable surface identity.
-    private func snapshotTerminalWatermarks(
-        for surfaces: [Ghostty.SurfaceView]
-    ) -> [ObjectIdentifier: String] {
-        var result: [ObjectIdentifier: String] = [:]
-        result.reserveCapacity(surfaces.count)
-
-        for (index, surface) in surfaces.enumerated() {
-            guard let text = Trm.shared.watermark(forPane: UInt32(index)),
-                  !text.isEmpty else { continue }
-            result[ObjectIdentifier(surface)] = text
-        }
-
-        return result
-    }
-
-    /// Reapply watermarks after a tree change so labels stay attached to panes,
-    /// not their old visual index positions.
-    private func remapTerminalWatermarks(
-        from oldSurfaces: [Ghostty.SurfaceView],
-        to newSurfaces: [Ghostty.SurfaceView]
-    ) {
-        let watermarkBySurface = snapshotTerminalWatermarks(for: oldSurfaces)
-        let clearCount = max(oldSurfaces.count, newSurfaces.count)
-        guard clearCount > 0 else { return }
-
-        // Clear stale per-index entries first so closed panes don't leak labels
-        // to newly created panes that later reuse the same index.
-        for index in 0..<clearCount {
-            Trm.shared.setWatermark(forPane: UInt32(index), text: "")
-        }
-
-        for (index, surface) in newSurfaces.enumerated() {
-            guard let text = watermarkBySurface[ObjectIdentifier(surface)],
-                  !text.isEmpty else { continue }
-            Trm.shared.setWatermark(forPane: UInt32(index), text: text)
-        }
     }
 
     func replaceSurfaceTree(
@@ -1446,8 +1696,13 @@ class BaseTerminalController: NSWindowController,
         // Setup our new split tree
         let oldTree = surfaceTree
         let oldSurfaces = Array(oldTree)
-        let newSurfaces = Array(newTree)
-        remapTerminalWatermarks(from: oldSurfaces, to: newSurfaces)
+        let newSurfaces = Set(newTree.map { ObjectIdentifier($0) })
+
+        // Watermark clearing is handled by removeSurfaceNode (for permanent
+        // closes) and setupInitialPanes (for initial layout). We do NOT clear
+        // watermarks here because replaceSurfaceTree is also called during pane
+        // moves between windows, where the surface is still alive.
+
         surfaceTree = newTree
         if let newView {
             DispatchQueue.main.async {
@@ -1599,6 +1854,10 @@ class BaseTerminalController: NSWindowController,
     }
 
     @objc private func ghosttyDidCloseSurface(_ notification: Notification) {
+        guard !isMovingSurface else {
+            Ghostty.logger.info("ghosttyDidCloseSurface suppressed during surface move")
+            return
+        }
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard let node = surfaceTree.root?.node(view: target) else { return }
         closeSurface(
@@ -1667,10 +1926,10 @@ class BaseTerminalController: NSWindowController,
     @objc private func handleQuickActionExecute(_ notification: Notification) {
         guard window?.isKeyWindow == true else { return }
         guard let command = notification.userInfo?["command"] as? String,
-              let paneIndex = notification.userInfo?["paneIndex"] as? Int else { return }
+              let paneId = notification.userInfo?["paneId"] as? Int else { return }
         let surfaces = gridSurfaces
-        guard paneIndex >= 0, paneIndex < surfaces.count else { return }
-        sendTextToSurface(surfaces[paneIndex], text: command + "\n")
+        guard let surface = surfaces.first(where: { ($0.paneId ?? -1) == paneId }) else { return }
+        sendTextToSurface(surface, text: command + "\n")
     }
 
     // MARK: Shortcut Extractor
@@ -1678,11 +1937,11 @@ class BaseTerminalController: NSWindowController,
     @objc private func handleShortcutExecute(_ notification: Notification) {
         guard window?.isKeyWindow == true else { return }
         guard let key = notification.userInfo?["key"] as? String,
-              let paneIndex = notification.userInfo?["paneIndex"] as? Int else { return }
+              let paneId = notification.userInfo?["paneId"] as? Int else { return }
         let surfaces = gridSurfaces
-        guard paneIndex >= 0, paneIndex < surfaces.count else { return }
+        guard let surface = surfaces.first(where: { ($0.paneId ?? -1) == paneId }) else { return }
         // Send raw keystroke without newline — dev tools read stdin char-by-char.
-        sendTextToSurface(surfaces[paneIndex], text: key)
+        sendTextToSurface(surface, text: key)
     }
 
     /// Close and remove a webview pane from the grid.
@@ -1968,6 +2227,10 @@ class BaseTerminalController: NSWindowController,
         case loadToml(pathArg: String?)
         case saveToml(pathArg: String?)
         case addPane(type: String)
+        case saveSession(name: String?)
+        case restoreLastSession
+        case restoreSession(name: String?)
+        case clearAutoSave
     }
 
     private func handleInternalCommand(_ action: String, on surfaceView: Ghostty.SurfaceView) -> Bool {
@@ -1982,6 +2245,18 @@ class BaseTerminalController: NSWindowController,
             return true
         case .addPane(let type):
             addPaneOfType(type, on: surfaceView)
+            return true
+        case .saveSession(let name):
+            handleSaveSession(name: name)
+            return true
+        case .restoreLastSession:
+            handleRestoreLastSession()
+            return true
+        case .restoreSession(let name):
+            handleRestoreSession(name: name)
+            return true
+        case .clearAutoSave:
+            SessionManager.clearAutoSaves()
             return true
         }
     }
@@ -2028,6 +2303,41 @@ class BaseTerminalController: NSWindowController,
             let arg = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !arg.isEmpty else { continue }
             return .addPane(type: arg)
+        }
+
+        // trm.save_session [name]
+        let bareSaveSessionNames: Set<String> = ["trm.save_session"]
+        if bareSaveSessionNames.contains(trimmed) {
+            return .saveSession(name: nil)
+        }
+        for prefix in ["trm.save_session "] {
+            guard trimmed.hasPrefix(prefix) else { continue }
+            let arg = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = normalizeQuotedArgument(arg)
+            return .saveSession(name: normalized.isEmpty ? nil : normalized)
+        }
+
+        // trm.restore_last_session / trm.restore_last
+        let restoreLastNames: Set<String> = ["trm.restore_last_session", "trm.restore_last"]
+        if restoreLastNames.contains(trimmed) {
+            return .restoreLastSession
+        }
+
+        // trm.restore_session [name]
+        let bareRestoreSessionNames: Set<String> = ["trm.restore_session"]
+        if bareRestoreSessionNames.contains(trimmed) {
+            return .restoreSession(name: nil)
+        }
+        for prefix in ["trm.restore_session "] {
+            guard trimmed.hasPrefix(prefix) else { continue }
+            let arg = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = normalizeQuotedArgument(arg)
+            return .restoreSession(name: normalized.isEmpty ? nil : normalized)
+        }
+
+        // trm.clear_autosave
+        if trimmed == "trm.clear_autosave" {
+            return .clearAutoSave
         }
 
         return nil
@@ -2177,7 +2487,92 @@ class BaseTerminalController: NSWindowController,
         insertPluginPane(pane)
     }
 
-    private func buildCurrentConfigToml() -> String {
+    // MARK: - Session Commands
+
+    private func handleSaveSession(name: String?) {
+        if let name, !name.isEmpty {
+            SessionManager.saveNamedSession(name: name, controller: self)
+            return
+        }
+
+        // Show name input dialog
+        guard let window else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Save Session"
+        alert.informativeText = "Enter a name for this session:"
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        input.placeholderString = "my-session"
+        alert.accessoryView = input
+
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            let sessionName = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !sessionName.isEmpty else { return }
+            SessionManager.saveNamedSession(name: sessionName, controller: self)
+        }
+    }
+
+    private func handleRestoreLastSession() {
+        SessionManager.restoreLastSession(ghostty: ghostty)
+    }
+
+    private func handleRestoreSession(name: String?) {
+        if let name, !name.isEmpty {
+            // Restore by name directly
+            let sessions = SessionManager.listNamedSessions()
+            if let session = sessions.first(where: { $0.name == name }) {
+                SessionManager.restoreNamedSession(path: session.path, ghostty: ghostty)
+            } else {
+                presentInternalCommandError(
+                    title: "Session Not Found",
+                    message: "No saved session named '\(name)' was found."
+                )
+            }
+            return
+        }
+
+        // Show picker dialog listing saved sessions
+        let sessions = SessionManager.listNamedSessions()
+        guard !sessions.isEmpty else {
+            presentInternalCommandError(
+                title: "No Saved Sessions",
+                message: "There are no saved sessions to restore.\n\nUse \"Save Session As...\" to save one first."
+            )
+            return
+        }
+
+        guard let window else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Restore Session"
+        alert.informativeText = "Choose a saved session to restore:"
+        alert.addButton(withTitle: "Restore")
+        alert.addButton(withTitle: "Cancel")
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 24), pullsDown: false)
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .short
+        dateFormatter.timeStyle = .short
+        for session in sessions {
+            let dateStr = dateFormatter.string(from: session.modificationDate)
+            popup.addItem(withTitle: "\(session.name)  (\(dateStr))")
+        }
+        alert.accessoryView = popup
+
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            let selectedIndex = popup.indexOfSelectedItem
+            guard selectedIndex >= 0, selectedIndex < sessions.count else { return }
+            let session = sessions[selectedIndex]
+            SessionManager.restoreNamedSession(path: session.path, ghostty: self.ghostty)
+        }
+    }
+
+    func buildCurrentConfigToml() -> String {
         let dateFormatter = ISO8601DateFormatter()
         dateFormatter.formatOptions = [.withInternetDateTime]
         let timestamp = dateFormatter.string(from: Date())
@@ -2192,74 +2587,81 @@ class BaseTerminalController: NSWindowController,
         lines.append("[grid]")
         lines.append("rows = \(rows)")
         lines.append("cols = \(cols)")
+        // Serialize per-row column counts so jagged grids survive round-trip.
+        let isJagged = Set(gridRowCols).count > 1
+        if isJagged {
+            let rowColsStr = gridRowCols.map(String.init).joined(separator: ",")
+            lines.append("row_cols = \(tomlQuote(rowColsStr))")
+        }
         lines.append("gap = \(Int(gridGap))")
         lines.append("outer_padding = \(Int(gridPadding))")
         lines.append("")
 
-        // Terminal panes
-        let surfaces = gridSurfaces
-        for (index, surface) in surfaces.enumerated() {
-            lines.append("[[panes]]")
-            lines.append("pane_type = \"terminal\"")
-            if let pwd = surface.pwd, !pwd.isEmpty {
-                lines.append("cwd = \(tomlQuote(pwd))")
-            }
-            let watermark = Trm.shared.watermark(forPane: UInt32(index))
-            if let watermark, !watermark.isEmpty {
-                lines.append("watermark = \(tomlQuote(watermark))")
-            }
-            lines.append("")
-        }
-
-        // Webview panes
-        for pane in webviewPanes {
-            lines.append("[[panes]]")
-            lines.append("pane_type = \"webview\"")
-            let url = pane.currentURL ?? pane.initialURL
-            lines.append("url = \(tomlQuote(url.absoluteString))")
-            if !pane.title.isEmpty {
-                lines.append("title = \(tomlQuote(pane.title))")
-            }
-            lines.append("")
-        }
-
-        // Plugin panes
-        for pane in pluginPanes {
-            lines.append("[[panes]]")
-            lines.append("pane_type = \(tomlQuote(pane.kind.rawValue))")
-            if let title = pane.configuredTitle, !title.isEmpty {
-                lines.append("title = \(tomlQuote(title))")
-            }
-            if let cwd = pane.cwd, !cwd.isEmpty {
-                lines.append("cwd = \(tomlQuote(cwd))")
-            }
-            if let file = pane.file, !file.isEmpty {
-                lines.append("file = \(tomlQuote(file))")
-            }
-            // For notes panes, save current text instead of original content
-            if pane.kind == .notes {
-                if !pane.notesText.isEmpty {
-                    lines.append("content = \(tomlQuote(pane.notesText))")
+        // Serialize panes in visual (display) order so watermarks,
+        // positions, and pane types stay consistent on reload.
+        let visualPanes = gridPanes
+        for (index, pane) in visualPanes.enumerated() {
+            switch pane {
+            case .terminal(let surface):
+                lines.append("[[panes]]")
+                lines.append("pane_type = \"terminal\"")
+                if let pwd = surface.pwd, !pwd.isEmpty {
+                    lines.append("cwd = \(tomlQuote(pwd))")
                 }
-            } else if let content = pane.content, !content.isEmpty {
-                lines.append("content = \(tomlQuote(content))")
+                let id = surface.paneId ?? index
+                let watermark = Trm.shared.watermark(forPaneId: UInt32(id))
+                if let watermark, !watermark.isEmpty {
+                    lines.append("watermark = \(tomlQuote(watermark))")
+                }
+                lines.append("")
+
+            case .webview(let webviewPane):
+                lines.append("[[panes]]")
+                lines.append("pane_type = \"webview\"")
+                let url = webviewPane.currentURL ?? webviewPane.initialURL
+                lines.append("url = \(tomlQuote(url.absoluteString))")
+                if !webviewPane.title.isEmpty {
+                    lines.append("title = \(tomlQuote(webviewPane.title))")
+                }
+                lines.append("")
+
+            case .plugin(let pluginPane):
+                lines.append("[[panes]]")
+                lines.append("pane_type = \(tomlQuote(pluginPane.kind.rawValue))")
+                if let title = pluginPane.configuredTitle, !title.isEmpty {
+                    lines.append("title = \(tomlQuote(title))")
+                }
+                if let cwd = pluginPane.cwd, !cwd.isEmpty {
+                    lines.append("cwd = \(tomlQuote(cwd))")
+                }
+                if let file = pluginPane.file, !file.isEmpty {
+                    lines.append("file = \(tomlQuote(file))")
+                }
+                // For notes panes, save current text instead of original content
+                if pluginPane.kind == .notes {
+                    if !pluginPane.notesText.isEmpty {
+                        lines.append("content = \(tomlQuote(pluginPane.notesText))")
+                    }
+                } else if let content = pluginPane.content, !content.isEmpty {
+                    lines.append("content = \(tomlQuote(content))")
+                }
+                if let target = pluginPane.target, !target.isEmpty {
+                    lines.append("target = \(tomlQuote(target))")
+                }
+                if let targetTitle = pluginPane.targetTitle, !targetTitle.isEmpty {
+                    lines.append("target_title = \(tomlQuote(targetTitle))")
+                }
+                if let path = pluginPane.path, !path.isEmpty {
+                    lines.append("path = \(tomlQuote(path))")
+                }
+                if let repo = pluginPane.repo, !repo.isEmpty {
+                    lines.append("repo = \(tomlQuote(repo))")
+                }
+                if let refreshMs = pluginPane.refreshMs {
+                    lines.append("refresh_ms = \(refreshMs)")
+                }
+                lines.append("")
             }
-            if let target = pane.target, !target.isEmpty {
-                lines.append("target = \(tomlQuote(target))")
-            }
-            if let targetTitle = pane.targetTitle, !targetTitle.isEmpty {
-                lines.append("target_title = \(tomlQuote(targetTitle))")
-            }
-            if let path = pane.path, !path.isEmpty {
-                lines.append("path = \(tomlQuote(path))")
-            }
-            if let repo = pane.repo, !repo.isEmpty {
-                lines.append("repo = \(tomlQuote(repo))")
-            }
-            if let refreshMs = pane.refreshMs {
-                lines.append("refresh_ms = \(refreshMs)")
-            }
-            lines.append("")
         }
 
         return lines.joined(separator: "\n")
@@ -2508,8 +2910,13 @@ class BaseTerminalController: NSWindowController,
         // Start context usage tracking
         contextUsageManager.start()
 
-        // Setup initial panes from termania.toml config
-        setupInitialPanes()
+        // Setup initial panes from termania.toml config — but skip if we
+        // were created with an existing surface tree (e.g., a popped-out pane).
+        if hasExternalSurfaceTree {
+            hasExternalSurfaceTree = false
+        } else {
+            setupInitialPanes()
+        }
     }
 
     /// Read the termania.toml session config and create the initial multi-pane layout.
@@ -2519,6 +2926,13 @@ class BaseTerminalController: NSWindowController,
 
     /// Apply a concrete grid config and create the pane layout in-place.
     private func setupInitialPanes(from config: Trm.TrmGridConfig) {
+        // Clear all existing watermarks before rebuilding so stale entries
+        // from the previous layout don't leak into the new one.
+        for surface in gridSurfaces {
+            let id = surface.paneId ?? 0
+            Trm.shared.setWatermark(forPaneId: UInt32(id), text: "")
+        }
+
         paneDisplayOrder = []
 
         let paneConfigs: [Trm.TrmPaneConfig] = {
@@ -2549,7 +2963,12 @@ class BaseTerminalController: NSWindowController,
         }()
 
         let totalPanes = max(1, paneConfigs.count)
-        gridRowCols = gridShape(totalPanes: totalPanes, rows: max(config.rows, 1), cols: max(config.cols, 1))
+        if !config.rowCols.isEmpty, config.rowCols.reduce(0, +) == totalPanes {
+            // Jagged grid: use the exact per-row column counts from the config.
+            gridRowCols = config.rowCols
+        } else {
+            gridRowCols = gridShape(totalPanes: totalPanes, rows: max(config.rows, 1), cols: max(config.cols, 1))
+        }
 
         webviewPanes.removeAll()
         pluginPanes.removeAll()
@@ -2568,15 +2987,16 @@ class BaseTerminalController: NSWindowController,
             }
         }
 
-        // Build (zigIndex, config) pairs for terminal panes so each surface
-        // knows its position in the Zig `app.plugins.items` array.
-        var terminalConfigsWithZigIndex: [(zigIndex: Int, config: Trm.TrmPaneConfig)] = []
+        // Build (paneId, config) pairs for terminal panes. Use the Zig
+        // grid_slot_pane_id mapping so IDs match the backend's pane_map.
+        var terminalConfigsWithPaneId: [(paneId: Int, config: Trm.TrmPaneConfig)] = []
         for (i, paneConfig) in paneConfigs.enumerated() {
             if normalizedPaneType(paneConfig.paneType) == "terminal" {
-                terminalConfigsWithZigIndex.append((zigIndex: i, config: paneConfig))
+                let zigId = Trm.shared.gridSlotPaneId(gridIndex: i)
+                terminalConfigsWithPaneId.append((paneId: zigId, config: paneConfig))
             }
         }
-        rebuildTerminalSurfaces(terminalConfigsWithZigIndex)
+        rebuildTerminalSurfaces(terminalConfigsWithPaneId)
 
         // Apply per-pane config (watermarks, initial commands) for terminal panes.
         applyPaneConfig(paneConfigs)
@@ -2591,17 +3011,20 @@ class BaseTerminalController: NSWindowController,
             guard surfaceIndex < surfaces.count else { break }
 
             let surface = surfaces[surfaceIndex]
-            let zigIdx = surface.zigPaneIndex ?? surfaceIndex
+            let id = surface.paneId ?? surfaceIndex
 
             // Set watermark
             if let watermark = paneConfig.watermark, !watermark.isEmpty {
-                Trm.shared.setWatermark(forPane: UInt32(zigIdx), text: watermark)
+                Trm.shared.setWatermark(forPaneId: UInt32(id), text: watermark)
             }
 
-            // Send initial commands after a short delay to let the shell start
+            // Send initial commands after a delay to let the shell start.
+            // Stagger each pane by 50ms to avoid overwhelming the system
+            // when many panes are created simultaneously.
             if !paneConfig.initialCommands.isEmpty {
                 let commands = paneConfig.initialCommands
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                let delay = 0.5 + Double(surfaceIndex) * 0.05
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                     self?.sendInitialCommandsWhenReady(commands, to: surface)
                 }
             }
@@ -2649,7 +3072,7 @@ class BaseTerminalController: NSWindowController,
         return URL(string: "about:blank")!
     }
 
-    private func rebuildTerminalSurfaces(_ paneConfigs: [(zigIndex: Int, config: Trm.TrmPaneConfig)]) {
+    private func rebuildTerminalSurfaces(_ paneConfigs: [(paneId: Int, config: Trm.TrmPaneConfig)]) {
         guard let ghosttyApp = ghostty.app else { return }
 
         if paneConfigs.isEmpty {
@@ -2672,7 +3095,7 @@ class BaseTerminalController: NSWindowController,
                 surfaceConfig.command = command
             }
             let view = Ghostty.SurfaceView(ghosttyApp, baseConfig: surfaceConfig)
-            view.zigPaneIndex = entry.zigIndex
+            view.paneId = entry.paneId
             newViews.append(view)
         }
 
@@ -2687,6 +3110,15 @@ class BaseTerminalController: NSWindowController,
             }
         }
 
+        // Clear watermarks for surfaces being replaced during initial setup.
+        let newSurfaceIds = Set(newViews.map { ObjectIdentifier($0) })
+        for (index, surface) in gridSurfaces.enumerated() {
+            if !newSurfaceIds.contains(ObjectIdentifier(surface)) {
+                let id = surface.paneId ?? index
+                Trm.shared.setWatermark(forPaneId: UInt32(id), text: "")
+            }
+        }
+
         replaceSurfaceTree(
             newTree,
             moveFocusTo: newViews.first,
@@ -2694,7 +3126,7 @@ class BaseTerminalController: NSWindowController,
             undoAction: nil
         )
     }
-    
+
     func defaultUpdateOverlayVisibility() -> Bool {
         guard let window else { return true }
         
@@ -2745,6 +3177,8 @@ class BaseTerminalController: NSWindowController,
 
     func windowWillClose(_ notification: Notification) {
         guard let window else { return }
+
+        SessionManager.autoSaveSingleWindow(self)
 
         stopConfigFileWatcher()
         liveSummaryManager.stop()

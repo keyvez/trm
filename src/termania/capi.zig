@@ -18,6 +18,7 @@ pub const CCell = terminal_types.CCell;
 
 /// Pane info returned to Swift.
 pub const CPaneInfo = extern struct {
+    pane_id: u32,
     rows: u32,
     cols: u32,
     cursor_row: u32,
@@ -46,10 +47,12 @@ const CApp = struct {
     config: config_mod.Config,
     grid: grid_mod.GridManager,
     renderer: renderer_mod.Renderer,
-    plugins: std.array_list.Managed(plugin_mod.PanePlugin),
+    pane_map: std.AutoHashMap(u32, plugin_mod.PanePlugin),
+    grid_order: std.array_list.Managed(u32), // visual layout order of pane IDs
+    next_pane_id: u32 = 0,
     text_tap: text_tap_mod.TextTapServer,
 
-    focused_pane: usize = 0,
+    focused_pane_id: u32 = 0,
     broadcast_mode: bool = false,
 
     // LLM state
@@ -77,20 +80,20 @@ const CApp = struct {
     notification_body_len: usize = 0,
     has_notification: bool = false,
 
-    // Overlay mapping: fg pane index → bg pane index
-    overlay_map: std.AutoHashMap(usize, usize) = undefined,
-    overlay_bg_focused: std.AutoHashMap(usize, bool) = undefined,
+    // Overlay mapping: fg pane ID → bg pane ID
+    overlay_map: std.AutoHashMap(u32, u32) = undefined,
+    overlay_bg_focused: std.AutoHashMap(u32, bool) = undefined,
 
-    // Watermark per pane
-    watermarks: std.AutoHashMap(usize, [128]u8) = undefined,
-    watermark_lens: std.AutoHashMap(usize, usize) = undefined,
+    // Watermark per pane (keyed by pane ID)
+    watermarks: std.AutoHashMap(u32, [128]u8) = undefined,
+    watermark_lens: std.AutoHashMap(u32, usize) = undefined,
 
     // Persistent font family string (null-terminated for C)
     font_family_buf: [256]u8 = undefined,
     font_family_len: usize = 0,
 
     // Pending send commands from text tap, to be drained by Swift.
-    // Each entry is (pane_index, text). We buffer up to 8 commands.
+    // Each entry is (pane_id, text). We buffer up to 8 commands.
     send_queue_panes: [8]u32 = .{0} ** 8,
     send_queue_texts: [8][1024]u8 = undefined,
     send_queue_lens: [8]u32 = .{0} ** 8,
@@ -115,10 +118,12 @@ const CApp = struct {
         var grd = try grid_mod.GridManager.init(allocator, num_rows, num_cols);
 
         const total_panes = grd.totalPanes();
-        var plugins = std.array_list.Managed(plugin_mod.PanePlugin).init(allocator);
+        var pane_map = std.AutoHashMap(u32, plugin_mod.PanePlugin).init(allocator);
+        var grid_order = std.array_list.Managed(u32).init(allocator);
 
         const pane_cfgs = cfg.effectivePanes(session);
 
+        var next_id: u32 = 0;
         for (0..total_panes) |i| {
             const pc: ?*const config_mod.PaneConfig = if (i < pane_cfgs.len) &pane_cfgs[i] else null;
             const ptype_str = if (pc) |c| c.pane_type else "terminal";
@@ -129,7 +134,10 @@ const CApp = struct {
             else
                 try plugin_mod.createPlugin(allocator, i, null); // fallback to terminal
 
-            try plugins.append(p);
+            const id = next_id;
+            next_id += 1;
+            try pane_map.put(id, p);
+            try grid_order.append(id);
         }
 
         const rend = renderer_mod.Renderer.init(allocator, &cfg);
@@ -143,12 +151,14 @@ const CApp = struct {
             .config = cfg,
             .grid = grd,
             .renderer = rend,
-            .plugins = plugins,
+            .pane_map = pane_map,
+            .grid_order = grid_order,
+            .next_pane_id = next_id,
             .text_tap = tap,
-            .overlay_map = std.AutoHashMap(usize, usize).init(allocator),
-            .overlay_bg_focused = std.AutoHashMap(usize, bool).init(allocator),
-            .watermarks = std.AutoHashMap(usize, [128]u8).init(allocator),
-            .watermark_lens = std.AutoHashMap(usize, usize).init(allocator),
+            .overlay_map = std.AutoHashMap(u32, u32).init(allocator),
+            .overlay_bg_focused = std.AutoHashMap(u32, bool).init(allocator),
+            .watermarks = std.AutoHashMap(u32, [128]u8).init(allocator),
+            .watermark_lens = std.AutoHashMap(u32, usize).init(allocator),
         };
 
         // Cache font family as null-terminated string
@@ -162,8 +172,10 @@ const CApp = struct {
     }
 
     fn deinit(self: *CApp) void {
-        for (self.plugins.items) |p| p.deinit();
-        self.plugins.deinit();
+        var it = self.pane_map.valueIterator();
+        while (it.next()) |p| p.deinit();
+        self.pane_map.deinit();
+        self.grid_order.deinit();
         self.grid.deinit();
         self.renderer.deinit();
         self.text_tap.stop();
@@ -174,6 +186,37 @@ const CApp = struct {
         self.watermark_lens.deinit();
         const alloc = self.allocator;
         alloc.destroy(self);
+    }
+
+    /// Allocate a new unique pane ID.
+    fn allocPaneId(self: *CApp) u32 {
+        const id = self.next_pane_id;
+        self.next_pane_id += 1;
+        return id;
+    }
+
+    /// Look up a plugin by stable pane ID.
+    fn getPlugin(self: *CApp, pane_id: u32) ?*plugin_mod.PanePlugin {
+        return self.pane_map.getPtr(pane_id);
+    }
+
+    /// Convert a grid slot index to a pane ID.
+    fn gridSlotToId(self: *CApp, grid_idx: usize) ?u32 {
+        if (grid_idx >= self.grid_order.items.len) return null;
+        return self.grid_order.items[grid_idx];
+    }
+
+    /// Convert a pane ID to a grid slot index (linear scan).
+    fn paneIdToGridSlot(self: *CApp, pane_id: u32) ?usize {
+        for (self.grid_order.items, 0..) |id, i| {
+            if (id == pane_id) return i;
+        }
+        return null;
+    }
+
+    /// Get the number of panes in the grid.
+    fn paneCount(self: *CApp) usize {
+        return self.grid_order.items.len;
     }
 };
 
@@ -231,7 +274,8 @@ export fn termania_destroy(handle: ?*anyopaque) void {
 export fn termania_poll(handle: ?*anyopaque) u32 {
     const app = getApp(handle) orelse return 0;
     var dirty: u32 = 0;
-    for (app.plugins.items) |p| {
+    var val_it = app.pane_map.valueIterator();
+    while (val_it.next()) |p| {
         if (p.poll()) dirty += 1;
     }
 
@@ -249,8 +293,8 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
                 if (app.send_queue_count < 8) {
                     const qi = app.send_queue_count;
                     switch (s.target) {
-                        .pane => |idx| {
-                            app.send_queue_panes[qi] = @intCast(idx);
+                        .pane => |pane_id| {
+                            app.send_queue_panes[qi] = @intCast(pane_id);
                         },
                         .all => {
                             app.send_queue_panes[qi] = 0xFFFFFFFF; // sentinel for "all"
@@ -373,20 +417,29 @@ export fn termania_poll_notification(
     return 1;
 }
 
+/// Allocate a globally unique pane ID. Each call returns a fresh ID that will
+/// not collide with any previously allocated ID (including IDs assigned during
+/// initial grid creation). Use this from Swift to ensure unique pane IDs across
+/// all windows (main terminal, quick terminal, etc.).
+export fn termania_alloc_pane_id(handle: ?*anyopaque) u32 {
+    const app = getApp(handle) orelse return 0;
+    return app.allocPaneId();
+}
+
 /// Get the number of panes.
 export fn termania_pane_count(handle: ?*anyopaque) u32 {
     const app = getApp(handle) orelse return 0;
-    return @intCast(app.plugins.items.len);
+    return @intCast(app.paneCount());
 }
 
-/// Get info for a specific pane. Returns 1 on success, 0 on failure.
-export fn termania_pane_info(handle: ?*anyopaque, idx: u32, info: ?*CPaneInfo) u8 {
+/// Get info for a specific pane by stable pane ID. Returns 1 on success, 0 on failure.
+export fn termania_pane_info(handle: ?*anyopaque, pane_id: u32, info: ?*CPaneInfo) u8 {
     const app = getApp(handle) orelse return 0;
     const out = info orelse return 0;
-    if (idx >= app.plugins.items.len) return 0;
-
-    const p = app.plugins.items[idx];
+    const p = app.pane_map.get(pane_id) orelse return 0;
     const rd = p.renderData();
+
+    out.pane_id = pane_id;
 
     switch (rd) {
         .terminal_data => |td| {
@@ -414,7 +467,7 @@ export fn termania_pane_info(handle: ?*anyopaque, idx: u32, info: ?*CPaneInfo) u
     if (p.isDirty()) flags |= 0x01;
     if (p.hasError()) flags |= 0x02;
     if (p.isExited()) flags |= 0x04;
-    if (idx == app.focused_pane) flags |= 0x08;
+    if (pane_id == app.focused_pane_id) flags |= 0x08;
     out.flags = flags;
     out._pad = .{ 0, 0, 0 };
 
@@ -423,12 +476,10 @@ export fn termania_pane_info(handle: ?*anyopaque, idx: u32, info: ?*CPaneInfo) u
 
 /// Copy cells from a pane into the provided buffer.
 /// Returns the number of cells written.
-export fn termania_pane_cells(handle: ?*anyopaque, idx: u32, buf: ?[*]CCell, max: u32) u32 {
+export fn termania_pane_cells(handle: ?*anyopaque, pane_id: u32, buf: ?[*]CCell, max: u32) u32 {
     const app = getApp(handle) orelse return 0;
     const out = buf orelse return 0;
-    if (idx >= app.plugins.items.len) return 0;
-
-    const p = app.plugins.items[idx];
+    const p = app.pane_map.get(pane_id) orelse return 0;
     const rd = p.renderData();
 
     switch (rd) {
@@ -445,6 +496,16 @@ export fn termania_pane_cells(handle: ?*anyopaque, idx: u32, buf: ?[*]CCell, max
         else => return 0,
     }
 }
+
+/// Pixel-level layout for a single pane, with stable pane ID.
+pub const CPaneLayoutWithId = extern struct {
+    pane_id: u32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    title_height: f32,
+};
 
 /// Compute pane layouts for the given window dimensions.
 /// Returns the number of layouts written.
@@ -481,10 +542,46 @@ export fn termania_pane_layouts(
     return @intCast(n);
 }
 
+/// Compute pane layouts with stable pane IDs for the given window dimensions.
+/// Returns the number of layouts written. Each layout includes the pane_id.
+export fn termania_pane_layouts_with_ids(
+    handle: ?*anyopaque,
+    window_w: u32,
+    window_h: u32,
+    scale: f32,
+    buf: ?[*]CPaneLayoutWithId,
+    max: u32,
+) u32 {
+    const app = getApp(handle) orelse return 0;
+    const out = buf orelse return 0;
+
+    const layouts = app.grid.computeLayout(
+        app.allocator,
+        window_w,
+        window_h,
+        &app.config,
+        scale,
+    ) catch return 0;
+    defer app.allocator.free(layouts);
+
+    const n = @min(layouts.len, @min(app.grid_order.items.len, @as(usize, max)));
+    for (0..n) |i| {
+        out[i] = .{
+            .pane_id = app.grid_order.items[i],
+            .x = layouts[i].x,
+            .y = layouts[i].y,
+            .width = layouts[i].width,
+            .height = layouts[i].height,
+            .title_height = layouts[i].title_height,
+        };
+    }
+    return @intCast(n);
+}
+
 /// Send a key event to the focused pane.
 export fn termania_send_key(handle: ?*anyopaque, key_code: u8, mods: u8) void {
     const app = getApp(handle) orelse return;
-    if (app.focused_pane >= app.plugins.items.len) return;
+    const focused_plugin = app.getPlugin(app.focused_pane_id) orelse return;
 
     // Decode modifiers: bit0=ctrl, 1=alt, 2=shift, 3=super
     const modifiers = input_mod.Modifiers{
@@ -509,7 +606,7 @@ export fn termania_send_key(handle: ?*anyopaque, key_code: u8, mods: u8) void {
     var buf: [input_mod.max_key_bytes]u8 = undefined;
     const n = input_mod.keyEventToBytes(event, &buf);
     if (n > 0) {
-        app.plugins.items[app.focused_pane].writeInput(buf[0..n]);
+        focused_plugin.writeInput(buf[0..n]);
     }
 }
 
@@ -517,16 +614,17 @@ export fn termania_send_key(handle: ?*anyopaque, key_code: u8, mods: u8) void {
 export fn termania_send_text(handle: ?*anyopaque, text: ?[*]const u8, len: u32) void {
     const app = getApp(handle) orelse return;
     const data = text orelse return;
-    if (app.focused_pane >= app.plugins.items.len) return;
 
     const slice = data[0..@as(usize, len)];
 
     if (app.broadcast_mode) {
-        for (app.plugins.items) |p| {
+        var val_it = app.pane_map.valueIterator();
+        while (val_it.next()) |p| {
             p.writeInput(slice);
         }
     } else {
-        app.plugins.items[app.focused_pane].writeInput(slice);
+        const focused_plugin = app.getPlugin(app.focused_pane_id) orelse return;
+        focused_plugin.writeInput(slice);
     }
 }
 
@@ -552,9 +650,12 @@ export fn termania_resize(handle: ?*anyopaque, window_w: u32, window_h: u32, sca
     defer app.allocator.free(layouts);
 
     for (layouts, 0..) |layout, i| {
-        if (i < app.plugins.items.len) {
-            const content_h = layout.height - layout.title_height;
-            app.plugins.items[i].doResize(layout.width, content_h, cw, ch);
+        if (i < app.grid_order.items.len) {
+            const id = app.grid_order.items[i];
+            if (app.getPlugin(id)) |p| {
+                const content_h = layout.height - layout.title_height;
+                p.doResize(layout.width, content_h, cw, ch);
+            }
         }
     }
 }
@@ -624,17 +725,17 @@ export fn termania_font_family(handle: ?*anyopaque) [*:0]const u8 {
     return @ptrCast(app.font_family_buf[0..app.font_family_len :0]);
 }
 
-/// Get the focused pane index.
+/// Get the focused pane ID.
 export fn termania_focused_pane(handle: ?*anyopaque) u32 {
     const app = getApp(handle) orelse return 0;
-    return @intCast(app.focused_pane);
+    return app.focused_pane_id;
 }
 
-/// Set the focused pane index.
-export fn termania_set_focused_pane(handle: ?*anyopaque, idx: u32) void {
+/// Set the focused pane by stable pane ID.
+export fn termania_set_focused_pane(handle: ?*anyopaque, pane_id: u32) void {
     const app = getApp(handle) orelse return;
-    if (idx < app.plugins.items.len) {
-        app.focused_pane = @intCast(idx);
+    if (app.pane_map.get(pane_id) != null) {
+        app.focused_pane_id = pane_id;
     }
 }
 
@@ -688,53 +789,58 @@ fn packColor(rgba: [4]f32) u32 {
 fn handleAction(app: *CApp, action: input_mod.AppAction) void {
     switch (action) {
         .new_pane => {
-            const idx = app.plugins.items.len;
-            const p = plugin_mod.createPlugin(app.allocator, idx, null) catch return;
-            app.plugins.append(p) catch return;
+            const grid_idx = app.grid_order.items.len;
+            const id = app.allocPaneId();
+            const p = plugin_mod.createPlugin(app.allocator, grid_idx, null) catch return;
+            app.pane_map.put(id, p) catch return;
+            app.grid_order.append(id) catch return;
             app.grid.addColToRow(app.grid.numRows() - 1);
-            app.focused_pane = idx;
+            app.focused_pane_id = id;
         },
         .close_pane => {
-            if (app.plugins.items.len <= 1) return;
-            const idx = app.focused_pane;
-            app.plugins.items[idx].deinit();
-            _ = app.plugins.orderedRemove(idx);
+            if (app.paneCount() <= 1) return;
+            const id = app.focused_pane_id;
 
-            // Update grid
-            if (app.grid.panePosition(idx)) |pos| {
+            // Find grid position before removal
+            const grid_idx = app.paneIdToGridSlot(id) orelse return;
+            if (app.grid.panePosition(grid_idx)) |pos| {
                 _ = app.grid.removeColFromRow(pos.row);
             }
 
-            if (app.focused_pane >= app.plugins.items.len) {
-                app.focused_pane = app.plugins.items.len - 1;
+            // Remove from pane_map and grid_order
+            if (app.pane_map.getPtr(id)) |p| {
+                p.deinit();
+                _ = app.pane_map.remove(id);
+            }
+            _ = app.grid_order.orderedRemove(grid_idx);
+
+            // Pick next focus: prefer same grid slot, else last
+            if (app.grid_order.items.len > 0) {
+                const new_idx = if (grid_idx < app.grid_order.items.len) grid_idx else app.grid_order.items.len - 1;
+                app.focused_pane_id = app.grid_order.items[new_idx];
             }
         },
         .navigate_up, .navigate_down, .navigate_left, .navigate_right => {
-            // Simple focus cycling
-            if (app.plugins.items.len <= 1) return;
-            switch (action) {
-                .navigate_right, .navigate_down => {
-                    app.focused_pane = (app.focused_pane + 1) % app.plugins.items.len;
-                },
-                .navigate_left, .navigate_up => {
-                    if (app.focused_pane == 0) {
-                        app.focused_pane = app.plugins.items.len - 1;
-                    } else {
-                        app.focused_pane -= 1;
-                    }
-                },
-                else => {},
-            }
+            // Simple focus cycling through grid_order
+            if (app.paneCount() <= 1) return;
+            const cur_slot = app.paneIdToGridSlot(app.focused_pane_id) orelse return;
+            const count = app.grid_order.items.len;
+            const new_slot = switch (action) {
+                .navigate_right, .navigate_down => (cur_slot + 1) % count,
+                .navigate_left, .navigate_up => if (cur_slot == 0) count - 1 else cur_slot - 1,
+                else => cur_slot,
+            };
+            app.focused_pane_id = app.grid_order.items[new_slot];
         },
-        .jump_to_pane_1 => setFocused(app, 0),
-        .jump_to_pane_2 => setFocused(app, 1),
-        .jump_to_pane_3 => setFocused(app, 2),
-        .jump_to_pane_4 => setFocused(app, 3),
-        .jump_to_pane_5 => setFocused(app, 4),
-        .jump_to_pane_6 => setFocused(app, 5),
-        .jump_to_pane_7 => setFocused(app, 6),
-        .jump_to_pane_8 => setFocused(app, 7),
-        .jump_to_pane_9 => setFocused(app, 8),
+        .jump_to_pane_1 => setFocusedByGridSlot(app, 0),
+        .jump_to_pane_2 => setFocusedByGridSlot(app, 1),
+        .jump_to_pane_3 => setFocusedByGridSlot(app, 2),
+        .jump_to_pane_4 => setFocusedByGridSlot(app, 3),
+        .jump_to_pane_5 => setFocusedByGridSlot(app, 4),
+        .jump_to_pane_6 => setFocusedByGridSlot(app, 5),
+        .jump_to_pane_7 => setFocusedByGridSlot(app, 6),
+        .jump_to_pane_8 => setFocusedByGridSlot(app, 7),
+        .jump_to_pane_9 => setFocusedByGridSlot(app, 8),
         .broadcast_toggle => {
             app.broadcast_mode = !app.broadcast_mode;
         },
@@ -742,9 +848,9 @@ fn handleAction(app: *CApp, action: input_mod.AppAction) void {
     }
 }
 
-fn setFocused(app: *CApp, idx: usize) void {
-    if (idx < app.plugins.items.len) {
-        app.focused_pane = idx;
+fn setFocusedByGridSlot(app: *CApp, grid_idx: usize) void {
+    if (app.gridSlotToId(grid_idx)) |id| {
+        app.focused_pane_id = id;
     }
 }
 
@@ -845,98 +951,116 @@ export fn termania_llm_execute(handle: ?*anyopaque) void {
 // Overlay C API
 // ---------------------------------------------------------------------------
 
-/// Add an overlay pane on top of fg_idx. Returns 1 on success.
-export fn termania_add_overlay(handle: ?*anyopaque, fg_idx: u32, ptype: ?[*]const u8, ptype_len: u32) u8 {
+/// Add an overlay pane on top of the pane with the given ID. Returns 1 on success.
+export fn termania_add_overlay(handle: ?*anyopaque, fg_pane_id: u32, ptype: ?[*]const u8, ptype_len: u32) u8 {
     const app = getApp(handle) orelse return 0;
-    const idx = @as(usize, fg_idx);
-    if (idx >= app.plugins.items.len) return 0;
+    if (app.pane_map.get(fg_pane_id) == null) return 0;
 
     // Don't add overlay if one already exists
-    if (app.overlay_map.get(idx) != null) return 0;
+    if (app.overlay_map.get(fg_pane_id) != null) return 0;
 
     const requested_type = if (ptype) |p| p[0..@as(usize, ptype_len)] else "terminal";
     const type_str = if (plugin_registry.hasType(requested_type)) requested_type else "terminal";
 
-    // Create a new background pane
-    const bg_idx = app.plugins.items.len;
+    // Create a new background pane with a new stable ID
+    const bg_id = app.allocPaneId();
     var pc = config_mod.PaneConfig{};
     pc.pane_type = type_str;
-    const p = plugin_mod.createPlugin(app.allocator, bg_idx, &pc) catch return 0;
-    app.plugins.append(p) catch return 0;
+    const p = plugin_mod.createPlugin(app.allocator, app.paneCount(), &pc) catch return 0;
+    app.pane_map.put(bg_id, p) catch return 0;
+    // Overlay panes are NOT added to grid_order (they share the fg pane's slot)
 
-    app.overlay_map.put(idx, bg_idx) catch return 0;
-    app.overlay_bg_focused.put(idx, false) catch return 0;
+    app.overlay_map.put(fg_pane_id, bg_id) catch return 0;
+    app.overlay_bg_focused.put(fg_pane_id, false) catch return 0;
 
     return 1;
 }
 
-/// Remove the overlay from fg_idx.
-export fn termania_remove_overlay(handle: ?*anyopaque, fg_idx: u32) void {
+/// Remove the overlay from the pane with the given ID.
+export fn termania_remove_overlay(handle: ?*anyopaque, fg_pane_id: u32) void {
     const app = getApp(handle) orelse return;
-    const idx = @as(usize, fg_idx);
-    _ = app.overlay_map.fetchRemove(idx);
-    _ = app.overlay_bg_focused.fetchRemove(idx);
+    if (app.overlay_map.fetchRemove(fg_pane_id)) |kv| {
+        // Clean up the background pane
+        if (app.pane_map.getPtr(kv.value)) |bg_p| {
+            bg_p.deinit();
+            _ = app.pane_map.remove(kv.value);
+        }
+    }
+    _ = app.overlay_bg_focused.fetchRemove(fg_pane_id);
 }
 
 /// Swap overlay layers (bring background to front).
-export fn termania_swap_overlay(handle: ?*anyopaque, fg_idx: u32) void {
+export fn termania_swap_overlay(handle: ?*anyopaque, fg_pane_id: u32) void {
     const app = getApp(handle) orelse return;
-    const idx = @as(usize, fg_idx);
-    const bg_idx = app.overlay_map.get(idx) orelse return;
+    const bg_id = app.overlay_map.get(fg_pane_id) orelse return;
 
-    // Swap the pane references
-    if (idx < app.plugins.items.len and bg_idx < app.plugins.items.len) {
-        const tmp = app.plugins.items[idx];
-        app.plugins.items[idx] = app.plugins.items[bg_idx];
-        app.plugins.items[bg_idx] = tmp;
-    }
+    // Swap the pane plugins between fg and bg IDs
+    const fg_p = app.pane_map.get(fg_pane_id) orelse return;
+    const bg_p = app.pane_map.get(bg_id) orelse return;
+    app.pane_map.put(fg_pane_id, bg_p) catch return;
+    app.pane_map.put(bg_id, fg_p) catch return;
 }
 
 /// Toggle focus between foreground and background overlay pane.
-export fn termania_toggle_overlay_focus(handle: ?*anyopaque, fg_idx: u32) void {
+export fn termania_toggle_overlay_focus(handle: ?*anyopaque, fg_pane_id: u32) void {
     const app = getApp(handle) orelse return;
-    const idx = @as(usize, fg_idx);
-    if (app.overlay_bg_focused.getPtr(idx)) |focused| {
+    if (app.overlay_bg_focused.getPtr(fg_pane_id)) |focused| {
         focused.* = !focused.*;
     }
 }
 
 /// Check if a pane has an overlay. Returns 1 if yes.
-export fn termania_has_overlay(handle: ?*anyopaque, fg_idx: u32) u8 {
+export fn termania_has_overlay(handle: ?*anyopaque, fg_pane_id: u32) u8 {
     const app = getApp(handle) orelse return 0;
-    return if (app.overlay_map.get(@as(usize, fg_idx)) != null) 1 else 0;
+    return if (app.overlay_map.get(fg_pane_id) != null) 1 else 0;
 }
 
 // ---------------------------------------------------------------------------
 // Watermark C API
 // ---------------------------------------------------------------------------
 
-/// Get the watermark text for a pane. Returns bytes written.
-export fn termania_pane_watermark(handle: ?*anyopaque, idx: u32, buf: ?[*]u8, max: u32) u32 {
+/// Get the watermark text for a pane by stable pane ID. Returns bytes written.
+export fn termania_pane_watermark(handle: ?*anyopaque, pane_id: u32, buf: ?[*]u8, max: u32) u32 {
     const app = getApp(handle) orelse return 0;
     const out = buf orelse return 0;
-    const pane_idx = @as(usize, idx);
 
-    const wm_len = app.watermark_lens.get(pane_idx) orelse return 0;
-    const wm_buf = app.watermarks.get(pane_idx) orelse return 0;
+    const wm_len = app.watermark_lens.get(pane_id) orelse return 0;
+    const wm_buf = app.watermarks.get(pane_id) orelse return 0;
     const n = @min(wm_len, @as(usize, max));
     @memcpy(out[0..n], wm_buf[0..n]);
     return @intCast(n);
 }
 
-/// Set the watermark text for a pane.
-export fn termania_set_watermark(handle: ?*anyopaque, idx: u32, text: ?[*]const u8, len: u32) void {
+/// Set the watermark text for a pane by stable pane ID.
+export fn termania_set_watermark(handle: ?*anyopaque, pane_id: u32, text: ?[*]const u8, len: u32) void {
     const app = getApp(handle) orelse return;
     const data = text orelse return;
-    const pane_idx = @as(usize, idx);
     const slen = @as(usize, len);
 
     var wm_buf: [128]u8 = undefined;
     const n = @min(slen, wm_buf.len);
     @memcpy(wm_buf[0..n], data[0..n]);
 
-    app.watermarks.put(pane_idx, wm_buf) catch return;
-    app.watermark_lens.put(pane_idx, n) catch return;
+    app.watermarks.put(pane_id, wm_buf) catch return;
+    app.watermark_lens.put(pane_id, n) catch return;
+}
+
+/// Swap two panes in the grid visual order by their stable pane IDs.
+export fn termania_swap_pane_order(handle: ?*anyopaque, pane_a: u32, pane_b: u32) void {
+    const app = getApp(handle) orelse return;
+    var slot_a: ?usize = null;
+    var slot_b: ?usize = null;
+    for (app.grid_order.items, 0..) |id, i| {
+        if (id == pane_a) slot_a = i;
+        if (id == pane_b) slot_b = i;
+    }
+    if (slot_a) |a| {
+        if (slot_b) |b| {
+            const tmp = app.grid_order.items[a];
+            app.grid_order.items[a] = app.grid_order.items[b];
+            app.grid_order.items[b] = tmp;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -965,6 +1089,20 @@ export fn termania_grid_gap(handle: ?*anyopaque) u32 {
 export fn termania_grid_padding(handle: ?*anyopaque) u32 {
     const app = getApp(handle) orelse return 4;
     return app.config.grid.outer_padding;
+}
+
+/// Get the number of row_cols entries (0 if not set — use rows/cols instead).
+export fn termania_grid_row_cols_count(handle: ?*anyopaque) u32 {
+    const app = getApp(handle) orelse return 0;
+    return @intCast(app.config.grid.row_cols_len);
+}
+
+/// Get the column count for a specific row (from row_cols).
+export fn termania_grid_row_cols_at(handle: ?*anyopaque, index: u32) u32 {
+    const app = getApp(handle) orelse return 0;
+    const i: usize = @intCast(index);
+    if (i >= app.config.grid.row_cols_len) return 0;
+    return @intCast(app.config.grid.row_cols_buf[i]);
 }
 
 /// Get the number of configured panes (from TOML).
@@ -1164,19 +1302,44 @@ export fn termania_context_last_update(handle: ?*anyopaque) i64 {
     return app.context_last_update_time;
 }
 
-/// Get the child PID of a pane (the shell process). Returns 0 if unavailable.
-export fn termania_pane_child_pid(handle: ?*anyopaque, pane_index: u32) u32 {
+/// Get the child PID of a pane (the shell process) by stable pane ID. Returns 0 if unavailable.
+export fn termania_pane_child_pid(handle: ?*anyopaque, pane_id: u32) u32 {
     const app = getApp(handle) orelse return 0;
-    if (pane_index >= app.plugins.items.len) return 0;
-    return app.plugins.items[pane_index].childPid() orelse 0;
+    const p = app.pane_map.get(pane_id) orelse return 0;
+    return p.childPid() orelse 0;
 }
 
 /// Return a bitset of panes that have been targeted by Text Tap send commands.
 /// Bit N is set if pane N received a send/send_command. Does NOT clear the bitset.
 /// Also polls the text tap socket for new connections and incoming data so that
 /// the bitset stays up to date even when termania_poll is not called.
+/// DEPRECATED: Use termania_text_tap_is_active for stable pane ID queries.
 export fn termania_text_tap_active_panes(handle: ?*anyopaque) u64 {
     const app = getApp(handle) orelse return 0;
     app.text_tap.poll();
     return app.text_tap.getActiveSendPanes() | app.text_tap.getConnectedPanes();
+}
+
+/// Check if a specific pane (by stable ID) is targeted by a Text Tap client.
+/// Returns 1 if active, 0 otherwise. Also polls the text tap socket.
+export fn termania_text_tap_is_active(handle: ?*anyopaque, pane_id: u32) u8 {
+    const app = getApp(handle) orelse return 0;
+    app.text_tap.poll();
+    if (app.text_tap.isPaneActive(pane_id)) return 1;
+    return 0;
+}
+
+/// Return the number of clients currently connected to the Text Tap socket.
+/// Also polls the socket for new connections / disconnections.
+export fn termania_text_tap_client_count(handle: ?*anyopaque) u32 {
+    const app = getApp(handle) orelse return 0;
+    app.text_tap.poll();
+    return @intCast(app.text_tap.clientCount());
+}
+
+/// Get the pane ID at a specific grid slot position (visual order).
+/// Returns the pane ID, or 0xFFFFFFFF if the slot is out of range.
+export fn termania_grid_slot_pane_id(handle: ?*anyopaque, grid_idx: u32) u32 {
+    const app = getApp(handle) orelse return 0xFFFFFFFF;
+    return app.gridSlotToId(@intCast(grid_idx)) orelse 0xFFFFFFFF;
 }
