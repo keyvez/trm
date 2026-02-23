@@ -13,6 +13,12 @@ extension Ghostty {
         /// Unique ID per surface
         let id: UUID
 
+        /// Stable pane ID assigned by the Zig side.
+        /// Set during initial pane setup.
+        /// Used to map between the Swift surface and the Zig pane for Text Tap,
+        /// watermarks, and other pane-addressed features.
+        var paneId: Int?
+
         // The current title of the surface as defined by the pty. This can be
         // changed with escape codes. This is public because the callbacks go
         // to the app level and it is set from there.
@@ -593,6 +599,39 @@ extension Ghostty {
                 // noting this as something I noticed consistently.
                 completionHandler(alert.runModal())
             }
+        }
+
+        /// Set the pane watermark by prompting the user.
+        func promptWatermark() {
+            guard let window,
+                  let controller = window.windowController as? BaseTerminalController,
+                  let paneIndex = controller.paneIndex(for: self) else { return }
+            let zigIdx = self.paneId ?? paneIndex
+
+            let alert = NSAlert()
+            alert.messageText = "Change Pane Watermark"
+            alert.informativeText = "Leave blank to clear the watermark."
+            alert.alertStyle = .informational
+
+            let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 250, height: 24))
+            textField.stringValue = Trm.shared.watermark(forPaneId: UInt32(zigIdx)) ?? ""
+            alert.accessoryView = textField
+
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Cancel")
+            alert.window.initialFirstResponder = textField
+
+            let completionHandler: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+                guard response == .alertFirstButtonReturn else { return }
+                guard let self,
+                      let window = self.window,
+                      let controller = window.windowController as? BaseTerminalController,
+                      let resolvedPaneIndex = controller.paneIndex(for: self) else { return }
+                let resolvedZigIdx = self.paneId ?? resolvedPaneIndex
+                Trm.shared.setWatermark(forPaneId: UInt32(resolvedZigIdx), text: textField.stringValue)
+            }
+
+            alert.beginSheetModal(for: window, completionHandler: completionHandler)
         }
 
         func setTitle(_ title: String) {
@@ -1222,12 +1261,46 @@ extension Ghostty {
                 }
             }
 
+            // Cmd+Shift+Arrow → Move focused pane in direction
+            if event.modifierFlags.contains([.command, .shift]) {
+                if let controller = self.window?.windowController as? BaseTerminalController {
+                    switch event.keyCode {
+                    case 0x7B: // Left arrow
+                        controller.moveFocusedPane(.left)
+                        return true
+                    case 0x7C: // Right arrow
+                        controller.moveFocusedPane(.right)
+                        return true
+                    case 0x7D: // Down arrow
+                        controller.moveFocusedPane(.down)
+                        return true
+                    case 0x7E: // Up arrow
+                        controller.moveFocusedPane(.up)
+                        return true
+                    default:
+                        break
+                    }
+                }
+            }
+
             if event.modifierFlags.contains(.command),
                !event.modifierFlags.contains(.shift),
                event.charactersIgnoringModifiers == "/" {
                 // Cmd+/ → Toggle Help Panel
                 if let controller = self.window?.windowController as? BaseTerminalController {
                     controller.toggleHelpPanel(nil)
+                    return true
+                }
+            }
+
+            // Cmd+1–9 → Focus pane by grid index (multi-pane only).
+            // Intercepted here to bypass Zig FFI → notification round-trip.
+            if event.modifierFlags.contains(.command),
+               event.modifierFlags.isDisjoint(with: [.shift, .control, .option]),
+               let chars = event.charactersIgnoringModifiers,
+               let digit = chars.first, digit >= "1" && digit <= "9" {
+                if let controller = self.window?.windowController as? BaseTerminalController,
+                   controller.focusPaneByIndex(Int(String(digit))!) {
                     return true
                 }
             }
@@ -1466,6 +1539,9 @@ extension Ghostty {
             // If we have a selection, add copy
             if let text = self.accessibilitySelectedText(), text.count > 0 {
                 menu.addItem(withTitle: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
+
+                item = menu.addItem(withTitle: "Save as Quick Action...", action: #selector(saveAsQuickAction(_:)), keyEquivalent: "")
+                item.setImageIfDesired(systemSymbolName: "bolt.fill")
             }
             menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
 
@@ -1491,11 +1567,43 @@ extension Ghostty {
             item = menu.addItem(withTitle: "Change Tab Title...", action: #selector(BaseTerminalController.changeTabTitle(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "pencil.line")
             item = menu.addItem(withTitle: "Change Terminal Title...", action: #selector(changeTitle(_:)), keyEquivalent: "")
+            item = menu.addItem(withTitle: "Change Pane Watermark...", action: #selector(changeWatermark(_:)), keyEquivalent: "")
+
+            // Plugins submenu: list all service plugins with per-pane toggle
+            if let controller = self.window?.windowController as? BaseTerminalController,
+               let paneId = self.paneId {
+                let registry = controller.servicePluginRegistry
+                let sorted = registry.plugins.values.sorted { $0.displayName < $1.displayName }
+                if !sorted.isEmpty {
+                    menu.addItem(.separator())
+                    let pluginsSubmenu = NSMenu(title: "Plugins")
+                    for plugin in sorted {
+                        let pluginItem = pluginsSubmenu.addItem(
+                            withTitle: plugin.displayName,
+                            action: #selector(toggleServicePlugin(_:)),
+                            keyEquivalent: ""
+                        )
+                        pluginItem.target = self
+                        pluginItem.representedObject = plugin.pluginId
+                        pluginItem.state = registry.isPluginDisabled(plugin.pluginId, forPaneId: paneId) ? .off : .on
+                    }
+                    let pluginsItem = menu.addItem(withTitle: "Plugins", action: nil, keyEquivalent: "")
+                    pluginsItem.setImageIfDesired(systemSymbolName: "puzzlepiece.extension")
+                    pluginsItem.submenu = pluginsSubmenu
+                }
+            }
 
             return menu
         }
 
         // MARK: Menu Handlers
+
+        @objc func toggleServicePlugin(_ sender: NSMenuItem) {
+            guard let pluginId = sender.representedObject as? String,
+                  let paneId = self.paneId,
+                  let controller = self.window?.windowController as? BaseTerminalController else { return }
+            controller.servicePluginRegistry.togglePlugin(pluginId, forPaneId: paneId)
+        }
 
         @IBAction func copy(_ sender: Any?) {
             guard let surface = self.surface else { return }
@@ -1640,6 +1748,38 @@ extension Ghostty {
 
         @IBAction func changeTitle(_ sender: Any) {
             promptTitle()
+        }
+
+        @IBAction func changeWatermark(_ sender: Any) {
+            promptWatermark()
+        }
+
+        @IBAction func saveAsQuickAction(_ sender: Any?) {
+            guard let selectedText = self.accessibilitySelectedText(), !selectedText.isEmpty,
+                  let window = self.window,
+                  let controller = window.windowController as? BaseTerminalController,
+                  let paneIndex = controller.paneIndex(for: self),
+                  let plugin = controller.quickActionsPlugin else { return }
+
+            let zigIdx = self.paneId ?? paneIndex
+            let watermark = Trm.shared.watermark(forPaneId: UInt32(zigIdx)) ?? ""
+
+            let alert = NSAlert()
+            alert.messageText = "Save as Quick Action"
+            alert.informativeText = "Command: \(selectedText)"
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Cancel")
+
+            let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 250, height: 24))
+            nameField.placeholderString = "Action name"
+            alert.accessoryView = nameField
+            alert.window.initialFirstResponder = nameField
+
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { return }
+
+            plugin.addAction(paneWatermark: watermark, name: name, command: selectedText)
         }
 
         /// Show a user notification and associate it with this surface

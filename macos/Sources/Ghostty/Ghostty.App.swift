@@ -61,7 +61,10 @@ extension Ghostty {
                 userdata: Unmanaged.passUnretained(self).toOpaque(),
                 supports_selection_clipboard: true,
                 wakeup_cb: { userdata in App.wakeup(userdata) },
-                action_cb: { app, target, action in App.action(app!, target: target, action: action) },
+                action_cb: { app, target, action in
+                    guard let app = app else { return false }
+                    return App.action(app, target: target, action: action)
+                },
                 read_clipboard_cb: { userdata, loc, state in App.readClipboard(userdata, location: loc, state: state) },
                 confirm_read_clipboard_cb: { userdata, str, state, request in App.confirmReadClipboard(userdata, string: str, state: state, request: request ) },
                 write_clipboard_cb: { userdata, loc, content, len, confirm in
@@ -141,25 +144,27 @@ extension Ghostty {
 
             // Soft updates just call with our existing config
             if (soft) {
-                ghostty_app_update_config(app, config.config!)
+                guard let cfg = config.config else { return }
+                ghostty_app_update_config(app, cfg)
                 return
             }
 
             // Hard or full updates have to reload the full configuration
             let newConfig = Config(at: configPath)
-            guard newConfig.loaded else {
+            guard newConfig.loaded, let cfg = newConfig.config else {
                 Ghostty.logger.warning("failed to reload configuration")
                 return
             }
 
-            ghostty_app_update_config(app, newConfig.config!)
+            ghostty_app_update_config(app, cfg)
             /// applied config will be updated in ``Self.configChange(_:target:v:)``
         }
 
         func reloadConfig(surface: ghostty_surface_t, soft: Bool = false) {
             // Soft updates just call with our existing config
             if (soft) {
-                ghostty_surface_update_config(surface, config.config!)
+                guard let cfg = config.config else { return }
+                ghostty_surface_update_config(surface, cfg)
                 return
             }
 
@@ -167,12 +172,12 @@ extension Ghostty {
             // NOTE: We never set this on self.config because this is a surface-only
             // config. We free it after the call.
             let newConfig = Config(at: configPath)
-            guard newConfig.loaded else {
+            guard newConfig.loaded, let cfg = newConfig.config else {
                 Ghostty.logger.warning("failed to reload configuration")
                 return
             }
 
-            ghostty_surface_update_config(surface, newConfig.config!)
+            ghostty_surface_update_config(surface, cfg)
         }
 
         /// Request that the given surface is closed. This will trigger the full normal surface close event
@@ -316,7 +321,7 @@ extension Ghostty {
         // MARK: Ghostty Callbacks (macOS)
 
         static func closeSurface(_ userdata: UnsafeMutableRawPointer?, processAlive: Bool) {
-            let surface = self.surfaceUserdata(from: userdata)
+            guard let surface = self.surfaceUserdata(from: userdata) else { return }
             NotificationCenter.default.post(name: Notification.ghosttyCloseSurface, object: surface, userInfo: [
                 "process_alive": processAlive,
             ])
@@ -325,7 +330,7 @@ extension Ghostty {
         static func readClipboard(_ userdata: UnsafeMutableRawPointer?, location: ghostty_clipboard_e, state: UnsafeMutableRawPointer?) {
             // If we don't even have a surface, something went terrible wrong so we have
             // to leak "state".
-            let surfaceView = self.surfaceUserdata(from: userdata)
+            guard let surfaceView = self.surfaceUserdata(from: userdata) else { return }
             guard let surface = surfaceView.surface else { return }
 
             // Get our pasteboard
@@ -344,8 +349,8 @@ extension Ghostty {
             state: UnsafeMutableRawPointer?,
             request: ghostty_clipboard_request_e
         ) {
-            let surface = self.surfaceUserdata(from: userdata)
-            guard let valueStr = String(cString: string!, encoding: .utf8) else { return }
+            guard let surface = self.surfaceUserdata(from: userdata) else { return }
+            guard let string = string, let valueStr = String(cString: string, encoding: .utf8) else { return }
             guard let request = Ghostty.ClipboardRequest.from(request: request) else { return }
             NotificationCenter.default.post(
                 name: Notification.confirmClipboard,
@@ -376,7 +381,7 @@ extension Ghostty {
             len: Int,
             confirm: Bool
         ) {
-            let surface = self.surfaceUserdata(from: userdata)
+            guard let surface = self.surfaceUserdata(from: userdata) else { return }
             guard let pasteboard = NSPasteboard.ghostty(location) else { return }
             guard let content = content, len > 0 else { return }
             
@@ -422,7 +427,8 @@ extension Ghostty {
         }
 
         static func wakeup(_ userdata: UnsafeMutableRawPointer?) {
-            let state = Unmanaged<App>.fromOpaque(userdata!).takeUnretainedValue()
+            guard let userdata = userdata else { return }
+            let state = Unmanaged<App>.fromOpaque(userdata).takeUnretainedValue()
 
             // Wakeup can be called from any thread so we schedule the app tick
             // from the main thread. There is probably some improvements we can make
@@ -450,8 +456,9 @@ extension Ghostty {
         }
 
         /// Returns the surface view from the userdata.
-        static private func surfaceUserdata(from userdata: UnsafeMutableRawPointer?) -> SurfaceView {
-            return Unmanaged<SurfaceView>.fromOpaque(userdata!).takeUnretainedValue()
+        static private func surfaceUserdata(from userdata: UnsafeMutableRawPointer?) -> SurfaceView? {
+            guard let userdata = userdata else { return nil }
+            return Unmanaged<SurfaceView>.fromOpaque(userdata).takeUnretainedValue()
         }
 
         static private func surfaceView(from surface: ghostty_surface_t) -> SurfaceView? {
@@ -1132,10 +1139,8 @@ extension Ghostty {
                     guard let surface = target.target.surface else { return false }
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
 
-                    // Similar to goto_split (see comment there) about our performability,
-                    // we should make this more accurate later.
-                    guard (surfaceView.window?.tabGroup?.windows.count ?? 0) > 1 else { return false }
-
+                    // Always post the notification — TerminalController decides whether
+                    // to navigate panes (multi-pane grid) or tabs (multi-tab window).
                     NotificationCenter.default.post(
                         name: Notification.ghosttyGotoTab,
                         object: surfaceView,
@@ -1378,8 +1383,8 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
-                guard let title = String(cString: n.title!, encoding: .utf8) else { return }
-                guard let body = String(cString: n.body!, encoding: .utf8) else { return }
+                guard let nTitle = n.title, let title = String(cString: nTitle, encoding: .utf8) else { return }
+                guard let nBody = n.body, let body = String(cString: nBody, encoding: .utf8) else { return }
 
                 let center = UNUserNotificationCenter.current()
                 center.requestAuthorization(options: [.alert, .sound]) { _, error in
@@ -1511,7 +1516,7 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
-                guard let title = String(cString: v.title!, encoding: .utf8) else { return }
+                guard let vTitle = v.title, let title = String(cString: vTitle, encoding: .utf8) else { return }
                 surfaceView.setTitle(title)
 
             default:
@@ -1579,7 +1584,7 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
-                guard let pwd = String(cString: v.pwd!, encoding: .utf8) else { return }
+                guard let vPwd = v.pwd, let pwd = String(cString: vPwd, encoding: .utf8) else { return }
                 surfaceView.pwd = pwd
 
             default:
@@ -1653,7 +1658,8 @@ extension Ghostty {
                     return
                 }
 
-                let buffer = Data(bytes: v.url!, count: v.len)
+                guard let url = v.url else { return }
+                let buffer = Data(bytes: url, count: v.len)
                 surfaceView.hoverUrl = String(data: buffer, encoding: .utf8)
 
 

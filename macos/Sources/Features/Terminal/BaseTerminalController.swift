@@ -1349,6 +1349,24 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
+    /// Switch focus to a pane by its 1-indexed grid position.
+    /// Called directly from performKeyEquivalent for Cmd+1–9 to avoid
+    /// the Zig FFI → notification round-trip that adds latency.
+    /// Returns true if focus was switched.
+    @discardableResult
+    func focusPaneByIndex(_ index: Int) -> Bool {
+        let surfaces = gridSurfaces
+        guard surfaces.count > 1 else { return false }
+        let targetIdx = min(index - 1, surfaces.count - 1)
+        guard targetIdx >= 0 else { return false }
+        let target = surfaces[targetIdx]
+        guard target !== focusedSurface else { return true }
+
+        focusedSurface = target
+        window?.makeFirstResponder(target)
+        return true
+    }
+
     /// Move focus to a surface view.
     func focusSurface(_ view: Ghostty.SurfaceView) {
         // Check if target surface is in our tree

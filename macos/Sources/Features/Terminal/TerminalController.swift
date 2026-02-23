@@ -151,35 +151,38 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     
     override func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
         super.surfaceTreeDidChange(from: from, to: to)
-        
+
         // Whenever our surface tree changes in any way (new split, close split, etc.)
         // we want to invalidate our state.
         invalidateRestorableState()
-        
+
         // Update our zoom state
         if let window = window as? TerminalWindow {
             window.surfaceIsZoomed = to.zoomed != nil
         }
-        
-        // If we have no panes left at all then close our window.
-        if to.isEmpty && webviewPanes.isEmpty && pluginPanes.isEmpty {
+
+        // If we have no panes left at all then close our window — but not
+        // while a surface is being moved between windows, since the empty
+        // tree is intentional and the move caller handles window cleanup.
+        if to.isEmpty && webviewPanes.isEmpty && pluginPanes.isEmpty && !isMovingSurface {
             self.window?.close()
         }
     }
-    
+
     override func replaceSurfaceTree(
         _ newTree: SplitTree<Ghostty.SurfaceView>,
         moveFocusTo newView: Ghostty.SurfaceView? = nil,
         moveFocusFrom oldView: Ghostty.SurfaceView? = nil,
         undoAction: String? = nil
     ) {
-        // If we have no panes left at all then close our tab immediately.
-        // This makes it so that undo is handled properly.
-        if newTree.isEmpty && webviewPanes.isEmpty && pluginPanes.isEmpty {
+        // If we have no panes left at all then close our tab immediately —
+        // but skip this during a surface move so the surface isn't
+        // deallocated before the target window takes ownership.
+        if newTree.isEmpty && webviewPanes.isEmpty && pluginPanes.isEmpty && !isMovingSurface {
             closeTabImmediately()
             return
         }
-        
+
         super.replaceSurfaceTree(
             newTree,
             moveFocusTo: newView,
@@ -318,13 +321,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         tree: SplitTree<Ghostty.SurfaceView>,
         position: NSPoint? = nil,
         confirmUndo: Bool = true,
+        showImmediately: Bool = false
     ) -> TerminalController {
         let c = TerminalController.init(ghostty, withSurfaceTree: tree)
 
         // Calculate the target frame based on the tree's view bounds
         let treeSize: CGSize? = tree.root?.viewBounds()
 
-        DispatchQueue.main.async {
+        let showBlock = { @Sendable in
             if let window = c.window {
                 // If we have a tree size, resize the window's content to match
                 if let treeSize, treeSize.width > 0, treeSize.height > 0 {
@@ -343,6 +347,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
 
             c.showWindow(self)
+        }
+
+        // When detaching a pane, show the window synchronously to minimize the
+        // transition gap where the surface exists in neither window's tree.
+        if showImmediately {
+            showBlock()
+        } else {
+            DispatchQueue.main.async(execute: showBlock)
         }
 
         // Setup our undo
@@ -1345,22 +1357,22 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @IBAction func addOverlay(_ sender: Any?) {
         let trm = Trm.shared
         let focused = trm.handle.flatMap { termania_focused_pane($0) } ?? 0
-        trm.addOverlay(fgIndex: focused)
+        trm.addOverlay(fgPaneId: focused)
     }
 
     /// Cmd+Shift+]: Swap overlay layers.
     @IBAction func swapOverlay(_ sender: Any?) {
         let trm = Trm.shared
         let focused = trm.handle.flatMap { termania_focused_pane($0) } ?? 0
-        trm.swapOverlay(fgIndex: focused)
+        trm.swapOverlay(fgPaneId: focused)
     }
 
     /// Cmd+Shift+W: Close overlay.
     @IBAction func closeOverlay(_ sender: Any?) {
         let trm = Trm.shared
         let focused = trm.handle.flatMap { termania_focused_pane($0) } ?? 0
-        if trm.hasOverlay(fgIndex: focused) {
-            trm.removeOverlay(fgIndex: focused)
+        if trm.hasOverlay(fgPaneId: focused) {
+            trm.removeOverlay(fgPaneId: focused)
         }
     }
 
@@ -1368,8 +1380,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @IBAction func toggleOverlayFocus(_ sender: Any?) {
         let trm = Trm.shared
         let focused = trm.handle.flatMap { termania_focused_pane($0) } ?? 0
-        if trm.hasOverlay(fgIndex: focused) {
-            trm.toggleOverlayFocus(fgIndex: focused)
+        if trm.hasOverlay(fgPaneId: focused) {
+            trm.toggleOverlayFocus(fgPaneId: focused)
         }
     }
 
@@ -1473,53 +1485,67 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @objc private func onGotoTab(notification: SwiftUI.Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard target == self.focusedSurface else { return }
-        guard let window = self.window else { return }
 
-        // Get the tab index from the notification
         guard let tabEnumAny = notification.userInfo?[Ghostty.Notification.GotoTabKey] else { return }
         guard let tabEnum = tabEnumAny as? ghostty_action_goto_tab_e else { return }
         let tabIndex: Int32 = tabEnum.rawValue
 
+        // ── Pane navigation (multi-pane grid) ──
+        let surfaces = gridSurfaces
+        if surfaces.count > 1 {
+            let currentIdx = surfaces.firstIndex(where: { $0 === focusedSurface }) ?? 0
+            let targetIdx: Int
+
+            if tabIndex == GHOSTTY_GOTO_TAB_PREVIOUS.rawValue {
+                targetIdx = currentIdx == 0 ? surfaces.count - 1 : currentIdx - 1
+            } else if tabIndex == GHOSTTY_GOTO_TAB_NEXT.rawValue {
+                targetIdx = currentIdx == surfaces.count - 1 ? 0 : currentIdx + 1
+            } else if tabIndex == GHOSTTY_GOTO_TAB_LAST.rawValue {
+                targetIdx = surfaces.count - 1
+            } else if tabIndex >= 1 {
+                targetIdx = min(Int(tabIndex - 1), surfaces.count - 1)
+            } else {
+                return
+            }
+
+            // Focus synchronously — the surface is already in our window so we
+            // bypass focusSurface()/moveFocus() whose double-async dispatch adds
+            // two run-loop cycles of latency and drops rapid consecutive switches.
+            let target = surfaces[targetIdx]
+            self.focusedSurface = target
+            self.window?.makeFirstResponder(target)
+            return
+        }
+
+        // ── Tab navigation (macOS window tabs, single-pane fallback) ──
+        guard let window = self.window else { return }
         guard let windowController = window.windowController else { return }
         guard let tabGroup = windowController.window?.tabGroup else { return }
         let tabbedWindows = tabGroup.windows
+        guard tabbedWindows.count > 1 else { return }
 
-        // This will be the index we want to actual go to
         let finalIndex: Int
 
-        // An index that is invalid is used to signal some special values.
-        if (tabIndex <= 0) {
+        if tabIndex <= 0 {
             guard let selectedWindow = tabGroup.selectedWindow else { return }
             guard let selectedIndex = tabbedWindows.firstIndex(where: { $0 == selectedWindow }) else { return }
 
-            if (tabIndex == GHOSTTY_GOTO_TAB_PREVIOUS.rawValue) {
-                if (selectedIndex == 0) {
-                    finalIndex = tabbedWindows.count - 1
-                } else {
-                    finalIndex = selectedIndex - 1
-                }
-            } else if (tabIndex == GHOSTTY_GOTO_TAB_NEXT.rawValue) {
-                if (selectedIndex == tabbedWindows.count - 1) {
-                    finalIndex = 0
-                } else {
-                    finalIndex = selectedIndex + 1
-                }
-            } else if (tabIndex == GHOSTTY_GOTO_TAB_LAST.rawValue) {
+            if tabIndex == GHOSTTY_GOTO_TAB_PREVIOUS.rawValue {
+                finalIndex = selectedIndex == 0 ? tabbedWindows.count - 1 : selectedIndex - 1
+            } else if tabIndex == GHOSTTY_GOTO_TAB_NEXT.rawValue {
+                finalIndex = selectedIndex == tabbedWindows.count - 1 ? 0 : selectedIndex + 1
+            } else if tabIndex == GHOSTTY_GOTO_TAB_LAST.rawValue {
                 finalIndex = tabbedWindows.count - 1
             } else {
                 return
             }
         } else {
-            // The configured value is 1-indexed.
             guard tabIndex >= 1 else { return }
-
-            // If our index is outside our boundary then we use the max
             finalIndex = min(Int(tabIndex - 1), tabbedWindows.count - 1)
         }
 
         guard finalIndex >= 0 else { return }
-        let targetWindow = tabbedWindows[finalIndex]
-        targetWindow.makeKeyAndOrderFront(nil)
+        tabbedWindows[finalIndex].makeKeyAndOrderFront(nil)
     }
 
     @objc private func onCloseTab(notification: SwiftUI.Notification) {
