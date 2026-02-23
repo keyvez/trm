@@ -1410,11 +1410,13 @@ class BaseTerminalController: NSWindowController,
             switch action {
             case .sendCommand(let paneId, let command):
                 guard let surface = surfaces.first(where: { ($0.paneId ?? -1) == paneId }) else { continue }
-                sendTextToSurface(surface, text: command + "\n")
+                sendTextToSurface(surface, text: command)
+                sendTextToSurface(surface, text: "\r")
 
             case .sendToAll(let command):
                 for surface in surfaces {
-                    sendTextToSurface(surface, text: command + "\n")
+                    sendTextToSurface(surface, text: command)
+                    sendTextToSurface(surface, text: "\r")
                 }
 
             case .setTitle(let paneId, let title):
@@ -1947,7 +1949,8 @@ class BaseTerminalController: NSWindowController,
               let paneId = notification.userInfo?["paneId"] as? Int else { return }
         let surfaces = gridSurfaces
         guard let surface = surfaces.first(where: { ($0.paneId ?? -1) == paneId }) else { return }
-        sendTextToSurface(surface, text: command + "\n")
+        sendTextToSurface(surface, text: command)
+        sendTextToSurface(surface, text: "\r")
     }
 
     // MARK: Shortcut Extractor
