@@ -68,10 +68,18 @@ extension ObservableServicePlugin where Self: ObservableObject {
 @MainActor
 protocol TerminalOutputSubscriber: AnyObject {
     /// Called when the visible text of a pane changes.
-    func terminalOutputDidChange(paneIndex: Int, text: String, hash: String)
+    func terminalOutputDidChange(paneId: Int, text: String, hash: String)
 
     /// Called when a terminal pane is removed.
-    func terminalPaneDidClose(paneIndex: Int)
+    func terminalPaneDidClose(paneId: Int)
+
+    /// Called when a shell command finishes in a pane (OSC 133;D).
+    /// Plugins can use this to reset state that was locked to the previous command.
+    func terminalCommandDidFinish(paneId: Int)
+}
+
+extension TerminalOutputSubscriber {
+    func terminalCommandDidFinish(paneId: Int) {}
 }
 
 // MARK: - ServicePluginOverlayProvider
@@ -80,7 +88,7 @@ protocol TerminalOutputSubscriber: AnyObject {
 @MainActor
 protocol ServicePluginOverlayProvider: ServicePlugin {
     /// Returns an overlay view for the given pane index, or `nil` if none.
-    func overlayView(forPane index: Int) -> AnyView?
+    func overlayView(forPaneId paneId: Int) -> AnyView?
 
     /// Where to anchor the overlay within the pane.
     var overlayAlignment: Alignment { get }

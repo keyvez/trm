@@ -126,6 +126,7 @@ pub const Config = struct {
     text_tap: TextTapConfig = .{},
     llm: LlmConfig = .{},
     panes: []const PaneConfig = &.{},
+    session_persistence: bool = false,
 
     /// Get effective window title, preferring session override.
     pub fn effectiveTitle(self: *const Config, session: ?*const SessionConfig) []const u8 {
@@ -384,6 +385,8 @@ fn loadConfigFromStringAlloc(content: []const u8) ParseError!Config {
                     setStructField(GridConfig, &cfg.grid, "rows", val);
                 } else if (std.mem.eql(u8, key, "cols")) {
                     setStructField(GridConfig, &cfg.grid, "cols", val);
+                } else if (std.mem.eql(u8, key, "session_persistence")) {
+                    cfg.session_persistence = std.mem.eql(u8, val, "true");
                 }
             },
         }

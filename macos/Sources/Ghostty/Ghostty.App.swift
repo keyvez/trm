@@ -31,6 +31,9 @@ extension Ghostty {
 
         /// Preferred config file than the default ones
         private var configPath: String?
+
+        /// Whether session persistence (daemon backend) is enabled via trm config.
+        private(set) var sessionPersistence: Bool = false
         /// The ghostty app instance. We only have one of these for the entire app, although I guess
         /// in theory you can have multiple... I don't know why you would...
         @Published var app: ghostty_app_t? = nil {
@@ -53,6 +56,19 @@ extension Ghostty {
             if self.config.config == nil {
                 readiness = .error
                 return
+            }
+
+            // Read session_persistence from trm config
+            let sessionPersistence: Bool = {
+                guard let h = termania_create_config_only(nil) else { return false }
+                defer { termania_destroy(h) }
+                return termania_session_persistence(h) != 0
+            }()
+            self.sessionPersistence = sessionPersistence
+
+            // Bridge to Ghostty config so Surface.zig uses daemon backend
+            if sessionPersistence {
+                ghostty_config_set_session_persistence(config.config, true)
             }
 
             // Create our "runtime" config. The "runtime" is the configuration that ghostty
@@ -103,6 +119,13 @@ extension Ghostty {
 #endif
 
             self.readiness = .ready
+
+            // Launch daemon only if session persistence is enabled
+            #if os(macOS)
+            if sessionPersistence {
+                Self.ensureDaemonRunning()
+            }
+            #endif
         }
 
         deinit {
@@ -113,6 +136,91 @@ extension Ghostty {
             NotificationCenter.default.removeObserver(self)
 #endif
         }
+
+        // MARK: Daemon Lifecycle
+
+        #if os(macOS)
+        /// The path to the trm-server socket.
+        static var daemonSocketPath: String {
+            let appSupport = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first!.appendingPathComponent("trm")
+            return appSupport.appendingPathComponent("server.sock").path
+        }
+
+        /// The path to the trm-server PID file.
+        static var daemonPidPath: String {
+            let appSupport = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first!.appendingPathComponent("trm")
+            return appSupport.appendingPathComponent("server.pid").path
+        }
+
+        /// Check if the daemon is already running.
+        static var isDaemonRunning: Bool {
+            // Check if socket file exists
+            guard FileManager.default.fileExists(atPath: daemonSocketPath) else {
+                return false
+            }
+
+            // Check PID file
+            guard let pidStr = try? String(contentsOfFile: daemonPidPath, encoding: .utf8) else {
+                return false
+            }
+
+            guard let pid = Int32(pidStr.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                return false
+            }
+
+            // Check if process is alive
+            return kill(pid, 0) == 0
+        }
+
+        /// Ensure the daemon is running, launching it if necessary.
+        static func ensureDaemonRunning() {
+            guard !isDaemonRunning else {
+                Ghostty.logger.info("trm-server daemon already running")
+                return
+            }
+
+            Ghostty.logger.info("launching trm-server daemon")
+
+            // Find the trm-server binary in our app bundle
+            guard let serverPath = Bundle.main.path(forAuxiliaryExecutable: "trm-server") else {
+                Ghostty.logger.warning("trm-server not found in app bundle, session persistence disabled")
+                return
+            }
+
+            // Ensure the app support directory exists
+            let appSupportDir = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first!.appendingPathComponent("trm")
+
+            try? FileManager.default.createDirectory(
+                at: appSupportDir,
+                withIntermediateDirectories: true
+            )
+
+            // Launch the daemon
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: serverPath)
+            process.arguments = ["--socket", daemonSocketPath]
+
+            // Detach the process so it survives our exit
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+
+            do {
+                try process.run()
+                Ghostty.logger.info("trm-server launched with pid \(process.processIdentifier)")
+            } catch {
+                Ghostty.logger.warning("failed to launch trm-server: \(error)")
+            }
+        }
+        #endif
 
         // MARK: App Operations
 
@@ -655,6 +763,11 @@ extension Ghostty {
             case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
                 Ghostty.logger.info("known but unimplemented action action=\(action.tag.rawValue)")
                 return false
+            case GHOSTTY_ACTION_COMMAND_FINISHED:
+                commandFinished(app, target: target)
+
+            case GHOSTTY_ACTION_DAEMON_SESSION_ID:
+                daemonSessionIdChanged(app, target: target, v: action.action.daemon_session_id)
             default:
                 Ghostty.logger.warning("unknown action action=\(action.tag.rawValue)")
                 return false
@@ -1592,6 +1705,27 @@ extension Ghostty {
             }
         }
 
+        private static func daemonSessionIdChanged(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s,
+            v: ghostty_action_daemon_session_id_s) {
+            switch target.tag {
+            case GHOSTTY_TARGET_APP:
+                Ghostty.logger.warning("daemon session id does nothing with an app target")
+                return
+
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return }
+                guard let surfaceView = self.surfaceView(from: surface) else { return }
+                guard let sessionId = String(cString: v.session_id!, encoding: .utf8) else { return }
+                NSLog("trm-debug: daemon session id set on surface: %@", sessionId)
+                surfaceView.daemonSessionId = sessionId
+
+            default:
+                assertionFailure()
+            }
+        }
+
         private static func setMouseShape(
             _ app: ghostty_app_t,
             target: ghostty_target_s,
@@ -1860,6 +1994,24 @@ extension Ghostty {
 
             default:
                 assertionFailure()
+            }
+        }
+
+        private static func commandFinished(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s) {
+            switch (target.tag) {
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return }
+                guard let surfaceView = self.surfaceView(from: surface) else { return }
+
+                NotificationCenter.default.post(
+                    name: .ghosttyCommandDidFinish,
+                    object: surfaceView
+                )
+
+            default:
+                return
             }
         }
 

@@ -125,16 +125,10 @@ struct TerminalCommandPaletteView: View {
 
         aiState.streamTask = Task {
             do {
-                let response = try await Trm.shared.llmClient.submitStreaming(
+                let response = try await Trm.shared.llmClient.submit(
                     prompt: cleanedPrompt,
-                    paneContext: context,
-                    highlightedPanes: highlightedPanes
-                ) { token in
-                    Task { @MainActor in
-                        aiState.streamingText += token
-                        aiState.isThinking = false
-                    }
-                }
+                    paneContext: context
+                )
 
                 guard !Task.isCancelled else { return }
 

@@ -102,6 +102,37 @@ struct GridLayout<ID: Equatable> {
 
     // MARK: - Insertion helpers
 
+    // MARK: - Reconciliation
+
+    /// Adjust `rowCols` so the total matches `actualCount`.
+    /// Trims excess from the last row or appends leftover panes as a new row.
+    mutating func reconcile(actualCount: Int) {
+        let total = rowCols.reduce(0, +)
+        if total == actualCount { return }
+        if actualCount <= 0 {
+            rowCols = [0]
+            return
+        }
+        if total > actualCount {
+            // Shrink from the last row(s)
+            var excess = total - actualCount
+            while excess > 0, !rowCols.isEmpty {
+                let last = rowCols[rowCols.count - 1]
+                if last <= excess {
+                    excess -= last
+                    rowCols.removeLast()
+                } else {
+                    rowCols[rowCols.count - 1] -= excess
+                    excess = 0
+                }
+            }
+            if rowCols.isEmpty { rowCols = [actualCount] }
+        } else {
+            // More panes than layout accounts for — add remainder as new row
+            rowCols.append(actualCount - total)
+        }
+    }
+
     /// Insert `id` at the end of the given `row` in `displayOrder`, and
     /// increment `rowCols[row]`.  If `displayOrder` is empty it is not
     /// modified (caller should initialise it first).

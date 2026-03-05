@@ -42,6 +42,12 @@ protocol TerminalViewModel: ObservableObject {
     /// Number of columns in each row of the grid layout.
     var gridRowCols: [Int] { get }
 
+    /// Gap between panes.
+    var gridGap: CGFloat { get }
+
+    /// Outer padding around the pane grid.
+    var gridPadding: CGFloat { get }
+
     /// The surfaces in grid order, derived from the surfaceTree.
     var gridSurfaces: [Ghostty.SurfaceView] { get }
 
@@ -50,6 +56,12 @@ protocol TerminalViewModel: ObservableObject {
 
     /// All panes (terminals + webviews) for the grid, in display order.
     var gridPanes: [GridPane] { get }
+
+    /// Maps a host pane ID to the ordered list of stacked pane IDs.
+    var paneStacks: [ObjectIdentifier: [ObjectIdentifier]] { get }
+
+    /// The currently peeked sub-pane (expanded overlay), or nil.
+    var peekedPane: ObjectIdentifier? { get }
 
     /// The command palette state.
     var commandPaletteIsShowing: Bool { get set }
@@ -65,6 +77,15 @@ protocol TerminalViewModel: ObservableObject {
 
     /// The context usage manager for Claude Code context window tracking.
     var contextUsageManager: ContextUsageManager { get }
+
+    /// The service plugin registry managing service plugins (including server URL detection).
+    var servicePluginRegistry: ServicePluginRegistry { get }
+
+    /// Shared AI state for the command palette (persists across open/close).
+    var commandPaletteAIState: CommandPaletteAIState { get }
+
+    /// Agent monitor for tracking AI agent activity in panes.
+    var agentMonitorService: AgentMonitorService { get }
 }
 
 /// The main terminal view. This terminal view supports splits.
@@ -113,11 +134,37 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                     TrmGridView(
                         panes: viewModel.gridPanes,
                         rowCols: viewModel.gridRowCols,
-                        gap: Trm.shared.gridConfig().gap,
-                        padding: Trm.shared.gridConfig().padding,
+                        gap: viewModel.gridGap,
+                        padding: viewModel.gridPadding,
                         liveSummaryManager: viewModel.liveSummaryManager,
+                        servicePluginRegistry: viewModel.servicePluginRegistry,
+                        peekedPane: viewModel.peekedPane,
+                        onDetachPane: { pane in
+                            (self.delegate as? BaseTerminalController)?.detachPaneToWindow(pane)
+                        },
+                        onAttachPane: { pane in
+                            (self.delegate as? BaseTerminalController)?.attachPaneToAnotherWindow(pane)
+                        },
                         onCloseWebviewPane: { pane in
                             (self.delegate as? BaseTerminalController)?.closeWebviewPane(pane)
+                        },
+                        onClosePluginPane: { pane in
+                            (self.delegate as? BaseTerminalController)?.closePluginPane(pane)
+                        },
+                        onMovePane: { pane, direction in
+                            (self.delegate as? BaseTerminalController)?.movePane(pane, direction: direction)
+                        },
+                        onStackPane: { source, target in
+                            (self.delegate as? BaseTerminalController)?.stackPane(source, onto: target)
+                        },
+                        onUnstackPane: { pane in
+                            (self.delegate as? BaseTerminalController)?.unstackPane(pane)
+                        },
+                        onPeekPane: { pane in
+                            (self.delegate as? BaseTerminalController)?.peekPane(pane)
+                        },
+                        onDismissPeek: {
+                            (self.delegate as? BaseTerminalController)?.dismissPeek()
                         }
                     )
                     .environmentObject(ghostty)
@@ -161,10 +208,25 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         },
                         onToggleLiveSummary: {
                             viewModel.liveSummaryManager.toggle()
+                        },
+                        aiState: viewModel.commandPaletteAIState,
+                        agentMonitor: viewModel.agentMonitorService,
+                        servicePluginRegistry: viewModel.servicePluginRegistry
+                    )
+                }
+
+                // Floating status bar (shown when palette is dismissed during active AI work)
+                if !viewModel.commandPaletteIsShowing &&
+                    (viewModel.commandPaletteAIState.isAgentActive ||
+                     !viewModel.commandPaletteAIState.statusMessages.isEmpty) {
+                    FloatingStatusBar(
+                        aiState: viewModel.commandPaletteAIState,
+                        onTap: {
+                            viewModel.commandPaletteIsShowing = true
                         }
                     )
                 }
-                
+
                 // Show update information above all else.
                 if viewModel.updateOverlayIsVisible {
                     UpdateOverlay()

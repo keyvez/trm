@@ -436,8 +436,14 @@ extension Notification.Name {
     /// Execute a quick action command on a specific pane.
     static let trmQuickActionExecute = Notification.Name("app.roj.trm.quickActionExecute")
 
+    /// Execute a quick action script (LLM-driven) on a specific pane.
+    static let trmQuickActionScriptExecute = Notification.Name("app.roj.trm.quickActionScriptExecute")
+
     /// Execute an extracted shortcut keystroke on a specific pane.
     static let trmShortcutExecute = Notification.Name("app.roj.trm.shortcutExecute")
+
+    /// A shell command finished in a terminal surface (OSC 133;D).
+    static let ghosttyCommandDidFinish = Notification.Name("app.roj.trm.commandDidFinish")
 }
 
 // NOTE: I am moving all of these to Notification.Name extensions over time. This

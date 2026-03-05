@@ -1,0 +1,225 @@
+title = "EEAAO - Bottom Up"
+
+[grid]
+rows = 5
+cols = 10
+gap = 0
+inner_padding = 0
+outer_padding = 8
+border_radius = 0
+
+[colors]
+background = "#0a0a0a"
+foreground = "#e0e0e0"
+border = "#0a0a0a"
+border_focused = "#0a0a0a"
+title_bg = "#0a0a0a"
+title_fg = "#0a0a0a"
+
+# Row 1: EVERYTHING (sunset-filled) - sleep 4
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 4 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/sunset-filled-E.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 4 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/sunset-filled-V.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 4 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/sunset-filled-E.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 4 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/sunset-filled-R.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 4 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/sunset-filled-Y.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 4 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/sunset-filled-T.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 4 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/sunset-filled-H.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 4 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/sunset-filled-I.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 4 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/sunset-filled-N.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 4 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/sunset-filled-G.txt && exec cat"]
+
+# Row 2: EVERYWHERE (ocean-filled) - sleep 3
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 3 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/ocean-filled-E.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 3 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/ocean-filled-V.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 3 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/ocean-filled-E.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 3 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/ocean-filled-R.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 3 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/ocean-filled-Y.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 3 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/ocean-filled-W.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 3 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/ocean-filled-H.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 3 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/ocean-filled-E.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 3 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/ocean-filled-R.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 3 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/ocean-filled-E.txt && exec cat"]
+
+# Row 3: ALL centered (nebula-filled) - sleep 2
+# 3 empty, A, L, L, 4 empty
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 2 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/nebula-filled-A.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 2 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/nebula-filled-L.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 2 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/nebula-filled-L.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+# Row 4: AT centered (fire-filled) - sleep 1
+# 4 empty, A, T, 4 empty
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 1 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/fire-filled-A.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["sleep 1 && cat /Users/gaurav/Documents/Code/trm/sessions/cache/fire-filled-T.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+# Row 5: ONCE centered (coral-filled) - no sleep
+# 3 empty, O, N, C, E, 3 empty
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["cat /Users/gaurav/Documents/Code/trm/sessions/cache/coral-filled-O.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["cat /Users/gaurav/Documents/Code/trm/sessions/cache/coral-filled-N.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["cat /Users/gaurav/Documents/Code/trm/sessions/cache/coral-filled-C.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["cat /Users/gaurav/Documents/Code/trm/sessions/cache/coral-filled-E.txt && exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]
+
+[[panes]]
+command = "/bin/sh"
+initial_commands = ["exec cat"]

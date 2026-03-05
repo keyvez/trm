@@ -1,5 +1,6 @@
 import SwiftUI
 import GhosttyKit
+import UniformTypeIdentifiers
 
 /// Termania-style border colors and metrics.
 ///
@@ -8,9 +9,10 @@ import GhosttyKit
 ///   border_focused:  #58a6ff
 ///   border_radius:   8
 ///   gap:             4
-private enum TrmBorder {
+enum TrmBorder {
     static let color        = Color(red: 0x30/255, green: 0x36/255, blue: 0x3d/255)
     static let focusedColor = Color(red: 0x58/255, green: 0xa6/255, blue: 0xff/255)
+    static let stackDropColor = Color(red: 0x58/255, green: 0xa6/255, blue: 0xff/255).opacity(0.6)
     static let radius: CGFloat  = 8
     static let width: CGFloat   = 1
 }
@@ -44,6 +46,9 @@ struct TrmGridView: View {
     /// The service plugin registry for rendering service plugin overlays.
     @ObservedObject var servicePluginRegistry: ServicePluginRegistry
 
+    /// The currently peeked sub-pane (expanded overlay), or nil.
+    var peekedPane: ObjectIdentifier? = nil
+
     /// Callback to move a pane into its own window.
     var onDetachPane: ((GridPane) -> Void)? = nil
 
@@ -59,6 +64,18 @@ struct TrmGridView: View {
     /// Callback to move a pane in a direction (left/right/up/down).
     var onMovePane: ((GridPane, BaseTerminalController.PaneMoveDirection) -> Void)? = nil
 
+    /// Callback to stack a source pane onto a target pane.
+    var onStackPane: ((GridPane, GridPane) -> Void)? = nil
+
+    /// Callback to unstack (restore) a pane from its stack.
+    var onUnstackPane: ((GridPane) -> Void)? = nil
+
+    /// Callback to peek (expand) a stacked sub-pane.
+    var onPeekPane: ((GridPane) -> Void)? = nil
+
+    /// Callback to dismiss the peek overlay.
+    var onDismissPeek: (() -> Void)? = nil
+
     @FocusedValue(\.ghosttySurfaceView) private var focusedSurface
 
     /// Bumped when a watermark changes to force the overlay to re-evaluate.
@@ -72,17 +89,12 @@ struct TrmGridView: View {
             }
             .onChange(of: focusedSurfaceIdentity) { newIdentity in
                 guard panes.count > 1, let newIdentity else { return }
-                for pane in panes {
-                    if case .terminal(let surface) = pane,
-                       ObjectIdentifier(surface) == newIdentity,
-                       let pid = surface.paneId {
-                        NotificationCenter.default.post(
-                            name: Trm.highlightPane,
-                            object: nil,
-                            userInfo: ["paneId": pid]
-                        )
-                        break
-                    }
+                if let pid = findPaneId(matching: newIdentity, in: panes) {
+                    NotificationCenter.default.post(
+                        name: Trm.highlightPane,
+                        object: nil,
+                        userInfo: ["paneId": pid]
+                    )
                 }
             }
     }
@@ -91,6 +103,26 @@ struct TrmGridView: View {
     /// `.onChange(of:)` can detect focus changes.
     private var focusedSurfaceIdentity: ObjectIdentifier? {
         focusedSurface.map { ObjectIdentifier($0) }
+    }
+
+    /// Recursively search panes (including stack children) for a surface
+    /// matching the given identity and return its paneId.
+    private func findPaneId(matching identity: ObjectIdentifier, in panes: [GridPane]) -> Int? {
+        for pane in panes {
+            switch pane {
+            case .terminal(let surface):
+                if ObjectIdentifier(surface) == identity {
+                    return surface.paneId
+                }
+            case .stack(let children):
+                if let pid = findPaneId(matching: identity, in: children) {
+                    return pid
+                }
+            default:
+                break
+            }
+        }
+        return nil
     }
 
     @ViewBuilder
@@ -106,48 +138,70 @@ struct TrmGridView: View {
                     }
                 }
         } else {
-            VStack(spacing: gap) {
-                ForEach(Array(rowLayout.enumerated()), id: \.offset) { rowIdx, row in
-                    HStack(spacing: gap) {
-                        ForEach(Array(row.enumerated()), id: \.element.id) { colIdx, pane in
-                            let flatIndex = flatIndexFor(row: rowIdx, col: colIdx)
-                            paneView(pane, index: flatIndex)
-                                // cornerRadius applies a CALayer mask that clips the
-                                // Metal-rendered terminal content to rounded corners.
-                                .cornerRadius(TrmBorder.radius)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
-                                        .strokeBorder(
-                                            borderColor(for: pane),
-                                            lineWidth: TrmBorder.width
-                                        )
-                                        .allowsHitTesting(false)
-                                )
-                                .contextMenu {
-                                    paneMoveMenu(pane: pane, row: rowIdx, col: colIdx)
-                                    if let pid = paneIdForPane(pane) {
-                                        Divider()
-                                        pluginsMenu(forPaneId: pid)
-                                    }
-                                }
+            ZStack {
+                VStack(spacing: gap) {
+                    ForEach(Array(rowLayout.enumerated()), id: \.offset) { rowIdx, row in
+                        HStack(spacing: gap) {
+                            ForEach(Array(row.enumerated()), id: \.element.id) { colIdx, pane in
+                                let flatIndex = flatIndexFor(row: rowIdx, col: colIdx)
+                                paneCellView(pane, flatIndex: flatIndex, row: rowIdx, col: colIdx)
+                            }
                         }
                     }
                 }
+                .padding(padding)
+
+                // Peek overlay
+                if let peekedID = peekedPane {
+                    peekOverlay(for: peekedID)
+                }
             }
-            .padding(padding)
         }
     }
 
-    /// Dispatch to the appropriate view for each pane type.
+    /// Wraps a single pane cell with border, context menu, drag source, and drop target.
     @ViewBuilder
-    private func paneView(_ pane: GridPane, index: Int) -> some View {
+    private func paneCellView(_ pane: GridPane, flatIndex: Int, row: Int, col: Int) -> some View {
+        paneView(pane, index: flatIndex)
+            .cornerRadius(TrmBorder.radius)
+            .overlay(
+                RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
+                    .strokeBorder(
+                        borderColor(for: pane),
+                        lineWidth: TrmBorder.width
+                    )
+                    .allowsHitTesting(false)
+            )
+            .contextMenu {
+                paneMoveMenu(pane: pane, row: row, col: col)
+                if let pid = paneIdForPane(pane) {
+                    Divider()
+                    pluginsMenu(forPaneId: pid)
+                }
+            }
+            .onDrop(of: [.ghosttySurfaceId], delegate: PaneStackDropDelegate(
+                targetPane: pane,
+                allPanes: panes,
+                onStack: onStackPane
+            ))
+    }
+
+    /// Dispatch to the appropriate view for each pane type.
+    ///
+    /// Returns `AnyView` to break the recursive type expansion from the
+    /// `.stack` case that otherwise hangs the Swift type checker in release builds.
+    private func paneView(_ pane: GridPane, index: Int) -> AnyView {
         switch pane {
         case .terminal(let surface):
-            terminalPaneView(surface, index: index, paneId: surface.paneId ?? index)
+            return AnyView(
+                terminalPaneView(surface, index: index, paneId: surface.paneId ?? index)
+            )
         case .webview(let webviewPane):
-            webviewPaneView(webviewPane)
+            return AnyView(webviewPaneView(webviewPane))
         case .plugin(let pluginPane):
-            pluginPaneView(pluginPane)
+            return AnyView(pluginPaneView(pluginPane))
+        case .stack(let children):
+            return AnyView(stackedPaneView(children))
         }
     }
 
@@ -251,6 +305,152 @@ struct TrmGridView: View {
     @ViewBuilder
     private func pluginPaneView(_ pane: PluginPane) -> some View {
         PluginPaneContainerView(pane: pane, onClose: onClosePluginPane)
+    }
+
+    // MARK: - Stacked Pane Rendering
+
+    /// Render a vertical stack of sub-panes sharing one grid cell.
+    @ViewBuilder
+    private func stackedPaneView(_ children: [GridPane]) -> some View {
+        VStack(spacing: 1) {
+            ForEach(Array(children.enumerated()), id: \.element.id) { idx, child in
+                VStack(spacing: 0) {
+                    // Drag bar at the top of each sub-pane — only this is draggable
+                    if case .terminal(let surface) = child {
+                        StackDragBar(
+                            onPeek: {
+                                onPeekPane?(child)
+                            }
+                        )
+                        .draggable(surface) {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color(nsColor: .windowBackgroundColor))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1.5)
+                                )
+                                .frame(width: 120, height: 80)
+                        }
+                    } else {
+                        StackDragBar(
+                            onPeek: {
+                                onPeekPane?(child)
+                            }
+                        )
+                    }
+
+                    // The actual pane content
+                    stackChildContent(child)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .overlay(
+                    // Bottom separator between sub-panes
+                    VStack {
+                        Spacer()
+                        if idx < children.count - 1 {
+                            Rectangle()
+                                .fill(TrmBorder.color)
+                                .frame(height: 1)
+                        }
+                    }
+                    .allowsHitTesting(false)
+                )
+                .contextMenu {
+                    Button {
+                        onUnstackPane?(child)
+                    } label: {
+                        Label("Restore Pane", systemImage: "arrow.up.left.and.arrow.down.right")
+                    }
+                    if let pid = paneIdForPane(child) {
+                        Divider()
+                        pluginsMenu(forPaneId: pid)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Render the content of a single child within a stack.
+    ///
+    /// Returns `AnyView` to break the recursive type expansion that otherwise
+    /// causes the Swift type checker to hang during release-mode compilation.
+    private func stackChildContent(_ pane: GridPane) -> AnyView {
+        switch pane {
+        case .terminal(let surface):
+            let paneId = surface.paneId ?? 0
+            return AnyView(Ghostty.InspectableSurface(
+                surfaceView: surface,
+                isSplit: true
+            )
+            .overlay(watermarkOverlay(forPaneId: paneId))
+            .overlay(servicePluginOverlays(forPaneId: paneId))
+            .overlay(liveSummaryOverlay(forPaneId: paneId), alignment: .bottom)
+            )
+        case .webview(let webviewPane):
+            return AnyView(webviewPaneView(webviewPane))
+        case .plugin(let pluginPane):
+            return AnyView(pluginPaneView(pluginPane))
+        case .stack:
+            // Nested stacks not supported — flatten would have happened at model level
+            return AnyView(EmptyView())
+        }
+    }
+
+    /// The peek overlay: shows a stacked sub-pane at half window width, full height.
+    @ViewBuilder
+    private func peekOverlay(for peekedID: ObjectIdentifier) -> some View {
+        // Find the peeked surface across all panes (including stack children).
+        let peekedSurface: Ghostty.SurfaceView? = findSurface(byID: peekedID)
+
+        // Background scrim — click to dismiss
+        Color.black.opacity(0.3)
+            .ignoresSafeArea()
+            .onTapGesture {
+                onDismissPeek?()
+            }
+
+        // The expanded pane
+        GeometryReader { geo in
+            HStack {
+                Spacer()
+                if let surface = peekedSurface {
+                    Ghostty.InspectableSurface(
+                        surfaceView: surface,
+                        isSplit: false
+                    )
+                    .frame(width: geo.size.width * 0.5, height: geo.size.height)
+                    .cornerRadius(TrmBorder.radius)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
+                            .strokeBorder(TrmBorder.focusedColor, lineWidth: 2)
+                            .allowsHitTesting(false)
+                    )
+                    .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
+                }
+                Spacer()
+            }
+        }
+        .transition(.opacity)
+    }
+
+    /// Find a terminal surface by ObjectIdentifier across all panes and stack children.
+    private func findSurface(byID id: ObjectIdentifier) -> Ghostty.SurfaceView? {
+        for pane in panes {
+            switch pane {
+            case .terminal(let surface):
+                if ObjectIdentifier(surface) == id { return surface }
+            case .stack(let children):
+                for child in children {
+                    if case .terminal(let surface) = child,
+                       ObjectIdentifier(surface) == id {
+                        return surface
+                    }
+                }
+            default:
+                break
+            }
+        }
+        return nil
     }
 
     @ViewBuilder
@@ -374,10 +574,18 @@ struct TrmGridView: View {
 
     /// Extract the stable pane ID from a terminal pane, returning nil for non-terminal panes.
     private func paneIdForPane(_ pane: GridPane) -> Int? {
-        if case .terminal(let surface) = pane {
+        switch pane {
+        case .terminal(let surface):
             return surface.paneId
+        case .stack(let children):
+            // Use the first child's pane ID as the stack's pane ID.
+            if let first = children.first {
+                return paneIdForPane(first)
+            }
+            return nil
+        default:
+            return nil
         }
-        return nil
     }
 
     /// A "Plugins" submenu listing all registered service plugins with a
@@ -405,6 +613,16 @@ struct TrmGridView: View {
         case .terminal(let surface):
             if let focused = focusedSurface, focused === surface {
                 return TrmBorder.focusedColor
+            }
+            return TrmBorder.color
+        case .stack(let children):
+            // If any child in the stack is focused, highlight the whole cell.
+            if let focused = focusedSurface {
+                for child in children {
+                    if case .terminal(let s) = child, s === focused {
+                        return TrmBorder.focusedColor
+                    }
+                }
             }
             return TrmBorder.color
         case .webview, .plugin:
@@ -435,6 +653,102 @@ struct TrmGridView: View {
             offset = end
         }
         return result
+    }
+}
+
+// MARK: - Stack Drag Bar
+
+/// A thin drag handle at the top of each sub-pane in a stack.
+/// Double-tap triggers peek mode.
+private struct StackDragBar: View {
+    var onPeek: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 3) {
+            // Grip dots
+            ForEach(0..<3, id: \.self) { _ in
+                Circle()
+                    .fill(Color.secondary.opacity(isHovering ? 0.6 : 0.3))
+                    .frame(width: 3, height: 3)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 6)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        .onTapGesture(count: 2) {
+            onPeek()
+        }
+        .help("Double-click to peek")
+    }
+}
+
+// MARK: - Pane Stack Drop Delegate
+
+/// Drop delegate that handles stacking a dragged terminal pane onto a target cell.
+struct PaneStackDropDelegate: DropDelegate {
+    let targetPane: GridPane
+    let allPanes: [GridPane]
+    let onStack: ((GridPane, GridPane) -> Void)?
+
+    func validateDrop(info: DropInfo) -> Bool {
+        // Only accept if we have the stacking callback.
+        guard onStack != nil else { return false }
+        // Must have the right type.
+        return info.hasItemsConforming(to: [.ghosttySurfaceId])
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let onStack else { return false }
+
+        // Load the surface ID from the drop payload.
+        let providers = info.itemProviders(for: [.ghosttySurfaceId])
+        guard let provider = providers.first else { return false }
+
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.ghosttySurfaceId.identifier) { data, _ in
+            guard let data, data.count == 16 else { return }
+            let uuid = data.withUnsafeBytes { buffer -> UUID in
+                buffer.load(as: UUID.self)
+            }
+
+            DispatchQueue.main.async {
+                // Find the source pane by matching the surface UUID.
+                let sourcePane = self.findPane(byUUID: uuid)
+                guard let sourcePane else { return }
+                guard sourcePane.id != self.targetPane.id else { return }
+                onStack(sourcePane, self.targetPane)
+            }
+        }
+
+        return true
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        return DropProposal(operation: .move)
+    }
+
+    /// Find a GridPane matching a surface UUID.
+    private func findPane(byUUID uuid: UUID) -> GridPane? {
+        for pane in allPanes {
+            switch pane {
+            case .terminal(let surface):
+                if surface.id == uuid { return pane }
+            case .stack(let children):
+                for child in children {
+                    if case .terminal(let surface) = child, surface.id == uuid {
+                        return child
+                    }
+                }
+            default:
+                break
+            }
+        }
+        return nil
     }
 }
 

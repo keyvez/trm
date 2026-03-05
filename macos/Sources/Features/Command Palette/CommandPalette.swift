@@ -91,13 +91,18 @@ enum PaletteMode {
     static func detect(from query: String) -> PaletteMode {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         if trimmed.hasPrefix("@") { return .search }
-        if trimmed.hasPrefix("!") { return .command }
+        if trimmed.hasPrefix("!") || trimmed.hasPrefix("$") { return .command }
         return .ai
     }
 
     /// Strip the mode prefix from the query to get the effective search/command text.
+    /// The `$` prefix is a shortcut: `$foo` expands to `trm.foo`.
     static func effectiveQuery(from query: String) -> String {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("$") {
+            let rest = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+            return rest.isEmpty ? "trm." : "trm.\(rest)"
+        }
         if trimmed.hasPrefix("@") || trimmed.hasPrefix("!") {
             return String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
         }
@@ -105,18 +110,38 @@ enum PaletteMode {
     }
 }
 
+/// An autocomplete suggestion shown in command mode.
+struct CommandAutocompleteOption: Identifiable {
+    let id = UUID()
+    let label: String
+    let insertion: String
+    let subtitle: String?
+    let description: String?
+
+    init(label: String, insertion: String, subtitle: String? = nil, description: String? = nil) {
+        self.label = label
+        self.insertion = insertion
+        self.subtitle = subtitle
+        self.description = description
+    }
+}
+
 struct CommandPaletteView: View {
     @Binding var isPresented: Bool
     var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
     var options: [CommandOption]
-    /// Async callback for AI mode submissions. Returns an LLM response.
-    var onAISubmit: ((String) async throws -> TrmLLMResponse)?
+    /// Callback for AI mode submissions (streaming handled externally).
+    var onAISubmit: ((String) -> Void)?
     /// Callback for command mode submissions.
     var onCommandSubmit: ((String) -> Void)?
+    /// Autocomplete options for command mode.
+    var commandAutocompleteOptions: [CommandAutocompleteOption] = []
     /// Callback to execute parsed LLM actions.
     var onExecuteActions: (([TrmAction]) -> Void)?
-    /// Callback to show the API key prompt.
-    var onNeedsAPIKey: (() -> Void)?
+    /// Callback to show the API key prompt, passing the pending prompt.
+    var onNeedsAPIKey: ((String) -> Void)?
+    /// Shared AI state that persists across palette open/close.
+    var aiState: CommandPaletteAIState? = nil
     @State private var query = ""
     @State private var selectedIndex: UInt?
     @State private var hoveredOptionID: UUID?
@@ -158,6 +183,18 @@ struct CommandPaletteView: View {
                 let scoreB = colorMatchScore(for: b.leadingColor, query: searchQuery)
                 return scoreA > scoreB
             }
+        }
+    }
+
+    /// Autocomplete options filtered by the current command query.
+    var filteredCommandAutocomplete: [CommandAutocompleteOption] {
+        guard mode == .command else { return [] }
+        let q = effectiveQuery
+        if q.isEmpty || q == "trm." { return commandAutocompleteOptions }
+        return commandAutocompleteOptions.filter {
+            $0.label.localizedCaseInsensitiveContains(q) ||
+            $0.insertion.localizedCaseInsensitiveContains(q) ||
+            ($0.subtitle?.localizedCaseInsensitiveContains(q) ?? false)
         }
     }
 
@@ -213,7 +250,7 @@ struct CommandPaletteView: View {
                                 if !prompt.isEmpty {
                                     // Check for API key first
                                     if !Trm.shared.hasAPIKey {
-                                        onNeedsAPIKey?()
+                                        onNeedsAPIKey?(prompt)
                                     } else {
                                         submitAIPrompt(prompt)
                                     }
@@ -223,24 +260,38 @@ struct CommandPaletteView: View {
                             isPresented = false
                             selectedOption?.action()
                         case .command:
-                            let cmd = effectiveQuery
-                            if !cmd.isEmpty {
-                                isPresented = false
-                                onCommandSubmit?(cmd)
+                            // If autocomplete is showing and an item is selected, fill it
+                            let acItems = filteredCommandAutocomplete
+                            if !acItems.isEmpty,
+                               let sel = selectedIndex,
+                               Int(sel) < acItems.count {
+                                fillAutocomplete(acItems[Int(sel)])
+                            } else {
+                                let cmd = effectiveQuery
+                                if !cmd.isEmpty {
+                                    isPresented = false
+                                    onCommandSubmit?(cmd)
+                                }
                             }
                         }
 
                     case .move(.up):
-                        if filteredOptions.isEmpty { break }
-                        let current = selectedIndex ?? UInt(filteredOptions.count)
+                        let itemCount = !filteredCommandAutocomplete.isEmpty
+                            ? filteredCommandAutocomplete.count
+                            : filteredOptions.count
+                        if itemCount == 0 { break }
+                        let current = selectedIndex ?? UInt(itemCount)
                         selectedIndex = (current == 0)
-                            ? UInt(filteredOptions.count - 1)
+                            ? UInt(itemCount - 1)
                             : current - 1
 
                     case .move(.down):
-                        if filteredOptions.isEmpty { break }
+                        let itemCount = !filteredCommandAutocomplete.isEmpty
+                            ? filteredCommandAutocomplete.count
+                            : filteredOptions.count
+                        if itemCount == 0 { break }
                         let current = selectedIndex ?? UInt.max
-                        selectedIndex = (current >= UInt(filteredOptions.count - 1))
+                        selectedIndex = (current >= UInt(itemCount - 1))
                             ? 0
                             : current + 1
 
@@ -320,8 +371,59 @@ struct CommandPaletteView: View {
                 }
             }
 
-            // Command list (hidden in AI mode when typing)
-            if !filteredOptions.isEmpty {
+            // Command autocomplete suggestions in command mode
+            if mode == .command && !filteredCommandAutocomplete.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(Array(filteredCommandAutocomplete.enumerated()), id: \.1.id) { index, option in
+                                Button(action: { fillAutocomplete(option) }) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack {
+                                            Text(option.label)
+                                                .font(.system(size: 12, design: .monospaced))
+                                                .foregroundStyle(.primary)
+                                            Spacer()
+                                            if let subtitle = option.subtitle {
+                                                Text(subtitle)
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.tertiary)
+                                            }
+                                        }
+                                        if let desc = option.description {
+                                            Text(desc)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                        }
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .contentShape(Rectangle())
+                                    .background(
+                                        (selectedIndex.map { Int($0) } == index)
+                                            ? Color.accentColor.opacity(0.2)
+                                            : Color.clear
+                                    )
+                                    .cornerRadius(5)
+                                }
+                                .buttonStyle(.plain)
+                                .id(option.id)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .frame(maxHeight: 200)
+                    .onChange(of: selectedIndex) { _ in
+                        guard let sel = selectedIndex,
+                              Int(sel) < filteredCommandAutocomplete.count else { return }
+                        proxy.scrollTo(filteredCommandAutocomplete[Int(sel)].id)
+                    }
+                }
+            }
+
+            // Command list (hidden in AI mode when typing, and when autocomplete is showing)
+            if !filteredOptions.isEmpty && filteredCommandAutocomplete.isEmpty {
                 CommandTable(
                     options: filteredOptions,
                     selectedIndex: $selectedIndex,
@@ -380,34 +482,26 @@ struct CommandPaletteView: View {
         }
     }
     
-    /// Submit an AI prompt asynchronously and update UI state on completion.
+    /// Fill the query with an autocomplete option's insertion text.
+    private func fillAutocomplete(_ option: CommandAutocompleteOption) {
+        let raw = query.trimmingCharacters(in: .whitespaces)
+        if raw.hasPrefix("$") {
+            let short = option.insertion.hasPrefix("trm.")
+                ? "$" + String(option.insertion.dropFirst(4))
+                : "!" + option.insertion
+            query = short
+        } else {
+            query = "!" + option.insertion
+        }
+        selectedIndex = nil
+    }
+
+    /// Submit an AI prompt, delegating streaming to the external handler.
     private func submitAIPrompt(_ prompt: String) {
         aiIsThinking = true
         aiResponseText = nil
         pendingActions = []
-
-        aiTask = Task {
-            do {
-                guard let handler = onAISubmit else { return }
-                let response = try await handler(prompt)
-
-                guard !Task.isCancelled else { return }
-
-                await MainActor.run {
-                    aiIsThinking = false
-                    aiResponseText = response.explanation
-                    pendingActions = response.actions
-                }
-            } catch {
-                guard !Task.isCancelled else { return }
-
-                await MainActor.run {
-                    aiIsThinking = false
-                    aiResponseText = "Error: \(error.localizedDescription)"
-                    pendingActions = []
-                }
-            }
-        }
+        onAISubmit?(prompt)
     }
 
     /// Returns a score (0.0 to 1.0) indicating how well a color matches a search query color name.

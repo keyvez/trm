@@ -426,6 +426,13 @@ final class Trm {
         return id == 0xFFFFFFFF ? gridIndex : Int(id)
     }
 
+    /// Get the raw pane ID for a grid slot, returning nil when no mapping exists.
+    func rawGridSlotPaneId(gridIndex: Int) -> UInt32? {
+        guard let h = handle else { return nil }
+        let id = termania_grid_slot_pane_id(h, UInt32(gridIndex))
+        return id == 0xFFFFFFFF ? nil : id
+    }
+
     // MARK: - Process Info
 
     /// Get the child PID (shell process) for a pane.
@@ -443,10 +450,10 @@ final class Trm {
         return termania_text_tap_active_panes(h)
     }
 
-    /// Check if a specific pane is targeted by a Text Tap client.
+    /// Check if a specific pane is targeted by a Text Tap client (stable pane ID).
     func isTextTapActive(paneId: Int) -> Bool {
-        guard paneId >= 0, paneId < 64 else { return false }
-        return (textTapActivePanes() >> paneId) & 1 != 0
+        guard let h = handle, paneId >= 0 else { return false }
+        return termania_text_tap_is_active(h, UInt32(paneId)) != 0
     }
 
     /// Returns the number of clients currently connected to the Text Tap socket.
@@ -502,6 +509,8 @@ final class Trm {
         let repo: String?
         let initialCommands: [String]
         let patterns: [String]
+        var daemonSessionId: String?
+        var stackGroup: String?
     }
 
     /// Grid layout config from termania.toml.
@@ -510,7 +519,7 @@ final class Trm {
         let cols: Int
         let gap: CGFloat
         let padding: CGFloat
-        let panes: [TrmPaneConfig]
+        var panes: [TrmPaneConfig]
         /// Per-row column counts for jagged grids. Empty means use rows/cols.
         let rowCols: [Int]
     }
@@ -523,7 +532,20 @@ final class Trm {
             return nil
         }
         defer { termania_destroy(h) }
-        return readGridConfig(from: h)
+        var config = readGridConfig(from: h)
+
+        // The C API doesn't know about daemon_session_id, so parse it
+        // directly from the TOML file and attach to the pane configs.
+        let sessionIds = parseDaemonSessionIds(fromPath: path)
+        if !sessionIds.isEmpty {
+            for i in 0..<min(config.panes.count, sessionIds.count) {
+                if let sid = sessionIds[i] {
+                    config.panes[i].daemonSessionId = sid
+                }
+            }
+        }
+
+        return config
     }
 
     /// Read the grid/session config from termania.toml.
@@ -589,7 +611,8 @@ final class Trm {
                 refreshMs: refreshMs,
                 repo: repo,
                 initialCommands: initialCommands,
-                patterns: patterns
+                patterns: patterns,
+                daemonSessionId: nil
             ))
         }
 
@@ -604,6 +627,52 @@ final class Trm {
         }
 
         return TrmGridConfig(rows: rows, cols: cols, gap: gap, padding: padding, panes: panes, rowCols: rowColsArr)
+    }
+
+    /// Parse daemon_session_id values from a TOML file by reading it directly.
+    /// Returns an array where index i corresponds to pane i (nil if no session ID).
+    private static func parseDaemonSessionIds(fromPath path: String) -> [String?] {
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+            return []
+        }
+
+        var result: [String?] = []
+        var inPaneSection = false
+
+        for line in content.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed == "[[panes]]" {
+                // New pane section — push nil placeholder for the previous pane
+                // if we haven't found a daemon_session_id for it yet
+                if inPaneSection {
+                    result.append(nil)
+                }
+                inPaneSection = true
+                continue
+            }
+
+            if inPaneSection && trimmed.hasPrefix("daemon_session_id") {
+                // Parse: daemon_session_id = "hexstring"
+                if let eqIdx = trimmed.firstIndex(of: "=") {
+                    var value = String(trimmed[trimmed.index(after: eqIdx)...])
+                        .trimmingCharacters(in: .whitespaces)
+                    // Remove quotes
+                    if value.hasPrefix("\"") && value.hasSuffix("\"") {
+                        value = String(value.dropFirst().dropLast())
+                    }
+                    result.append(value)
+                    inPaneSection = false  // Already captured this pane
+                }
+            }
+        }
+
+        // Handle the last pane section if it had no daemon_session_id
+        if inPaneSection {
+            result.append(nil)
+        }
+
+        return result
     }
 
     // MARK: - LLM Config

@@ -450,6 +450,7 @@ typedef struct {
   const char* initial_input;
   bool wait_after_command;
   ghostty_surface_context_e context;
+  const char* reconnect_session_id;
 } ghostty_surface_config_s;
 
 typedef struct {
@@ -614,6 +615,11 @@ typedef enum {
   GHOSTTY_READONLY_OFF,
   GHOSTTY_READONLY_ON,
 } ghostty_action_readonly_e;
+
+// apprt.action.DaemonSessionId.C
+typedef struct {
+  const char* session_id;
+} ghostty_action_daemon_session_id_s;
 
 // apprt.action.DesktopNotification.C
 typedef struct {
@@ -904,6 +910,7 @@ typedef enum {
   GHOSTTY_ACTION_SEARCH_TOTAL,
   GHOSTTY_ACTION_SEARCH_SELECTED,
   GHOSTTY_ACTION_READONLY,
+  GHOSTTY_ACTION_DAEMON_SESSION_ID,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -944,6 +951,7 @@ typedef union {
   ghostty_action_search_total_s search_total;
   ghostty_action_search_selected_s search_selected;
   ghostty_action_readonly_e readonly;
+  ghostty_action_daemon_session_id_s daemon_session_id;
 } ghostty_action_u;
 
 typedef struct {
@@ -1035,6 +1043,7 @@ ghostty_input_trigger_s ghostty_config_trigger(ghostty_config_t,
 uint32_t ghostty_config_diagnostics_count(ghostty_config_t);
 ghostty_diagnostic_s ghostty_config_get_diagnostic(ghostty_config_t, uint32_t);
 ghostty_string_s ghostty_config_open_path(void);
+void ghostty_config_set_session_persistence(ghostty_config_t, bool);
 
 ghostty_app_t ghostty_app_new(const ghostty_runtime_config_s*,
                               ghostty_config_t);
@@ -1057,6 +1066,7 @@ ghostty_surface_t ghostty_surface_new(ghostty_app_t,
                                       const ghostty_surface_config_s*);
 void ghostty_surface_free(ghostty_surface_t);
 void* ghostty_surface_userdata(ghostty_surface_t);
+void ghostty_surface_set_userdata(ghostty_surface_t, void*);
 ghostty_app_t ghostty_surface_app(ghostty_surface_t);
 ghostty_surface_config_s ghostty_surface_inherited_config(ghostty_surface_t, ghostty_surface_context_e);
 void ghostty_surface_update_config(ghostty_surface_t, ghostty_config_t);
@@ -1275,6 +1285,7 @@ uint32_t termania_grid_gap(trm_app_t);
 uint32_t termania_grid_padding(trm_app_t);
 uint32_t termania_grid_row_cols_count(trm_app_t);
 uint32_t termania_grid_row_cols_at(trm_app_t, uint32_t);
+uint8_t  termania_session_persistence(trm_app_t);
 uint32_t termania_config_pane_count(trm_app_t);
 uint32_t termania_config_pane_field(trm_app_t, uint32_t, uint8_t, char*, uint32_t);
 uint32_t termania_config_pane_initial_cmd_count(trm_app_t, uint32_t);
@@ -1292,6 +1303,9 @@ uint32_t termania_pane_child_pid(trm_app_t, uint32_t);
 
 // Text Tap active panes — bitset of panes targeted by send commands
 uint64_t termania_text_tap_active_panes(trm_app_t);
+
+// Text Tap: check if a specific pane (by stable ID) is targeted
+uint8_t  termania_text_tap_is_active(trm_app_t, uint32_t);
 
 // Text Tap client count — number of clients connected to the socket
 uint32_t termania_text_tap_client_count(trm_app_t);

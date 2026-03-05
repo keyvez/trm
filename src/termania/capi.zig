@@ -1105,6 +1105,12 @@ export fn termania_grid_row_cols_at(handle: ?*anyopaque, index: u32) u32 {
     return @intCast(app.config.grid.row_cols_buf[i]);
 }
 
+/// Check if session persistence is enabled in the termania config.
+export fn termania_session_persistence(handle: ?*anyopaque) u8 {
+    const app = getApp(handle) orelse return 0;
+    return if (app.config.session_persistence) 1 else 0;
+}
+
 /// Get the number of configured panes (from TOML).
 export fn termania_config_pane_count(handle: ?*anyopaque) u32 {
     const app = getApp(handle) orelse return 0;

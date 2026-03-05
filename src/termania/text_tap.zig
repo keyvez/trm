@@ -46,6 +46,11 @@ pub const TextTapServer = struct {
     clients: std.array_list.Managed(ClientConnection),
     /// Pending commands from tap clients.
     pending_commands: std.array_list.Managed(TapCommand),
+    /// Bitset of panes targeted by send/send_command actions.
+    /// Bit N is set if pane index N was targeted. NOT auto-cleared.
+    active_send_panes: u64 = 0,
+    /// Set of stable pane IDs targeted by send_command actions.
+    active_pane_ids: std.AutoHashMap(u32, void) = undefined,
 
     pub fn init(allocator: std.mem.Allocator, socket_path: []const u8) TextTapServer {
         return .{
@@ -53,6 +58,7 @@ pub const TextTapServer = struct {
             .socket_path = socket_path,
             .pending_commands = std.array_list.Managed(TapCommand).init(allocator),
             .clients = std.array_list.Managed(ClientConnection).init(allocator),
+            .active_pane_ids = std.AutoHashMap(u32, void).init(allocator),
         };
     }
 
@@ -60,6 +66,7 @@ pub const TextTapServer = struct {
         if (self.running) self.stop();
         self.pending_commands.deinit();
         self.clients.deinit();
+        self.active_pane_ids.deinit();
     }
 
     pub fn setPaneCount(self: *TextTapServer, count: usize) void {
@@ -264,6 +271,8 @@ pub const TextTapServer = struct {
                 self.allocator.free(text);
                 return;
             };
+            if (pane < 64) self.active_send_panes |= @as(u64, 1) << @intCast(pane);
+            self.active_pane_ids.put(@intCast(pane), {}) catch {};
             self.respond(idx, "{\"status\": \"queued\"}\n");
         } else if (std.mem.eql(u8, msg_type, "send_all")) {
             const text = extractQuotedValue(self.allocator, trimmed, "text") catch return orelse return;
@@ -302,6 +311,8 @@ pub const TextTapServer = struct {
                 self.allocator.free(command);
                 return;
             };
+            if (pane < 64) self.active_send_panes |= @as(u64, 1) << @intCast(pane);
+            self.active_pane_ids.put(@intCast(pane), {}) catch {};
             self.respond(idx, "{\"status\": \"queued\"}\n");
         } else if (std.mem.eql(u8, action_type, "send_to_all")) {
             const command = extractQuotedValue(self.allocator, msg, "command") catch return orelse return;
@@ -472,6 +483,24 @@ pub const TextTapServer = struct {
     /// Return the number of connected clients.
     pub fn clientCount(self: *TextTapServer) usize {
         return self.clients.items.len;
+    }
+
+    /// Return a bitset of pane indices targeted by send commands.
+    pub fn getActiveSendPanes(self: *TextTapServer) u64 {
+        return self.active_send_panes;
+    }
+
+    /// Return a bitset of pane indices that have connected (subscribed) clients.
+    /// Since clients are not pane-specific, this returns the active_send_panes
+    /// bitset when any client is subscribed, or 0 otherwise.
+    pub fn getConnectedPanes(self: *TextTapServer) u64 {
+        if (self.hasSubscribers()) return self.active_send_panes;
+        return 0;
+    }
+
+    /// Check if a specific pane (by stable ID) is targeted by a Text Tap client.
+    pub fn isPaneActive(self: *TextTapServer, pane_id: u32) bool {
+        return self.active_pane_ids.contains(pane_id);
     }
 };
 

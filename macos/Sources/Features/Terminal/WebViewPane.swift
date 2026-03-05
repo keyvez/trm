@@ -33,6 +33,28 @@ class WebViewPane: NSView, ObservableObject, Identifiable, WKNavigationDelegate 
         fatalError("init(coder:) is not supported")
     }
 
+    // MARK: - Navigation Helpers
+
+    var canGoBack: Bool { webView.canGoBack }
+    var canGoForward: Bool { webView.canGoForward }
+
+    func goBack() { webView.goBack() }
+    func goForward() { webView.goForward() }
+    func reload() { webView.reload() }
+
+    func openInDefaultBrowser() {
+        guard let url = webView.url ?? currentURL else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func navigate(to urlString: String) {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let urlStr = trimmed.contains("://") ? trimmed : "https://\(trimmed)"
+        guard let url = URL(string: urlStr) else { return }
+        webView.load(URLRequest(url: url))
+    }
+
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

@@ -135,6 +135,9 @@ extension Ghostty {
         /// True when the surface is in readonly mode.
         @Published private(set) var readonly: Bool = false
 
+        /// The daemon session ID for this surface, set when using session persistence.
+        var daemonSessionId: String?
+
         /// True when the surface should show a highlight effect (e.g., when presented via goto_split).
         @Published private(set) var highlighted: Bool = false
 
@@ -406,6 +409,16 @@ extension Ghostty {
         }
 
         deinit {
+            // Clear our userdata pointer on the Zig surface BEFORE this view
+            // is freed. The Zig surface is freed asynchronously (Task.detached
+            // in Ghostty.Surface.deinit), so between now and then the backend
+            // can dispatch actions (e.g. scrollbar) that call surfaceView(from:)
+            // which dereferences this pointer. Nil it out so those lookups
+            // return nil instead of hitting a zombie.
+            if let surface = self.surface {
+                ghostty_surface_set_userdata(surface, nil)
+            }
+
             // Remove all of our notificationcenter subscriptions
             let center = NotificationCenter.default
             center.removeObserver(self)

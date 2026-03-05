@@ -126,21 +126,72 @@ class BaseTerminalController: NSWindowController,
     /// by this order instead of the default terminals → webviews → plugins.
     @Published var paneDisplayOrder: [ObjectIdentifier] = []
 
+    // MARK: - Pane Stacking
+
+    /// Maps a "host" pane's ID to the ordered list of pane IDs in the stack
+    /// (including the host as the first element). Panes not in this dictionary
+    /// are standalone grid cells.
+    @Published var paneStacks: [ObjectIdentifier: [ObjectIdentifier]] = [:]
+
+    /// The currently peeked sub-pane (expanded overlay), or `nil` if no peek.
+    @Published var peekedPane: ObjectIdentifier? = nil
+
     /// All panes for the grid, in display order.
+    /// Panes that are stacked inside another cell are filtered out, and the
+    /// host cell is replaced with a `.stack([...])` containing the children.
     var gridPanes: [GridPane] {
         let all: [GridPane] =
             gridSurfaces.map { .terminal($0) } +
             webviewPanes.map { .webview($0) } +
             pluginPanes.map { .plugin($0) }
 
-        guard !paneDisplayOrder.isEmpty else { return all }
-
-        let indexed = Dictionary(uniqueKeysWithValues: paneDisplayOrder.enumerated().map { ($1, $0) })
-        return all.sorted { a, b in
-            let ai = indexed[a.id] ?? Int.max
-            let bi = indexed[b.id] ?? Int.max
-            return ai < bi
+        let sorted: [GridPane]
+        if paneDisplayOrder.isEmpty {
+            sorted = all
+        } else {
+            let indexed = Dictionary(uniqueKeysWithValues: paneDisplayOrder.enumerated().map { ($1, $0) })
+            sorted = all.sorted { a, b in
+                let ai = indexed[a.id] ?? Int.max
+                let bi = indexed[b.id] ?? Int.max
+                return ai < bi
+            }
         }
+
+        // If no stacks exist, return sorted directly.
+        guard !paneStacks.isEmpty else { return sorted }
+
+        // Build a lookup from pane ID to GridPane for stack assembly.
+        let paneById = Dictionary(uniqueKeysWithValues: sorted.map { ($0.id, $0) })
+
+        // Collect all pane IDs that are stacked as non-host children.
+        var stackedChildIDs = Set<ObjectIdentifier>()
+        for (_, childIDs) in paneStacks {
+            // Skip the first element (the host) — only non-host children are hidden.
+            for childID in childIDs.dropFirst() {
+                stackedChildIDs.insert(childID)
+            }
+        }
+
+        var result: [GridPane] = []
+        for pane in sorted {
+            // Skip panes that are stacked inside another cell.
+            if stackedChildIDs.contains(pane.id) { continue }
+
+            // If this pane is a stack host, replace it with .stack().
+            if let childIDs = paneStacks[pane.id] {
+                let children = childIDs.compactMap { paneById[$0] }
+                if children.count >= 2 {
+                    result.append(.stack(children))
+                } else {
+                    // Degenerate stack — just show the pane normally.
+                    result.append(pane)
+                }
+            } else {
+                result.append(pane)
+            }
+        }
+
+        return result
     }
 
     /// This can be set to show/hide the command palette.
@@ -280,6 +331,11 @@ class BaseTerminalController: NSWindowController,
                    !cmd.isEmpty {
                     cfg.command = cmd
                 }
+                // Pass daemon session ID for reconnection
+                if cfg.reconnectSessionId == nil,
+                   let sessionId = firstPane.daemonSessionId, !sessionId.isEmpty {
+                    cfg.reconnectSessionId = sessionId
+                }
             } else if cfg.workingDirectory?.isEmpty != false {
                 // Default to home to avoid macOS Documents permission prompts.
                 cfg.workingDirectory = NSHomeDirectory()
@@ -370,11 +426,25 @@ class BaseTerminalController: NSWindowController,
             name: .trmQuickActionExecute,
             object: nil)
 
+        // Quick action scripts (LLM-driven)
+        center.addObserver(
+            self,
+            selector: #selector(handleQuickActionScriptExecute(_:)),
+            name: .trmQuickActionScriptExecute,
+            object: nil)
+
         // Shortcut extractor
         center.addObserver(
             self,
             selector: #selector(handleShortcutExecute(_:)),
             name: .trmShortcutExecute,
+            object: nil)
+
+        // Command lifecycle — notify scanner subscribers when a command finishes
+        center.addObserver(
+            self,
+            selector: #selector(ghosttyCommandDidFinish(_:)),
+            name: .ghosttyCommandDidFinish,
             object: nil)
 
         // Listen for local events that we need to know of outside of
@@ -391,14 +461,14 @@ class BaseTerminalController: NSWindowController,
                 let title = surface.title.isEmpty ? "Shell" : surface.title
                 let visibleText = surface.cachedScreenContents.get()
                 let effectivePaneId = surface.paneId ?? index
-                return (paneId: effectivePaneId, title: title, visibleText: visibleText)
+                return (index: effectivePaneId, title: title, visibleText: visibleText)
             }
         }
 
         // Wire up the terminal output scanner's content provider.
-        // Use cachedVisibleContents (viewport only) instead of cachedScreenContents
-        // (full scrollback) so that URLs from previous command runs that have scrolled
-        // off screen are no longer detected.
+        // Use cachedVisibleContents (viewport only) to avoid leaking memory.
+        // The Zig allocator leaks when reading full scrollback via
+        // GHOSTTY_POINT_SCREEN every 2s poll cycle.
         terminalOutputScanner.paneContentProvider = { [weak self] in
             guard let self else { return [] }
             return self.gridSurfaces.enumerated().map { index, surface in
@@ -557,7 +627,8 @@ class BaseTerminalController: NSWindowController,
     func newGridPane(
         at oldView: Ghostty.SurfaceView,
         direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
-        baseConfig config: Ghostty.SurfaceConfiguration? = nil
+        baseConfig config: Ghostty.SurfaceConfiguration? = nil,
+        didReconcile: Bool = false
     ) -> Ghostty.SurfaceView? {
         guard let ghostty_app = ghostty.app else { return nil }
         let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
@@ -566,9 +637,20 @@ class BaseTerminalController: NSWindowController,
         // Use the VISUAL order (gridPanes respects paneDisplayOrder) to find
         // which row/col the focused surface occupies on screen.
         let visualPanes = gridPanes
-        let visualIndex = visualPanes.firstIndex(where: {
-            if case .terminal(let s) = $0 { return s === oldView }
-            return false
+        guard !visualPanes.isEmpty else { return nil }
+
+        let visualIndex = visualPanes.firstIndex(where: { pane in
+            switch pane {
+            case .terminal(let s):
+                return s === oldView
+            case .stack(let children):
+                return children.contains(where: {
+                    if case .terminal(let s) = $0 { return s === oldView }
+                    return false
+                })
+            default:
+                return false
+            }
         }) ?? 0
         let (row, _) = gridPosition(flatIndex: visualIndex)
 
@@ -576,12 +658,28 @@ class BaseTerminalController: NSWindowController,
         // we can determine tree insertion points relative to visual neighbours.
         let visualRowStart = flatIndexFor(row: row, col: 0)
         let colsInRow = row < gridRowCols.count ? gridRowCols[row] : 1
-        let visualRowEnd = visualRowStart + colsInRow - 1
+        let visualRowEnd = min(visualRowStart + colsInRow - 1, visualPanes.count - 1)
 
-        // Helper: extract the SurfaceView from a GridPane (terminal only).
+        // If gridRowCols drifted from the actual pane count, reconcile and retry once.
+        guard visualRowStart < visualPanes.count else {
+            reconcileGridRowCols()
+            guard !didReconcile else { return nil }
+            return newGridPane(at: oldView, direction: direction, baseConfig: config, didReconcile: true)
+        }
+
+        // Helper: extract a SurfaceView from a GridPane.
+        // For stacks, returns the last child's surface (as the tree anchor).
         func surface(of pane: GridPane) -> Ghostty.SurfaceView? {
-            if case .terminal(let s) = pane { return s }
-            return nil
+            switch pane {
+            case .terminal(let s): return s
+            case .stack(let children):
+                // Use the last child so insertion goes after the whole stack.
+                for child in children.reversed() {
+                    if case .terminal(let s) = child { return s }
+                }
+                return nil
+            default: return nil
+            }
         }
 
         // The tree's flat order. Insertion into the split tree is always
@@ -602,8 +700,7 @@ class BaseTerminalController: NSWindowController,
             }
         case .down:
             // Insert after the last surface of the current VISUAL row.
-            let lastVisualIdx = min(visualRowEnd, visualPanes.count - 1)
-            if let s = surface(of: visualPanes[lastVisualIdx]) {
+            if let s = surface(of: visualPanes[visualRowEnd]) {
                 insertAfter = s
             } else {
                 insertAfter = oldView
@@ -681,6 +778,18 @@ class BaseTerminalController: NSWindowController,
         return (max(gridRowCols.count - 1, 0), 0)
     }
 
+    /// Ensure `gridRowCols` matches the actual pane count.
+    /// If they've drifted (e.g. a surface failed to create during session
+    /// restore), rebuild `gridRowCols` to reflect the real pane count.
+    private func reconcileGridRowCols() {
+        var layout = GridLayout<ObjectIdentifier>(
+            rowCols: gridRowCols,
+            displayOrder: paneDisplayOrder
+        )
+        layout.reconcile(actualCount: gridPanes.count)
+        gridRowCols = layout.rowCols
+    }
+
     /// Resolve the current terminal pane index for a specific surface.
     func paneIndex(for surface: Ghostty.SurfaceView) -> Int? {
         gridSurfaces.firstIndex(where: { $0 === surface })
@@ -739,9 +848,18 @@ class BaseTerminalController: NSWindowController,
     private func focusedRow() -> Int {
         guard let surface = focusedSurface else { return max(gridRowCols.count - 1, 0) }
         let visualPanes = gridPanes
-        if let idx = visualPanes.firstIndex(where: {
-            if case .terminal(let s) = $0 { return s === surface }
-            return false
+        if let idx = visualPanes.firstIndex(where: { pane in
+            switch pane {
+            case .terminal(let s):
+                return s === surface
+            case .stack(let children):
+                return children.contains(where: {
+                    if case .terminal(let s) = $0 { return s === surface }
+                    return false
+                })
+            default:
+                return false
+            }
         }) {
             return gridPosition(flatIndex: idx).row
         }
@@ -835,6 +953,229 @@ class BaseTerminalController: NSWindowController,
         movePane(pane, direction: direction)
     }
 
+    // MARK: - Pane Stacking Operations
+
+    /// Stack `source` pane onto `target` pane. The source's grid cell is removed
+    /// and the target's cell becomes a vertical stack containing both panes.
+    func stackPane(_ source: GridPane, onto target: GridPane) {
+        let sourceID = source.id
+        let targetID = target.id
+        guard sourceID != targetID else { return }
+
+        // Don't stack a pane onto itself or onto its own stack.
+        if let existing = paneStacks[targetID], existing.contains(sourceID) { return }
+
+        ensurePaneDisplayOrder()
+
+        // Capture the source's grid position BEFORE modifying paneStacks,
+        // because gridPanes filters out stacked children.
+        let visualPanesBefore = gridPanes
+        let sourceVisualIdx = visualPanesBefore.firstIndex(where: { $0.id == sourceID })
+
+        // Build or extend the stack on the target.
+        if var existingStack = paneStacks[targetID] {
+            existingStack.append(sourceID)
+            paneStacks[targetID] = existingStack
+        } else {
+            // New stack: host + source.
+            paneStacks[targetID] = [targetID, sourceID]
+        }
+
+        // If the source was itself a stack host, merge its children into the
+        // target stack and remove its own entry.
+        if let sourceStack = paneStacks.removeValue(forKey: sourceID) {
+            let extras = sourceStack.filter { $0 != sourceID }
+            paneStacks[targetID]?.append(contentsOf: extras)
+        }
+
+        // Remove the source's grid cell using the pre-captured position.
+        if let flatIdx = sourceVisualIdx {
+            var offset = 0
+            for (rowIdx, cols) in gridRowCols.enumerated() {
+                if flatIdx < offset + cols {
+                    if gridRowCols[rowIdx] > 1 {
+                        gridRowCols[rowIdx] -= 1
+                    } else if gridRowCols.count > 1 {
+                        gridRowCols.remove(at: rowIdx)
+                    }
+                    break
+                }
+                offset += cols
+            }
+            if gridRowCols.isEmpty { gridRowCols = [1] }
+        }
+
+        // Remove from paneDisplayOrder.
+        if !paneDisplayOrder.isEmpty {
+            paneDisplayOrder.removeAll { $0 == sourceID }
+        }
+    }
+
+    /// Unstack a pane from its stack, restoring it to its own grid cell.
+    func unstackPane(_ pane: GridPane) {
+        let paneID = pane.id
+
+        // Find which stack contains this pane.
+        guard let (hostID, stackIndex) = findStackEntry(for: paneID) else { return }
+
+        // Remove the pane from the stack.
+        paneStacks[hostID]?.remove(at: stackIndex)
+
+        // If the stack is down to 1 pane, dissolve it.
+        if let remaining = paneStacks[hostID], remaining.count <= 1 {
+            paneStacks.removeValue(forKey: hostID)
+        }
+
+        // Add the pane back to the grid as its own cell.
+        addPaneBackToGrid(paneID)
+    }
+
+    /// Show the peek overlay for a stacked pane.
+    func peekPane(_ pane: GridPane) {
+        peekedPane = pane.id
+    }
+
+    /// Dismiss the peek overlay.
+    func dismissPeek() {
+        peekedPane = nil
+    }
+
+    /// Whether a pane is currently stacked inside another cell (as a non-host child).
+    func isStacked(_ pane: GridPane) -> Bool {
+        let id = pane.id
+        for (hostID, children) in paneStacks {
+            if children.contains(id) && id != hostID {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Whether a pane is part of any stack (host or child).
+    /// Used to decide whether closing the pane should decrement gridRowCols.
+    private func isPartOfStack(_ paneID: ObjectIdentifier) -> Bool {
+        // Is it a stack host?
+        if paneStacks[paneID] != nil { return true }
+        // Is it a non-host child?
+        for (_, children) in paneStacks {
+            if children.contains(paneID) { return true }
+        }
+        return false
+    }
+
+    /// Find the stack entry containing a given pane ID.
+    /// Returns (hostID, indexInStack) or nil if not found.
+    private func findStackEntry(for paneID: ObjectIdentifier) -> (ObjectIdentifier, Int)? {
+        for (hostID, children) in paneStacks {
+            if let idx = children.firstIndex(of: paneID) {
+                return (hostID, idx)
+            }
+        }
+        return nil
+    }
+
+    /// Remove a pane from the grid layout (used when stacking).
+    private func removePaneFromGrid(_ paneID: ObjectIdentifier) {
+        // We need to find the flat index of the source in the pre-stack pane list.
+        // Build the flat list ignoring stack transformations.
+        let allFlat: [GridPane] = gridSurfaces.map { .terminal($0) } +
+            webviewPanes.map { .webview($0) } +
+            pluginPanes.map { .plugin($0) }
+
+        let flatSorted: [GridPane]
+        if paneDisplayOrder.isEmpty {
+            flatSorted = allFlat
+        } else {
+            let indexed = Dictionary(uniqueKeysWithValues: paneDisplayOrder.enumerated().map { ($1, $0) })
+            flatSorted = allFlat.sorted { a, b in
+                (indexed[a.id] ?? Int.max) < (indexed[b.id] ?? Int.max)
+            }
+        }
+
+        // Compute the "visual" panes (same as gridPanes but we need the pre-stack
+        // flat list to find the grid position). The source occupies a grid cell
+        // only if it's not already hidden by a stack. Since we just added it to a
+        // stack above, we need to check the state *before* gridPanes filters it.
+        // We'll use the gridPanes property which already filters stacked children.
+        let visualPanes = gridPanes
+
+        // Find the source's position in the visual pane list.
+        if let flatIdx = visualPanes.firstIndex(where: { $0.id == paneID }) {
+            // Determine which row the source was in and shrink that row.
+            var offset = 0
+            for (rowIdx, cols) in gridRowCols.enumerated() {
+                if flatIdx < offset + cols {
+                    if gridRowCols[rowIdx] > 1 {
+                        gridRowCols[rowIdx] -= 1
+                    } else if gridRowCols.count > 1 {
+                        gridRowCols.remove(at: rowIdx)
+                    }
+                    break
+                }
+                offset += cols
+            }
+
+            if gridRowCols.isEmpty { gridRowCols = [1] }
+        }
+
+        // Remove from paneDisplayOrder.
+        if !paneDisplayOrder.isEmpty {
+            paneDisplayOrder.removeAll { $0 == paneID }
+        }
+    }
+
+    /// Add a pane back to the grid (used when unstacking).
+    private func addPaneBackToGrid(_ paneID: ObjectIdentifier) {
+        // Add to the last row.
+        let row = max(gridRowCols.count - 1, 0)
+        if row < gridRowCols.count {
+            gridRowCols[row] += 1
+        } else {
+            gridRowCols.append(1)
+        }
+
+        // Add back to display order.
+        if !paneDisplayOrder.isEmpty {
+            if !paneDisplayOrder.contains(paneID) {
+                paneDisplayOrder.append(paneID)
+            }
+        }
+    }
+
+    /// Clean up stack entries when a surface is being closed.
+    /// If the closed pane was in a stack, remove it. If it was the host,
+    /// promote the next pane or dissolve the stack.
+    func cleanupStacksForClosedPane(_ paneID: ObjectIdentifier) {
+        // Check if this pane is a stack host.
+        if var children = paneStacks[paneID] {
+            children.removeAll { $0 == paneID }
+            paneStacks.removeValue(forKey: paneID)
+
+            if children.count >= 2 {
+                // Promote the first remaining child as new host.
+                let newHost = children[0]
+                paneStacks[newHost] = children
+            } else if children.count == 1 {
+                // Only one pane left — dissolve, it stays as a normal cell.
+                // Nothing to do — it's already in the grid.
+            }
+            return
+        }
+
+        // Check if this pane is a non-host child in a stack.
+        for (hostID, var children) in paneStacks {
+            if let idx = children.firstIndex(of: paneID) {
+                children.remove(at: idx)
+                if children.count <= 1 {
+                    paneStacks.removeValue(forKey: hostID)
+                } else {
+                    paneStacks[hostID] = children
+                }
+                return
+            }
+        }
+    }
+
     private func flatIndexFor(row: Int, col: Int) -> Int {
         var offset = 0
         for r in 0..<row {
@@ -885,7 +1226,7 @@ class BaseTerminalController: NSWindowController,
             moveTerminalSurfaceToOwnWindow(surface)
         case .webview(let pane):
             moveWebviewPaneToOwnWindow(pane)
-        case .plugin:
+        case .plugin, .stack:
             break
         }
     }
@@ -897,7 +1238,7 @@ class BaseTerminalController: NSWindowController,
             moveTerminalSurfaceToAnotherWindow(surface)
         case .webview(let pane):
             moveWebviewPaneToAnotherWindow(pane)
-        case .plugin:
+        case .plugin, .stack:
             break
         }
     }
@@ -1395,7 +1736,7 @@ class BaseTerminalController: NSWindowController,
             let visibleText = surface.cachedScreenContents.get()
 
             return PaneContext(
-                paneId: surface.paneId ?? index,
+                index: surface.paneId ?? index,
                 title: title,
                 isFocused: isFocused,
                 visibleText: visibleText
@@ -1674,20 +2015,53 @@ class BaseTerminalController: NSWindowController,
             nil
         }
 
-        // Update grid shape if in grid mode
-        if useGridLayout, case .leaf(let view) = node {
-            let surfaces = Array(surfaceTree)
-            if let flatIdx = surfaces.firstIndex(where: { $0 === view }) {
-                let (row, _) = gridPosition(flatIndex: flatIdx)
-                if row < gridRowCols.count {
-                    if gridRowCols[row] > 1 {
-                        gridRowCols[row] -= 1
-                    } else {
-                        gridRowCols.remove(at: row)
-                    }
-                    // Ensure we always have at least [1] for the remaining surface
-                    if gridRowCols.isEmpty {
-                        gridRowCols = [1]
+        // Clean up stacks for the closed surface.
+        var wasInStack = false
+        if case .leaf(let view) = node {
+            let paneID = ObjectIdentifier(view)
+            wasInStack = isPartOfStack(paneID)
+
+            // Determine if closing this pane will dissolve a 2-pane stack.
+            // If so, the cell stays but the host changes — no grid adjustment needed.
+            // If the pane was a non-host child, the cell stays — no adjustment.
+            // If the pane was a host with ≥3 children, the cell stays — no adjustment.
+            let stackDissolves: Bool
+            if wasInStack {
+                if let children = paneStacks[paneID] {
+                    // Host pane — stack dissolves if exactly 2 children
+                    stackDissolves = children.count <= 2
+                } else if let (hostID, _) = findStackEntry(for: paneID) {
+                    // Non-host child — stack dissolves if host had exactly 2 children
+                    stackDissolves = (paneStacks[hostID]?.count ?? 0) <= 2
+                } else {
+                    stackDissolves = false
+                }
+            } else {
+                stackDissolves = false
+            }
+
+            cleanupStacksForClosedPane(paneID)
+
+            // Dismiss peek if the peeked pane is being closed.
+            if peekedPane == paneID { peekedPane = nil }
+
+            // Update grid shape if in grid mode.
+            // - Standalone pane (not in stack): decrement gridRowCols (cell disappears)
+            // - Stacked pane where stack survives (≥2 remaining): no adjustment (cell stays)
+            // - Stacked pane where stack dissolves (1 remaining): no adjustment (cell becomes normal)
+            if useGridLayout && !wasInStack {
+                let surfaces = Array(surfaceTree)
+                if let flatIdx = surfaces.firstIndex(where: { $0 === view }) {
+                    let (row, _) = gridPosition(flatIndex: flatIdx)
+                    if row < gridRowCols.count {
+                        if gridRowCols[row] > 1 {
+                            gridRowCols[row] -= 1
+                        } else {
+                            gridRowCols.remove(at: row)
+                        }
+                        if gridRowCols.isEmpty {
+                            gridRowCols = [1]
+                        }
                     }
                 }
             }
@@ -1705,6 +2079,17 @@ class BaseTerminalController: NSWindowController,
             moveFocusFrom: focusedSurface,
             undoAction: "Close Terminal"
         )
+
+        // Safety net: reconcile gridRowCols after the surface tree has been
+        // updated, in case they drifted from the actual pane count.
+        // Skip when the closed pane was in a stack — the grid accounting
+        // was already handled correctly above, and reconcile would
+        // over-correct because gridPanes.count dropped but gridRowCols
+        // intentionally stayed the same (the cell persists for remaining
+        // stack members).
+        if useGridLayout && !wasInStack {
+            reconcileGridRowCols()
+        }
     }
 
     func replaceSurfaceTree(
@@ -1725,24 +2110,27 @@ class BaseTerminalController: NSWindowController,
 
         surfaceTree = newTree
         if let newView {
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak newView, weak oldView] in
+                guard let newView else { return }
                 Ghostty.moveFocus(to: newView, from: oldView)
             }
         }
-        
-        // Setup our undo
-        guard let undoManager else { return }
-        if let undoAction {
-            undoManager.setActionName(undoAction)
-        }
-        
+
+        // Setup our undo — only when an explicit action name is provided.
+        // During initial setup (rebuildTerminalSurfaces) undoAction is nil,
+        // and we must NOT capture the old tree in the undo stack because
+        // those surfaces are about to be deallocated.
+        guard let undoAction, let undoManager else { return }
+        undoManager.setActionName(undoAction)
+
         undoManager.registerUndo(
             withTarget: self,
             expiresAfter: undoExpiration
         ) { target in
             target.surfaceTree = oldTree
             if let oldView {
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak oldView] in
+                    guard let oldView else { return }
                     Ghostty.moveFocus(to: oldView, from: target.focusedSurface)
                 }
             }
@@ -1758,6 +2146,14 @@ class BaseTerminalController: NSWindowController,
                     undoAction: undoAction)
             }
         }
+    }
+
+    @objc private func ghosttyCommandDidFinish(_ notification: Notification) {
+        guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
+        // Map the surface to its pane ID, matching the scanner's convention.
+        guard let index = gridSurfaces.firstIndex(where: { $0 === surfaceView }) else { return }
+        let paneId = surfaceView.paneId ?? index
+        terminalOutputScanner.notifyCommandDidFinish(paneId: paneId)
     }
 
     // MARK: Notifications
@@ -1951,6 +2347,49 @@ class BaseTerminalController: NSWindowController,
         guard let surface = surfaces.first(where: { ($0.paneId ?? -1) == paneId }) else { return }
         sendTextToSurface(surface, text: command)
         sendTextToSurface(surface, text: "\r")
+    }
+
+    @objc private func handleQuickActionScriptExecute(_ notification: Notification) {
+        guard window?.isKeyWindow == true else { return }
+        guard let script = notification.userInfo?["script"] as? String,
+              let actionName = notification.userInfo?["actionName"] as? String,
+              let actionId = notification.userInfo?["actionId"] as? UUID else { return }
+        executeScript(script, actionName: actionName, actionId: actionId)
+    }
+
+    /// Execute an LLM-driven script action.
+    ///
+    /// Builds pane context, resolves `#` references, sends the script to the LLM,
+    /// and executes the returned actions against the terminal panes.
+    private func executeScript(_ script: String, actionName: String, actionId: UUID) {
+        let context = buildPaneContext()
+
+        // Resolve # references in the script
+        let (cleanedScript, references) = PaneAddressing.extractReferences(from: script, panes: context)
+        let highlightedPanes = Set(references.compactMap(\.resolvedIndex))
+
+        // Build augmented prompt
+        let prompt = "Execute this automated script action called '\(actionName)': \(cleanedScript)"
+
+        commandPaletteAIState.isAgentActive = true
+        commandPaletteAIState.appendStatus("Running script: \(actionName)...")
+
+        Task { @MainActor in
+            do {
+                let response = try await Trm.shared.llmClient.submit(
+                    prompt: prompt,
+                    paneContext: context
+                )
+
+                executeTrmActions(response.actions)
+                commandPaletteAIState.appendStatus("Script '\(actionName)' completed.")
+            } catch {
+                commandPaletteAIState.appendStatus("Script '\(actionName)' failed: \(error.localizedDescription)")
+            }
+
+            quickActionsPlugin?.executingActionId = nil
+            commandPaletteAIState.isAgentActive = false
+        }
     }
 
     // MARK: Shortcut Extractor
@@ -2602,16 +3041,40 @@ class BaseTerminalController: NSWindowController,
         lines.append("# trm session config — saved \(timestamp)")
         lines.append("")
 
+        // Flatten stacks for serialization, tagging stacked panes with a
+        // group name so they can be re-stacked on restore.
+        let visualPanes = gridPanes
+        var flatPanes: [(pane: GridPane, stackGroup: String?)] = []
+        var stackCounter = 0
+        for pane in visualPanes {
+            if case .stack(let children) = pane {
+                let groupName = "stack_\(stackCounter)"
+                stackCounter += 1
+                for child in children {
+                    flatPanes.append((pane: child, stackGroup: groupName))
+                }
+            } else {
+                flatPanes.append((pane: pane, stackGroup: nil))
+            }
+        }
+
+        // Save the visual (stacked) gridRowCols. On restore, the flat-to-visual
+        // adjustment is handled by stackPane() calls after pane creation.
+        let saveRowCols = gridRowCols
+
         // [grid] section
-        let rows = gridRowCols.count
-        let cols = gridRowCols.max() ?? 1
+        let rows = saveRowCols.count
+        let cols = saveRowCols.max() ?? 1
         lines.append("[grid]")
         lines.append("rows = \(rows)")
         lines.append("cols = \(cols)")
-        // Serialize per-row column counts so jagged grids survive round-trip.
-        let isJagged = Set(gridRowCols).count > 1
-        if isJagged {
-            let rowColsStr = gridRowCols.map(String.init).joined(separator: ",")
+        // Serialize per-row column counts so jagged grids and stacked layouts
+        // survive round-trip. Always emit row_cols when stacks exist, since the
+        // visual layout may differ from rows*cols.
+        let hasStacks = stackCounter > 0
+        let isJagged = Set(saveRowCols).count > 1
+        if isJagged || hasStacks {
+            let rowColsStr = saveRowCols.map(String.init).joined(separator: ",")
             lines.append("row_cols = \(tomlQuote(rowColsStr))")
         }
         lines.append("gap = \(Int(gridGap))")
@@ -2620,9 +3083,8 @@ class BaseTerminalController: NSWindowController,
 
         // Serialize panes in visual (display) order so watermarks,
         // positions, and pane types stay consistent on reload.
-        let visualPanes = gridPanes
-        for (index, pane) in visualPanes.enumerated() {
-            switch pane {
+        for (index, entry) in flatPanes.enumerated() {
+            switch entry.pane {
             case .terminal(let surface):
                 lines.append("[[panes]]")
                 lines.append("pane_type = \"terminal\"")
@@ -2634,6 +3096,12 @@ class BaseTerminalController: NSWindowController,
                 if let watermark, !watermark.isEmpty {
                     lines.append("watermark = \(tomlQuote(watermark))")
                 }
+                if let sessionId = surface.daemonSessionId, !sessionId.isEmpty {
+                    lines.append("daemon_session_id = \(tomlQuote(sessionId))")
+                }
+                if let sg = entry.stackGroup {
+                    lines.append("stack_group = \(tomlQuote(sg))")
+                }
                 lines.append("")
 
             case .webview(let webviewPane):
@@ -2643,6 +3111,9 @@ class BaseTerminalController: NSWindowController,
                 lines.append("url = \(tomlQuote(url.absoluteString))")
                 if !webviewPane.title.isEmpty {
                     lines.append("title = \(tomlQuote(webviewPane.title))")
+                }
+                if let sg = entry.stackGroup {
+                    lines.append("stack_group = \(tomlQuote(sg))")
                 }
                 lines.append("")
 
@@ -2681,7 +3152,14 @@ class BaseTerminalController: NSWindowController,
                 if let refreshMs = pluginPane.refreshMs {
                     lines.append("refresh_ms = \(refreshMs)")
                 }
+                if let sg = entry.stackGroup {
+                    lines.append("stack_group = \(tomlQuote(sg))")
+                }
                 lines.append("")
+
+            case .stack:
+                // Already flattened above — should not appear here.
+                break
             }
         }
 
@@ -2955,6 +3433,7 @@ class BaseTerminalController: NSWindowController,
         }
 
         paneDisplayOrder = []
+        paneStacks = [:]
 
         let paneConfigs: [Trm.TrmPaneConfig] = {
             if !config.panes.isEmpty {
@@ -2984,7 +3463,18 @@ class BaseTerminalController: NSWindowController,
         }()
 
         let totalPanes = max(1, paneConfigs.count)
-        if !config.rowCols.isEmpty, config.rowCols.reduce(0, +) == totalPanes {
+        let hasStackGroups = paneConfigs.contains { $0.stackGroup != nil }
+
+        if hasStackGroups, !config.rowCols.isEmpty {
+            // The saved row_cols reflects the visual (stacked) layout. Expand
+            // it to flat row_cols by walking pane configs: consecutive panes
+            // sharing the same non-nil stack_group occupy one visual cell.
+            let flatRowCols = expandRowColsForStacks(
+                visualRowCols: config.rowCols,
+                paneConfigs: paneConfigs
+            )
+            gridRowCols = flatRowCols
+        } else if !config.rowCols.isEmpty, config.rowCols.reduce(0, +) == totalPanes {
             // Jagged grid: use the exact per-row column counts from the config.
             gridRowCols = config.rowCols
         } else {
@@ -3008,19 +3498,124 @@ class BaseTerminalController: NSWindowController,
             }
         }
 
-        // Build (paneId, config) pairs for terminal panes. Use the Zig
-        // grid_slot_pane_id mapping so IDs match the backend's pane_map.
+        // Build (paneId, config) pairs for terminal panes. Try the Zig
+        // grid_slot_pane_id mapping first so IDs match the backend's pane_map.
+        // When the backend doesn't have a slot (e.g. loading a TOML file with
+        // more panes than the default config), fall back to allocPaneId() so
+        // each pane gets a globally unique ID that won't collide with future
+        // pane allocations.
         var terminalConfigsWithPaneId: [(paneId: Int, config: Trm.TrmPaneConfig)] = []
         for (i, paneConfig) in paneConfigs.enumerated() {
             if normalizedPaneType(paneConfig.paneType) == "terminal" {
-                let zigId = Trm.shared.gridSlotPaneId(gridIndex: i)
-                terminalConfigsWithPaneId.append((paneId: zigId, config: paneConfig))
+                let zigId = Trm.shared.rawGridSlotPaneId(gridIndex: i)
+                let paneId = zigId != nil ? Int(zigId!) : Trm.shared.allocPaneId()
+                terminalConfigsWithPaneId.append((paneId: paneId, config: paneConfig))
             }
         }
         rebuildTerminalSurfaces(terminalConfigsWithPaneId)
+        reconcileGridRowCols()
+
+        // Restore pane stacking relationships from stack_group tags.
+        if hasStackGroups {
+            restoreStackGroups(from: paneConfigs)
+        }
 
         // Apply per-pane config (watermarks, initial commands) for terminal panes.
         applyPaneConfig(paneConfigs)
+    }
+
+    /// Expand visual (stacked) row_cols to flat row_cols by counting how many
+    /// flat panes each visual cell maps to. Consecutive panes sharing the same
+    /// non-nil stack_group occupy one visual cell.
+    private func expandRowColsForStacks(
+        visualRowCols: [Int],
+        paneConfigs: [Trm.TrmPaneConfig]
+    ) -> [Int] {
+        var flatRowCols: [Int] = []
+        var paneIdx = 0
+
+        for visualCols in visualRowCols {
+            var flatCols = 0
+            for _ in 0..<visualCols {
+                guard paneIdx < paneConfigs.count else { break }
+                // Count this pane as one visual cell.
+                flatCols += 1
+                let group = paneConfigs[paneIdx].stackGroup
+                paneIdx += 1
+                // If it has a stack group, consume consecutive panes with
+                // the same group — they share this visual cell.
+                if let group {
+                    while paneIdx < paneConfigs.count,
+                          paneConfigs[paneIdx].stackGroup == group {
+                        flatCols += 1
+                        paneIdx += 1
+                    }
+                }
+            }
+            flatRowCols.append(max(flatCols, 1))
+        }
+
+        // If there are leftover panes (shouldn't happen with well-formed
+        // TOML), append them as an extra row.
+        if paneIdx < paneConfigs.count {
+            flatRowCols.append(paneConfigs.count - paneIdx)
+        }
+
+        return flatRowCols
+    }
+
+    /// Restore pane stacking relationships by grouping panes with matching
+    /// stack_group values and calling stackPane() for each group.
+    private func restoreStackGroups(from paneConfigs: [Trm.TrmPaneConfig]) {
+        // Build the list of GridPanes in TOML (config) order. Pane configs
+        // are interleaved by type, but gridPanes groups by type when
+        // paneDisplayOrder is empty. Walk configs and pick from the
+        // per-type arrays by count.
+        let surfaces = gridSurfaces
+        let webviews = webviewPanes
+        let plugins = pluginPanes
+        var termIdx = 0, webIdx = 0, plugIdx = 0
+        var panesInConfigOrder: [GridPane] = []
+
+        for config in paneConfigs {
+            let paneType = normalizedPaneType(config.paneType)
+            switch paneType {
+            case "terminal":
+                if termIdx < surfaces.count {
+                    panesInConfigOrder.append(.terminal(surfaces[termIdx]))
+                    termIdx += 1
+                }
+            case "webview":
+                if webIdx < webviews.count {
+                    panesInConfigOrder.append(.webview(webviews[webIdx]))
+                    webIdx += 1
+                }
+            default:
+                if plugIdx < plugins.count {
+                    panesInConfigOrder.append(.plugin(plugins[plugIdx]))
+                    plugIdx += 1
+                }
+            }
+        }
+
+        // Build ordered groups: group name → [GridPane].
+        var groupOrder: [String] = []
+        var groups: [String: [GridPane]] = [:]
+        for (i, config) in paneConfigs.enumerated() {
+            guard let group = config.stackGroup, i < panesInConfigOrder.count else { continue }
+            if groups[group] == nil {
+                groupOrder.append(group)
+            }
+            groups[group, default: []].append(panesInConfigOrder[i])
+        }
+
+        for groupName in groupOrder {
+            guard let members = groups[groupName], members.count >= 2 else { continue }
+            let target = members[0]
+            for source in members.dropFirst() {
+                stackPane(source, onto: target)
+            }
+        }
     }
 
     /// Apply watermarks and initial commands from the termania config to terminal surfaces.
@@ -3115,8 +3710,14 @@ class BaseTerminalController: NSWindowController,
             if let command = entry.config.command, !command.isEmpty {
                 surfaceConfig.command = command
             }
+            // Pass daemon session ID for reconnection to existing sessions
+            if let sessionId = entry.config.daemonSessionId, !sessionId.isEmpty {
+                surfaceConfig.reconnectSessionId = sessionId
+            }
             let view = Ghostty.SurfaceView(ghosttyApp, baseConfig: surfaceConfig)
             view.paneId = entry.paneId
+            // Also store the daemon session ID on the view for future persistence
+            view.daemonSessionId = entry.config.daemonSessionId
             newViews.append(view)
         }
 

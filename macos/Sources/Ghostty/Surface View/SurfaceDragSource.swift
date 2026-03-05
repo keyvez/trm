@@ -158,19 +158,36 @@ extension Ghostty {
             let item = NSDraggingItem(pasteboardWriter: pasteboardItem)
             
             // Create a scaled preview image from the surface snapshot
+            // with a rounded border so it looks like a floating pane.
             if let snapshot = surfaceView.asImage {
                 let imageSize = NSSize(
                     width: snapshot.size.width * Self.previewScale,
                     height: snapshot.size.height * Self.previewScale
                 )
+                let cornerRadius: CGFloat = 8
+                let borderWidth: CGFloat = 1.5
                 let scaledImage = NSImage(size: imageSize)
                 scaledImage.lockFocus()
+
+                let rect = NSRect(origin: .zero, size: imageSize)
+                let clipPath = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+
+                // Clip the snapshot to rounded corners
+                clipPath.addClip()
                 snapshot.draw(
-                    in: NSRect(origin: .zero, size: imageSize),
+                    in: rect,
                     from: NSRect(origin: .zero, size: snapshot.size),
                     operation: .copy,
                     fraction: 1.0
                 )
+
+                // Draw a rounded border on top
+                let borderRect = rect.insetBy(dx: borderWidth / 2, dy: borderWidth / 2)
+                let borderPath = NSBezierPath(roundedRect: borderRect, xRadius: cornerRadius, yRadius: cornerRadius)
+                borderPath.lineWidth = borderWidth
+                NSColor.separatorColor.setStroke()
+                borderPath.stroke()
+
                 scaledImage.unlockFocus()
                 
                 // Position the drag image so the mouse is at the center of the image.

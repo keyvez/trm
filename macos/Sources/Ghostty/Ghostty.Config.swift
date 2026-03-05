@@ -642,6 +642,17 @@ extension Ghostty {
             let buffer = UnsafeBufferPointer(start: v.commands, count: v.len)
             return buffer.map { Ghostty.Command(cValue: $0) }
         }
+
+        /// Parse `--config <path>` from CLI arguments (before Ghostty processes them).
+        static func parseTrmConfigPath() -> String? {
+            let args = CommandLine.arguments
+            for i in 0..<args.count {
+                if args[i] == "--config", i + 1 < args.count {
+                    return args[i + 1]
+                }
+            }
+            return nil
+        }
     }
 }
 
