@@ -402,19 +402,46 @@ class AppDelegate: NSObject,
         // We have some visible window. Show an app-wide modal to confirm quitting.
         let alert = NSAlert()
         alert.messageText = "Quit trm?"
-        alert.informativeText = ghostty.sessionPersistence
-            ? "Terminal sessions will continue running in the background and resume when trm reopens."
-            : "All terminal sessions will be terminated."
-        alert.addButton(withTitle: "Close trm")
-        alert.addButton(withTitle: "Cancel")
+        if ghostty.sessionPersistence {
+            alert.informativeText = "Terminal sessions will continue running in the background and resume when trm reopens."
+            alert.addButton(withTitle: "Close trm")
+            alert.addButton(withTitle: "Terminate All & Quit")
+            alert.addButton(withTitle: "Cancel")
+        } else {
+            alert.informativeText = "All terminal sessions will be terminated."
+            alert.addButton(withTitle: "Close trm")
+            alert.addButton(withTitle: "Cancel")
+        }
         alert.alertStyle = .warning
         switch (alert.runModal()) {
         case .alertFirstButtonReturn:
             return .terminateNow
 
+        case .alertSecondButtonReturn:
+            if ghostty.sessionPersistence {
+                // User chose "Terminate All & Quit" — kill daemon sessions
+                terminateDaemonSessions()
+                return .terminateNow
+            }
+            // Non-persistence mode: second button is Cancel
+            return .terminateCancel
+
         default:
             return .terminateCancel
         }
+    }
+
+    /// Kill the daemon server so all background sessions are terminated.
+    @MainActor private func terminateDaemonSessions() {
+        let pidPath = Ghostty.App.daemonPidPath
+        guard let pidStr = try? String(contentsOfFile: pidPath, encoding: .utf8),
+              let pid = pid_t(pidStr.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+        kill(pid, SIGTERM)
+        // Clean up PID and socket files
+        try? FileManager.default.removeItem(atPath: pidPath)
+        try? FileManager.default.removeItem(atPath: Ghostty.App.daemonSocketPath)
+        // Clear auto-save so terminated sessions aren't restored
+        SessionManager.clearAutoSaves()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
