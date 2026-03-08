@@ -352,6 +352,7 @@ class BaseTerminalController: NSWindowController,
         } else {
             let initialView = Ghostty.SurfaceView(ghostty_app, baseConfig: initialConfig)
             initialView.paneId = Trm.shared.allocPaneId()
+            Self.setDefaultWatermark(forPaneId: initialView.paneId!)
             self.surfaceTree = .init(view: initialView)
         }
 
@@ -633,6 +634,7 @@ class BaseTerminalController: NSWindowController,
         guard let ghostty_app = ghostty.app else { return nil }
         let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
         newView.paneId = nextAvailablePaneId()
+        Self.setDefaultWatermark(forPaneId: newView.paneId!)
 
         // Use the VISUAL order (gridPanes respects paneDisplayOrder) to find
         // which row/col the focused surface occupies on screen.
@@ -800,6 +802,13 @@ class BaseTerminalController: NSWindowController,
         return Trm.shared.allocPaneId()
     }
 
+    /// Assign a default letter watermark (A, B, C, …) based on the pane ID.
+    /// Only sets if no watermark has been explicitly configured.
+    static func setDefaultWatermark(forPaneId paneId: Int) {
+        let letter = String(UnicodeScalar(Int(UnicodeScalar("A").value) + (paneId % 26))!)
+        Trm.shared.setWatermark(forPaneId: UInt32(paneId), text: letter)
+    }
+
     // MARK: - Pane Display Order
 
     /// Ensure `paneDisplayOrder` reflects the current pane set.
@@ -951,6 +960,29 @@ class BaseTerminalController: NSWindowController,
         guard let surface = focusedSurface else { return }
         let pane = GridPane.terminal(surface)
         movePane(pane, direction: direction)
+    }
+
+    // MARK: - Pane Swap (Drag-to-Swap)
+
+    /// Swap two panes' positions in the grid without stacking them.
+    func swapPane(_ source: GridPane, with target: GridPane) {
+        guard source.id != target.id else { return }
+        ensurePaneDisplayOrder()
+        let panes = gridPanes
+        guard let srcIdx = panes.firstIndex(where: { $0.id == source.id }),
+              let dstIdx = panes.firstIndex(where: { $0.id == target.id }) else { return }
+        swapPanesInDisplayOrder(panes, srcIdx, dstIdx)
+
+        // Flash the swapped pane so the user can track it.
+        if case .terminal(let surface) = source, let pid = surface.paneId {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                NotificationCenter.default.post(
+                    name: Trm.highlightPane,
+                    object: nil,
+                    userInfo: ["paneId": pid]
+                )
+            }
+        }
     }
 
     // MARK: - Pane Stacking Operations
@@ -1775,6 +1807,7 @@ class BaseTerminalController: NSWindowController,
                 } else if let ghosttyApp = ghostty.app {
                     let newView = Ghostty.SurfaceView(ghosttyApp, baseConfig: nil)
                     newView.paneId = nextAvailablePaneId()
+                    Self.setDefaultWatermark(forPaneId: newView.paneId!)
                     replaceSurfaceTree(
                         .init(view: newView),
                         moveFocusTo: newView,
@@ -3060,7 +3093,16 @@ class BaseTerminalController: NSWindowController,
 
         // Save the visual (stacked) gridRowCols. On restore, the flat-to-visual
         // adjustment is handled by stackPane() calls after pane creation.
-        let saveRowCols = gridRowCols
+        // If gridRowCols is stale (sum doesn't match visual pane count),
+        // recompute from the visual count using the active grid config dimensions.
+        // Use visual pane count (excluding stacked children) rather than the
+        // flat count, since gridRowCols represents the visual layout.
+        var saveRowCols = gridRowCols
+        let visualPaneCount = visualPanes.count
+        if saveRowCols.reduce(0, +) != visualPaneCount, visualPaneCount > 0 {
+            let cfg = activeGridConfig
+            saveRowCols = gridShape(totalPanes: visualPaneCount, rows: max(cfg.rows, 1), cols: max(cfg.cols, 1))
+        }
 
         // [grid] section
         let rows = saveRowCols.count
@@ -3088,6 +3130,9 @@ class BaseTerminalController: NSWindowController,
             case .terminal(let surface):
                 lines.append("[[panes]]")
                 lines.append("pane_type = \"terminal\"")
+                if let command = surface.initialCommand, !command.isEmpty {
+                    lines.append("command = \(tomlQuote(command))")
+                }
                 if let pwd = surface.pwd, !pwd.isEmpty {
                     lines.append("cwd = \(tomlQuote(pwd))")
                 }
@@ -3520,7 +3565,15 @@ class BaseTerminalController: NSWindowController,
             restoreStackGroups(from: paneConfigs)
         }
 
+        // Assign default letter watermarks (A, B, C, …) to every pane.
+        for surface in gridSurfaces {
+            if let pid = surface.paneId {
+                Self.setDefaultWatermark(forPaneId: pid)
+            }
+        }
+
         // Apply per-pane config (watermarks, initial commands) for terminal panes.
+        // Explicit watermarks from the config will override the defaults above.
         applyPaneConfig(paneConfigs)
     }
 

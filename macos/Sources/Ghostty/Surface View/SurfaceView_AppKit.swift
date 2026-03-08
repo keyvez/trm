@@ -138,6 +138,10 @@ extension Ghostty {
         /// The daemon session ID for this surface, set when using session persistence.
         var daemonSessionId: String?
 
+        /// The command used to start this surface's terminal session.
+        /// Stored so it can be persisted in TOML and re-used on restore.
+        var initialCommand: String?
+
         /// True when the surface should show a highlight effect (e.g., when presented via goto_split).
         @Published private(set) var highlighted: Bool = false
 
@@ -388,6 +392,7 @@ extension Ghostty {
             var fallbackConfig = SurfaceConfiguration()
             fallbackConfig.workingDirectory = NSHomeDirectory()
             let surface_cfg = baseConfig ?? fallbackConfig
+            self.initialCommand = surface_cfg.command
             let surface = surface_cfg.withCValue(view: self) { surface_cfg_c in
                 ghostty_surface_new(app, &surface_cfg_c)
             }

@@ -935,7 +935,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         let alert = NSAlert()
         alert.messageText = "Close All Windows?"
-        alert.informativeText = "All terminal sessions will be terminated."
+        let hasPersistence = (NSApp.delegate as? AppDelegate)?.ghostty.sessionPersistence ?? false
+        alert.informativeText = hasPersistence
+            ? "Terminal sessions will continue running in the background and resume when trm reopens."
+            : "All terminal sessions will be terminated."
         alert.addButton(withTitle: "Close All Windows")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
@@ -1244,7 +1247,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         confirmClose(
             messageText: "Close Tab?",
-            informativeText: "The terminal still has a running process. If you close the tab the process will be killed."
+            informativeText: ghostty.sessionPersistence
+                ? "The terminal session will continue running in the background."
+                : "The terminal still has a running process. If you close the tab the process will be killed."
         ) {
             self.closeTabImmediately()
         }
@@ -1335,7 +1340,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // attached to the window that needs confirmation.
         confirmController.confirmClose(
             messageText: "Close Window?",
-            informativeText: "All terminal sessions in this window will be terminated.",
+            informativeText: ghostty.sessionPersistence
+                ? "Terminal sessions will continue running in the background and resume when trm reopens."
+                : "All terminal sessions in this window will be terminated.",
         ) {
             self.closeWindowImmediately()
         }

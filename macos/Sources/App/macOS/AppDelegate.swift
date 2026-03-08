@@ -402,7 +402,9 @@ class AppDelegate: NSObject,
         // We have some visible window. Show an app-wide modal to confirm quitting.
         let alert = NSAlert()
         alert.messageText = "Quit trm?"
-        alert.informativeText = "All terminal sessions will be terminated."
+        alert.informativeText = ghostty.sessionPersistence
+            ? "Terminal sessions will continue running in the background and resume when trm reopens."
+            : "All terminal sessions will be terminated."
         alert.addButton(withTitle: "Close trm")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning

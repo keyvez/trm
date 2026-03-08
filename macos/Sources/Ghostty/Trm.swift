@@ -462,6 +462,16 @@ final class Trm {
         return Int(termania_text_tap_client_count(h))
     }
 
+    /// Returns the app name of the first subscribed Text Tap client, or nil.
+    func textTapAppName() -> String? {
+        guard let h = handle else { return nil }
+        var buf = [CChar](repeating: 0, count: 129)
+        let len = termania_text_tap_app_name(h, &buf, UInt32(buf.count - 1))
+        guard len > 0 else { return nil }
+        buf[Int(len)] = 0
+        return String(cString: buf)
+    }
+
     // MARK: - Watermarks
 
     /// Get the watermark text for a pane.
@@ -534,14 +544,15 @@ final class Trm {
         defer { termania_destroy(h) }
         var config = readGridConfig(from: h)
 
-        // The C API doesn't know about daemon_session_id, so parse it
-        // directly from the TOML file and attach to the pane configs.
-        let sessionIds = parseDaemonSessionIds(fromPath: path)
-        if !sessionIds.isEmpty {
-            for i in 0..<min(config.panes.count, sessionIds.count) {
-                if let sid = sessionIds[i] {
-                    config.panes[i].daemonSessionId = sid
-                }
+        // The C API doesn't know about daemon_session_id or stack_group,
+        // so parse them directly from the TOML file and attach to pane configs.
+        let extras = parsePaneExtras(fromPath: path)
+        for i in 0..<min(config.panes.count, extras.count) {
+            if let sid = extras[i].daemonSessionId {
+                config.panes[i].daemonSessionId = sid
+            }
+            if let sg = extras[i].stackGroup {
+                config.panes[i].stackGroup = sg
             }
         }
 
@@ -629,50 +640,64 @@ final class Trm {
         return TrmGridConfig(rows: rows, cols: cols, gap: gap, padding: padding, panes: panes, rowCols: rowColsArr)
     }
 
-    /// Parse daemon_session_id values from a TOML file by reading it directly.
-    /// Returns an array where index i corresponds to pane i (nil if no session ID).
-    private static func parseDaemonSessionIds(fromPath path: String) -> [String?] {
+    /// Extra per-pane fields parsed directly from TOML (not available via C API).
+    private struct PaneExtras {
+        var daemonSessionId: String?
+        var stackGroup: String?
+    }
+
+    /// Parse daemon_session_id and stack_group values from a TOML file.
+    /// Returns an array where index i corresponds to pane i.
+    private static func parsePaneExtras(fromPath path: String) -> [PaneExtras] {
         guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
             return []
         }
 
-        var result: [String?] = []
-        var inPaneSection = false
+        var result: [PaneExtras] = []
+        var current: PaneExtras? = nil
 
         for line in content.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
             if trimmed == "[[panes]]" {
-                // New pane section — push nil placeholder for the previous pane
-                // if we haven't found a daemon_session_id for it yet
-                if inPaneSection {
-                    result.append(nil)
+                // Finalize the previous pane section
+                if let prev = current {
+                    result.append(prev)
                 }
-                inPaneSection = true
+                current = PaneExtras()
                 continue
             }
 
-            if inPaneSection && trimmed.hasPrefix("daemon_session_id") {
-                // Parse: daemon_session_id = "hexstring"
-                if let eqIdx = trimmed.firstIndex(of: "=") {
-                    var value = String(trimmed[trimmed.index(after: eqIdx)...])
-                        .trimmingCharacters(in: .whitespaces)
-                    // Remove quotes
-                    if value.hasPrefix("\"") && value.hasSuffix("\"") {
-                        value = String(value.dropFirst().dropLast())
-                    }
-                    result.append(value)
-                    inPaneSection = false  // Already captured this pane
+            guard current != nil else { continue }
+
+            if trimmed.hasPrefix("daemon_session_id") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.daemonSessionId = value
+                }
+            } else if trimmed.hasPrefix("stack_group") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.stackGroup = value
                 }
             }
         }
 
-        // Handle the last pane section if it had no daemon_session_id
-        if inPaneSection {
-            result.append(nil)
+        // Finalize the last pane section
+        if let last = current {
+            result.append(last)
         }
 
         return result
+    }
+
+    /// Parse a TOML key = "value" line and return the unquoted value.
+    private static func parseTomlStringValue(_ line: String) -> String? {
+        guard let eqIdx = line.firstIndex(of: "=") else { return nil }
+        var value = String(line[line.index(after: eqIdx)...])
+            .trimmingCharacters(in: .whitespaces)
+        if value.hasPrefix("\"") && value.hasSuffix("\"") {
+            value = String(value.dropFirst().dropLast())
+        }
+        return value.isEmpty ? nil : value
     }
 
     // MARK: - LLM Config
