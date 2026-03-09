@@ -643,12 +643,21 @@ extension Ghostty {
             return buffer.map { Ghostty.Command(cValue: $0) }
         }
 
-        /// Parse `--config <path>` from CLI arguments (before Ghostty processes them).
+        /// Parse trm config path from `TRM_CONFIG` env var, `--config <path>`,
+        /// or `--config=<path>` CLI arguments.
         static func parseTrmConfigPath() -> String? {
+            // Prefer TRM_CONFIG env var (avoids Ghostty CLI parser conflicts)
+            if let envPath = ProcessInfo.processInfo.environment["TRM_CONFIG"],
+               !envPath.isEmpty {
+                return envPath
+            }
             let args = CommandLine.arguments
             for i in 0..<args.count {
                 if args[i] == "--config", i + 1 < args.count {
                     return args[i + 1]
+                }
+                if args[i].hasPrefix("--config=") {
+                    return String(args[i].dropFirst("--config=".count))
                 }
             }
             return nil

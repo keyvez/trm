@@ -27,6 +27,9 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuSecureInput: NSMenuItem?
     @IBOutlet private var menuQuit: NSMenuItem?
 
+    /// When true, skip auto-saving sessions on quit (e.g. after "Terminate All & Quit").
+    private var skipAutoSaveOnQuit = false
+
     @IBOutlet private var menuNewWindow: NSMenuItem?
     @IBOutlet private var menuNewTab: NSMenuItem?
     @IBOutlet private var menuClose: NSMenuItem?
@@ -333,7 +336,14 @@ class AppDelegate: NSObject,
             //   - if we're restoring from persisted state
             if TerminalController.all.isEmpty && derivedConfig.initialWindow {
                 undoManager.disableUndoRegistration()
-                if let configPath = launchConfigPath {
+                // When session persistence is on, prefer auto-save restore because
+                // it contains daemon_session_id values for reconnecting to the daemon.
+                // The explicit --config path is only used as a fallback.
+                if ghostty.sessionPersistence,
+                   ghostty.config.windowSaveState != "never",
+                   SessionManager.restoreLastSession(ghostty: ghostty) {
+                    // Restored from auto-save with daemon session IDs.
+                } else if let configPath = launchConfigPath {
                     // --config was passed: open a window with that session config.
                     openNewWindow(cwd: FileManager.default.currentDirectoryPath, configPath: configPath)
                 } else if ghostty.config.windowSaveState != "never",
@@ -421,6 +431,7 @@ class AppDelegate: NSObject,
             if ghostty.sessionPersistence {
                 // User chose "Terminate All & Quit" — kill daemon sessions
                 terminateDaemonSessions()
+                skipAutoSaveOnQuit = true
                 return .terminateNow
             }
             // Non-persistence mode: second button is Cancel
@@ -445,8 +456,12 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Auto-save all windows so they can be restored on next launch
-        if ghostty.config.windowSaveState != "never" {
+        // Auto-save all windows so they can be restored on next launch.
+        // Skip if the user chose "Terminate All & Quit" — those sessions
+        // were killed and must not be restored.
+        // When session persistence is on, we still auto-save so that
+        // daemon_session_id values are persisted for reconnection.
+        if !skipAutoSaveOnQuit && ghostty.config.windowSaveState != "never" {
             SessionManager.autoSaveAllWindows()
         }
 

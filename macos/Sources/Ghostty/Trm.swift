@@ -12,7 +12,7 @@ final class Trm {
     private(set) var handle: trm_app_t?
 
     private init() {
-        // Check for --config <path> CLI argument first.
+        // Check for TRM_CONFIG env, --config <path>, or --config=<path> first.
         if let configPath = Ghostty.Config.parseTrmConfigPath(),
            FileManager.default.fileExists(atPath: configPath) {
             handle = configPath.withCString { ptr in
