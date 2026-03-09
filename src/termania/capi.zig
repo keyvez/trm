@@ -82,11 +82,16 @@ const CApp = struct {
     /// The pane ID associated with the pending notification (0xFFFFFFFF = unknown).
     notification_pane_id: u32 = 0xFFFFFFFF,
 
-    // Browser action queue (from text tap open_browser actions)
-    browser_url_buf: [1024]u8 = undefined,
-    browser_url_len: usize = 0,
-    browser_pane_id: u32 = 0xFFFFFFFF,
-    has_browser_action: bool = false,
+    // Browser action queue (from text tap browser commands)
+    // Supports up to 4 queued browser commands.
+    browser_queue_count: usize = 0,
+    browser_queue_actions: [4][32]u8 = undefined, // action type string
+    browser_queue_action_lens: [4]usize = .{0} ** 4,
+    browser_queue_arg1: [4][1024]u8 = undefined, // primary arg (url, script, selector)
+    browser_queue_arg1_lens: [4]usize = .{0} ** 4,
+    browser_queue_arg2: [4][512]u8 = undefined, // secondary arg (text for fill)
+    browser_queue_arg2_lens: [4]usize = .{0} ** 4,
+    browser_queue_panes: [4]u32 = .{0xFFFFFFFF} ** 4,
 
     // Overlay mapping: fg pane ID → bg pane ID
     overlay_map: std.AutoHashMap(u32, u32) = undefined,
@@ -341,11 +346,22 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
                         app.notification_pane_id = resolveNotifyPane(&app.text_tap);
                     },
                     .open_browser => |ob| {
-                        const ulen = @min(ob.url.len, app.browser_url_buf.len);
-                        @memcpy(app.browser_url_buf[0..ulen], ob.url[0..ulen]);
-                        app.browser_url_len = ulen;
-                        app.browser_pane_id = if (ob.pane) |p| @intCast(p) else 0xFFFFFFFF;
-                        app.has_browser_action = true;
+                        enqueueBrowserAction(app, "open_browser", ob.url, "", if (ob.pane) |p| @intCast(p) else 0xFFFFFFFF);
+                    },
+                    .browser_eval => |be| {
+                        enqueueBrowserAction(app, "browser_eval", be.script, "", if (be.pane) |p| @intCast(p) else 0xFFFFFFFF);
+                    },
+                    .browser_snapshot => |bs| {
+                        enqueueBrowserAction(app, "browser_snapshot", "", "", if (bs.pane) |p| @intCast(p) else 0xFFFFFFFF);
+                    },
+                    .browser_click => |bc| {
+                        enqueueBrowserAction(app, "browser_click", bc.selector, "", if (bc.pane) |p| @intCast(p) else 0xFFFFFFFF);
+                    },
+                    .browser_fill => |bf| {
+                        enqueueBrowserAction(app, "browser_fill", bf.selector, bf.text, if (bf.pane) |p| @intCast(p) else 0xFFFFFFFF);
+                    },
+                    .browser_navigate => |bn| {
+                        enqueueBrowserAction(app, "browser_navigate", bn.url, "", if (bn.pane) |p| @intCast(p) else 0xFFFFFFFF);
                     },
                     .context_usage => |cu| {
                         app.context_used_tokens = cu.used_tokens;
@@ -451,30 +467,81 @@ fn resolveNotifyPane(tap: *@import("text_tap.zig").TextTapServer) u32 {
     return 0xFFFFFFFF;
 }
 
-/// Poll for a pending browser action (open_browser). Returns 1 if available.
-/// url_buf/url_max: buffer to receive the URL string.
+/// Enqueue a browser action into the CApp's browser queue.
+fn enqueueBrowserAction(app: *CApp, action: []const u8, arg1: []const u8, arg2: []const u8, pane: u32) void {
+    if (app.browser_queue_count >= 4) return;
+    const qi = app.browser_queue_count;
+
+    const alen = @min(action.len, app.browser_queue_actions[qi].len);
+    @memcpy(app.browser_queue_actions[qi][0..alen], action[0..alen]);
+    app.browser_queue_action_lens[qi] = alen;
+
+    const a1len = @min(arg1.len, app.browser_queue_arg1[qi].len);
+    @memcpy(app.browser_queue_arg1[qi][0..a1len], arg1[0..a1len]);
+    app.browser_queue_arg1_lens[qi] = a1len;
+
+    const a2len = @min(arg2.len, app.browser_queue_arg2[qi].len);
+    @memcpy(app.browser_queue_arg2[qi][0..a2len], arg2[0..a2len]);
+    app.browser_queue_arg2_lens[qi] = a2len;
+
+    app.browser_queue_panes[qi] = pane;
+    app.browser_queue_count += 1;
+}
+
+/// Drain one pending browser action from the queue. Returns 1 if available.
+/// action_buf: receives the action type string (e.g. "open_browser", "browser_eval").
+/// arg1_buf: receives the primary argument (URL, script, selector).
+/// arg2_buf: receives the secondary argument (text for browser_fill).
 /// pane_id_out: receives the target pane ID (0xFFFFFFFF = auto/any).
 export fn termania_poll_browser_action(
     handle: ?*anyopaque,
-    url_buf: ?[*]u8,
-    url_max: u32,
+    action_buf: ?[*]u8,
+    action_max: u32,
+    arg1_buf: ?[*]u8,
+    arg1_max: u32,
+    arg2_buf: ?[*]u8,
+    arg2_max: u32,
     pane_id_out: ?*u32,
 ) u8 {
     const app = getApp(handle) orelse return 0;
-    if (!app.has_browser_action) return 0;
+    if (app.browser_queue_count == 0) return 0;
 
-    const u_out = url_buf orelse return 0;
-    const ulen = @min(app.browser_url_len, @as(usize, url_max));
-    @memcpy(u_out[0..ulen], app.browser_url_buf[0..ulen]);
-    if (ulen < url_max) u_out[ulen] = 0;
+    const a_out = action_buf orelse return 0;
+    const a1_out = arg1_buf orelse return 0;
+    const a2_out = arg2_buf orelse return 0;
+
+    // Copy action type
+    const alen = @min(app.browser_queue_action_lens[0], @as(usize, action_max));
+    @memcpy(a_out[0..alen], app.browser_queue_actions[0][0..alen]);
+    if (alen < action_max) a_out[alen] = 0;
+
+    // Copy arg1
+    const a1len = @min(app.browser_queue_arg1_lens[0], @as(usize, arg1_max));
+    @memcpy(a1_out[0..a1len], app.browser_queue_arg1[0][0..a1len]);
+    if (a1len < arg1_max) a1_out[a1len] = 0;
+
+    // Copy arg2
+    const a2len = @min(app.browser_queue_arg2_lens[0], @as(usize, arg2_max));
+    @memcpy(a2_out[0..a2len], app.browser_queue_arg2[0][0..a2len]);
+    if (a2len < arg2_max) a2_out[a2len] = 0;
 
     if (pane_id_out) |p| {
-        p.* = app.browser_pane_id;
+        p.* = app.browser_queue_panes[0];
     }
 
-    app.has_browser_action = false;
-    app.browser_url_len = 0;
-    app.browser_pane_id = 0xFFFFFFFF;
+    // Shift queue
+    app.browser_queue_count -= 1;
+    var i: usize = 0;
+    while (i < app.browser_queue_count) : (i += 1) {
+        app.browser_queue_actions[i] = app.browser_queue_actions[i + 1];
+        app.browser_queue_action_lens[i] = app.browser_queue_action_lens[i + 1];
+        app.browser_queue_arg1[i] = app.browser_queue_arg1[i + 1];
+        app.browser_queue_arg1_lens[i] = app.browser_queue_arg1_lens[i + 1];
+        app.browser_queue_arg2[i] = app.browser_queue_arg2[i + 1];
+        app.browser_queue_arg2_lens[i] = app.browser_queue_arg2_lens[i + 1];
+        app.browser_queue_panes[i] = app.browser_queue_panes[i + 1];
+    }
+
     return 1;
 }
 

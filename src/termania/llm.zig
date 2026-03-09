@@ -41,6 +41,16 @@ pub const TermaniaAction = union(enum) {
     focus_pane: struct { pane: usize },
     /// Open a browser pane alongside the target pane (split browser).
     open_browser: struct { url: []const u8, pane: ?usize = null },
+    /// Evaluate JavaScript in a browser pane.
+    browser_eval: struct { script: []const u8, pane: ?usize = null },
+    /// Get an accessibility tree snapshot from a browser pane.
+    browser_snapshot: struct { pane: ?usize = null },
+    /// Click an element in a browser pane by CSS selector.
+    browser_click: struct { selector: []const u8, pane: ?usize = null },
+    /// Fill a form field in a browser pane.
+    browser_fill: struct { selector: []const u8, text: []const u8, pane: ?usize = null },
+    /// Navigate a browser pane to a URL.
+    browser_navigate: struct { url: []const u8, pane: ?usize = null },
     message: struct { text: []const u8 },
     notify: struct { title: []const u8, body: []const u8 },
     context_usage: struct {
@@ -90,6 +100,11 @@ pub fn formatActionForDisplay(allocator: Allocator, action: TermaniaAction) ![]u
         .swap_panes => |a| try std.fmt.allocPrint(allocator, "  swap pane {d} <-> pane {d}", .{ a.a, a.b }),
         .focus_pane => |a| try std.fmt.allocPrint(allocator, "  focus pane {d}", .{a.pane}),
         .open_browser => |a| try std.fmt.allocPrint(allocator, "  open browser: {s}", .{a.url}),
+        .browser_eval => |a| try std.fmt.allocPrint(allocator, "  browser eval: {s}", .{a.script[0..@min(a.script.len, 60)]}),
+        .browser_snapshot => try std.fmt.allocPrint(allocator, "  browser snapshot", .{}),
+        .browser_click => |a| try std.fmt.allocPrint(allocator, "  browser click: {s}", .{a.selector}),
+        .browser_fill => |a| try std.fmt.allocPrint(allocator, "  browser fill: {s}", .{a.selector}),
+        .browser_navigate => |a| try std.fmt.allocPrint(allocator, "  browser navigate: {s}", .{a.url}),
         .message => |a| try std.fmt.allocPrint(allocator, "  {s}", .{a.text}),
         .notify => |a| try std.fmt.allocPrint(allocator, "  notify: {s} — {s}", .{ a.title, a.body }),
         .context_usage => |a| try std.fmt.allocPrint(allocator, "  context: {d}/{d} ({d}%)", .{ a.used_tokens, a.total_tokens, a.percentage }),

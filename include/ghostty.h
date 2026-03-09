@@ -1215,7 +1215,7 @@ void termania_destroy(trm_app_t);
 uint32_t termania_poll(trm_app_t);
 uint8_t  termania_drain_send(trm_app_t, uint32_t*, char*, uint32_t, uint32_t*);
 uint8_t  termania_poll_notification(trm_app_t, char*, uint32_t, char*, uint32_t, uint32_t*);
-uint8_t  termania_poll_browser_action(trm_app_t, char*, uint32_t, uint32_t*);
+uint8_t  termania_poll_browser_action(trm_app_t, char*, uint32_t, char*, uint32_t, char*, uint32_t, uint32_t*);
 uint32_t termania_pane_count(trm_app_t);
 uint32_t termania_alloc_pane_id(trm_app_t);
 uint32_t termania_grid_slot_pane_id(trm_app_t, uint32_t);

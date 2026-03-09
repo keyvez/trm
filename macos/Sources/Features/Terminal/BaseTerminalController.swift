@@ -2383,8 +2383,51 @@ class BaseTerminalController: NSWindowController,
 
     @objc private func handleOpenSplitBrowser(_ notification: Notification) {
         guard window?.isKeyWindow == true else { return }
-        let urlString = notification.userInfo?["url"] as? String ?? ""
-        openSplitBrowser(urlString: urlString)
+        let action = notification.userInfo?["action"] as? String ?? "open_browser"
+        let arg1 = notification.userInfo?["arg1"] as? String ?? notification.userInfo?["url"] as? String ?? ""
+        let arg2 = notification.userInfo?["arg2"] as? String ?? ""
+
+        switch action {
+        case "open_browser":
+            openSplitBrowser(urlString: arg1)
+        case "browser_navigate":
+            if let pane = findFirstWebViewPane() {
+                pane.navigate(to: arg1)
+            } else {
+                openSplitBrowser(urlString: arg1)
+            }
+        case "browser_eval":
+            if let pane = findFirstWebViewPane() {
+                Task { @MainActor in
+                    _ = try? await pane.evaluateJS(arg1)
+                }
+            }
+        case "browser_snapshot":
+            if let pane = findFirstWebViewPane() {
+                Task { @MainActor in
+                    _ = try? await pane.snapshotAccessibilityTree()
+                }
+            }
+        case "browser_click":
+            if let pane = findFirstWebViewPane() {
+                Task { @MainActor in
+                    _ = try? await pane.clickElement(selector: arg1)
+                }
+            }
+        case "browser_fill":
+            if let pane = findFirstWebViewPane() {
+                Task { @MainActor in
+                    _ = try? await pane.fillField(selector: arg1, text: arg2)
+                }
+            }
+        default:
+            break
+        }
+    }
+
+    /// Find the first webview pane in the current window.
+    private func findFirstWebViewPane() -> WebViewPane? {
+        webviewPanes.first
     }
 
     /// Open a browser pane alongside the current terminal.

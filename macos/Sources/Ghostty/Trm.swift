@@ -274,17 +274,43 @@ final class Trm {
         return (title, body, paneId)
     }
 
-    /// Poll the C API for a pending browser action (open_browser via socket).
-    /// Returns (url, paneId) or nil. paneId is -1 if no target pane specified.
-    func pollBrowserAction() -> (url: String, paneId: Int)? {
+    /// A browser action drained from the socket API queue.
+    struct BrowserAction {
+        let action: String  // "open_browser", "browser_eval", "browser_snapshot", etc.
+        let arg1: String    // URL, script, or CSS selector
+        let arg2: String    // Secondary arg (text for browser_fill)
+        let paneId: Int     // Target pane ID, or -1 for auto
+    }
+
+    /// Drain one pending browser action from the C API queue.
+    func pollBrowserAction() -> BrowserAction? {
         guard let h = handle else { return nil }
-        var urlBuf = [CChar](repeating: 0, count: 1025)
+        var actionBuf = [CChar](repeating: 0, count: 33)
+        var arg1Buf = [CChar](repeating: 0, count: 1025)
+        var arg2Buf = [CChar](repeating: 0, count: 513)
         var paneIdRaw: UInt32 = 0xFFFFFFFF
-        let result = termania_poll_browser_action(h, &urlBuf, UInt32(urlBuf.count - 1), &paneIdRaw)
+        let result = termania_poll_browser_action(
+            h,
+            &actionBuf, UInt32(actionBuf.count - 1),
+            &arg1Buf, UInt32(arg1Buf.count - 1),
+            &arg2Buf, UInt32(arg2Buf.count - 1),
+            &paneIdRaw
+        )
         guard result != 0 else { return nil }
-        let url = String(cString: urlBuf)
+        let action = String(cString: actionBuf)
+        let arg1 = String(cString: arg1Buf)
+        let arg2 = String(cString: arg2Buf)
         let paneId = paneIdRaw == 0xFFFFFFFF ? -1 : Int(paneIdRaw)
-        return (url, paneId)
+        return BrowserAction(action: action, arg1: arg1, arg2: arg2, paneId: paneId)
+    }
+
+    /// Drain all pending browser actions from the queue.
+    func drainBrowserActions() -> [BrowserAction] {
+        var actions: [BrowserAction] = []
+        while let action = pollBrowserAction() {
+            actions.append(action)
+        }
+        return actions
     }
 
     /// Show a native macOS notification.
@@ -335,12 +361,17 @@ final class Trm {
                     userInfo: ["paneId": paneId]
                 )
             }
-            // Poll for browser actions (open_browser via socket API).
-            if let browserAction = self.pollBrowserAction() {
+            // Poll for browser actions (from socket API).
+            for browserAction in self.drainBrowserActions() {
                 NotificationCenter.default.post(
                     name: .trmOpenSplitBrowser,
                     object: nil,
-                    userInfo: ["url": browserAction.url, "paneId": browserAction.paneId]
+                    userInfo: [
+                        "action": browserAction.action,
+                        "arg1": browserAction.arg1,
+                        "arg2": browserAction.arg2,
+                        "paneId": browserAction.paneId,
+                    ]
                 )
             }
         }

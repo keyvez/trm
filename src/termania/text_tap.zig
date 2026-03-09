@@ -393,6 +393,57 @@ pub const TextTapServer = struct {
                 return;
             };
             self.respond(idx, "{\"status\": \"queued\"}\n");
+        } else if (std.mem.eql(u8, action_type, "browser_eval")) {
+            const script = extractQuotedValue(self.allocator, msg, "script") catch return orelse return;
+            const pane = extractNumberAfter(msg, "pane");
+            self.pending_commands.append(.{
+                .action = .{ .browser_eval = .{ .script = script, .pane = pane } },
+            }) catch {
+                self.allocator.free(script);
+                return;
+            };
+            self.respond(idx, "{\"status\": \"queued\"}\n");
+        } else if (std.mem.eql(u8, action_type, "browser_snapshot")) {
+            const pane = extractNumberAfter(msg, "pane");
+            self.pending_commands.append(.{
+                .action = .{ .browser_snapshot = .{ .pane = pane } },
+            }) catch return;
+            self.respond(idx, "{\"status\": \"queued\"}\n");
+        } else if (std.mem.eql(u8, action_type, "browser_click")) {
+            const selector = extractQuotedValue(self.allocator, msg, "selector") catch return orelse return;
+            const pane = extractNumberAfter(msg, "pane");
+            self.pending_commands.append(.{
+                .action = .{ .browser_click = .{ .selector = selector, .pane = pane } },
+            }) catch {
+                self.allocator.free(selector);
+                return;
+            };
+            self.respond(idx, "{\"status\": \"queued\"}\n");
+        } else if (std.mem.eql(u8, action_type, "browser_fill")) {
+            const selector = extractQuotedValue(self.allocator, msg, "selector") catch return orelse return;
+            const text = extractQuotedValue(self.allocator, msg, "text") catch return orelse {
+                self.allocator.free(selector);
+                return;
+            };
+            const pane = extractNumberAfter(msg, "pane");
+            self.pending_commands.append(.{
+                .action = .{ .browser_fill = .{ .selector = selector, .text = text, .pane = pane } },
+            }) catch {
+                self.allocator.free(selector);
+                self.allocator.free(text);
+                return;
+            };
+            self.respond(idx, "{\"status\": \"queued\"}\n");
+        } else if (std.mem.eql(u8, action_type, "browser_navigate")) {
+            const url = extractQuotedValue(self.allocator, msg, "url") catch return orelse return;
+            const pane = extractNumberAfter(msg, "pane");
+            self.pending_commands.append(.{
+                .action = .{ .browser_navigate = .{ .url = url, .pane = pane } },
+            }) catch {
+                self.allocator.free(url);
+                return;
+            };
+            self.respond(idx, "{\"status\": \"queued\"}\n");
         } else {
             self.respond(idx, "{\"error\": \"unknown action\"}\n");
         }
