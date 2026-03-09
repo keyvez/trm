@@ -221,6 +221,15 @@ class BaseTerminalController: NSWindowController,
     /// Agent monitor for tracking AI agent activity in panes.
     let agentMonitorService = AgentMonitorService()
 
+    /// Stable pane IDs that need user attention (agent waiting for input).
+    /// Computed from the ClaudeAttentionPlugin's published state.
+    var attentionPaneIds: Set<Int> {
+        guard let plugin = servicePluginRegistry.plugins["claude_attention"] as? ClaudeAttentionPlugin else {
+            return []
+        }
+        return plugin.attentionPanes
+    }
+
     /// Whether the terminal surface should focus when the mouse is over it.
     var focusFollowsMouse: Bool {
         self.derivedConfig.focusFollowsMouse

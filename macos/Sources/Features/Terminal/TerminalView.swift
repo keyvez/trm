@@ -86,6 +86,9 @@ protocol TerminalViewModel: ObservableObject {
 
     /// Agent monitor for tracking AI agent activity in panes.
     var agentMonitorService: AgentMonitorService { get }
+
+    /// Stable pane IDs that need user attention (agent waiting for input).
+    var attentionPaneIds: Set<Int> { get }
 }
 
 /// The main terminal view. This terminal view supports splits.
@@ -138,6 +141,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         padding: viewModel.gridPadding,
                         liveSummaryManager: viewModel.liveSummaryManager,
                         servicePluginRegistry: viewModel.servicePluginRegistry,
+                        attentionPaneIds: viewModel.attentionPaneIds,
                         peekedPane: viewModel.peekedPane,
                         onDetachPane: { pane in
                             (self.delegate as? BaseTerminalController)?.detachPaneToWindow(pane)
@@ -156,6 +160,9 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         },
                         onStackPane: { source, target in
                             (self.delegate as? BaseTerminalController)?.stackPane(source, onto: target)
+                        },
+                        onSwapPane: { source, target in
+                            (self.delegate as? BaseTerminalController)?.swapPane(source, with: target)
                         },
                         onUnstackPane: { pane in
                             (self.delegate as? BaseTerminalController)?.unstackPane(pane)

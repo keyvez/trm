@@ -2,10 +2,17 @@ import Foundation
 import SwiftUI
 import Combine
 
-/// Shows a small attention icon on terminal panes where Claude Code has
-/// finished generating output and is waiting for user input. The icon
-/// dismisses automatically when the user types in that pane (detected
-/// via terminal output change).
+/// Tracks panes where an agent (Claude Code, etc.) needs user attention.
+///
+/// Renders both:
+/// 1. A pulsing sparkle icon overlay (top-left of the pane)
+/// 2. Drives the notification ring border (blue glow) in TrmGridView
+///    via the `attentionPanes` set exposed to `BaseTerminalController`.
+///
+/// Attention is dismissed when:
+/// - The user types in the pane (terminal output changes)
+/// - The pane is focused by the user
+/// - The pane is closed
 @MainActor
 final class ClaudeAttentionPlugin: ObservableObject, ServicePlugin, ObservableServicePlugin, TerminalOutputSubscriber, ServicePluginOverlayProvider {
 
@@ -18,6 +25,7 @@ final class ClaudeAttentionPlugin: ObservableObject, ServicePlugin, ObservableSe
 
     private weak var registry: ServicePluginRegistry?
     private var notificationObserver: NSObjectProtocol?
+    private var focusObserver: NSObjectProtocol?
 
     func configure(registry: ServicePluginRegistry) {
         self.registry = registry
@@ -33,6 +41,19 @@ final class ClaudeAttentionPlugin: ObservableObject, ServicePlugin, ObservableSe
                   let paneId = notification.userInfo?["paneId"] as? Int else { return }
             self.attentionPanes.insert(paneId)
         }
+
+        // Dismiss attention when the user focuses a pane (highlight notification).
+        focusObserver = NotificationCenter.default.addObserver(
+            forName: Trm.highlightPane,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let paneId = notification.userInfo?["paneId"] as? Int else { return }
+            if self.attentionPanes.contains(paneId) {
+                self.attentionPanes.remove(paneId)
+            }
+        }
     }
 
     func stop() {
@@ -40,18 +61,22 @@ final class ClaudeAttentionPlugin: ObservableObject, ServicePlugin, ObservableSe
             NotificationCenter.default.removeObserver(observer)
             notificationObserver = nil
         }
+        if let observer = focusObserver {
+            NotificationCenter.default.removeObserver(observer)
+            focusObserver = nil
+        }
         attentionPanes.removeAll()
     }
 
     // MARK: - Published State
 
-    /// Pane indices that currently need attention.
+    /// Pane IDs that currently need attention.
     @Published var attentionPanes: Set<Int> = []
 
     // MARK: - TerminalOutputSubscriber
 
     func terminalOutputDidChange(paneId: Int, text: String, hash: String) {
-        // User typed something — dismiss the attention icon for this pane.
+        // User typed something — dismiss the attention for this pane.
         if attentionPanes.contains(paneId) {
             attentionPanes.remove(paneId)
         }
@@ -77,7 +102,7 @@ final class ClaudeAttentionPlugin: ObservableObject, ServicePlugin, ObservableSe
 
 // MARK: - Icon View
 
-/// A small pulsing sparkle indicator that signals Claude is waiting for input.
+/// A small pulsing sparkle indicator that signals an agent is waiting for input.
 struct ClaudeAttentionIconView: View {
     @State private var isPulsing = false
 
@@ -88,7 +113,7 @@ struct ClaudeAttentionIconView: View {
             .frame(width: 24, height: 24)
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.orange.opacity(0.85))
+                    .fill(Color(red: 0x58/255, green: 0xa6/255, blue: 0xff/255).opacity(0.85))
             )
             .scaleEffect(isPulsing ? 1.1 : 1.0)
             .opacity(isPulsing ? 1.0 : 0.75)

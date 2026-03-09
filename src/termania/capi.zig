@@ -79,6 +79,8 @@ const CApp = struct {
     notification_body_buf: [512]u8 = undefined,
     notification_body_len: usize = 0,
     has_notification: bool = false,
+    /// The pane ID associated with the pending notification (0xFFFFFFFF = unknown).
+    notification_pane_id: u32 = 0xFFFFFFFF,
 
     // Overlay mapping: fg pane ID → bg pane ID
     overlay_map: std.AutoHashMap(u32, u32) = undefined,
@@ -317,6 +319,8 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
                         @memcpy(app.notification_body_buf[0..blen], n.body[0..blen]);
                         app.notification_body_len = blen;
                         app.has_notification = true;
+                        // Resolve source pane from connected text tap clients.
+                        app.notification_pane_id = resolveNotifyPane(&app.text_tap);
                     },
                     .message => |m| {
                         // Surface message actions as notifications
@@ -328,6 +332,7 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
                         @memcpy(app.notification_body_buf[0..blen], m.text[0..blen]);
                         app.notification_body_len = blen;
                         app.has_notification = true;
+                        app.notification_pane_id = resolveNotifyPane(&app.text_tap);
                     },
                     .context_usage => |cu| {
                         app.context_used_tokens = cu.used_tokens;
@@ -392,12 +397,14 @@ export fn termania_drain_send(
 
 /// Poll for a pending notification. Returns 1 if a notification is available
 /// and copies the title/body into the provided buffers. Clears the notification.
+/// Also writes the source pane ID to pane_id_out (0xFFFFFFFF = unknown).
 export fn termania_poll_notification(
     handle: ?*anyopaque,
     title_buf: ?[*]u8,
     title_max: u32,
     body_buf: ?[*]u8,
     body_max: u32,
+    pane_id_out: ?*u32,
 ) u8 {
     const app = getApp(handle) orelse return 0;
     if (!app.has_notification) return 0;
@@ -413,8 +420,22 @@ export fn termania_poll_notification(
     @memcpy(b_out[0..blen], app.notification_body_buf[0..blen]);
     if (blen < body_max) b_out[blen] = 0;
 
+    if (pane_id_out) |p| {
+        p.* = app.notification_pane_id;
+    }
+
     app.has_notification = false;
+    app.notification_pane_id = 0xFFFFFFFF;
     return 1;
+}
+
+/// Resolve the source pane for a notification by looking at connected text tap clients.
+/// Returns the first connected_pane found, or 0xFFFFFFFF if none.
+fn resolveNotifyPane(tap: *@import("text_tap.zig").TextTapServer) u32 {
+    for (tap.clients.items) |client| {
+        if (client.connected_pane) |pane| return pane;
+    }
+    return 0xFFFFFFFF;
 }
 
 /// Allocate a globally unique pane ID. Each call returns a fresh ID that will
@@ -1341,6 +1362,18 @@ export fn termania_text_tap_client_count(handle: ?*anyopaque) u32 {
     const app = getApp(handle) orelse return 0;
     app.text_tap.poll();
     return @intCast(app.text_tap.clientCount());
+}
+
+/// Copy the app name of the first subscribed Text Tap client into `buf`.
+/// Returns the number of bytes written, or 0 if no subscribed client or no name.
+export fn termania_text_tap_app_name(handle: ?*anyopaque, buf: [*]u8, max_len: u32) u32 {
+    const app = getApp(handle) orelse return 0;
+    app.text_tap.poll();
+    const name = app.text_tap.connectedAppName() orelse return 0;
+    if (name.len == 0 or max_len == 0) return 0;
+    const copy_len = @min(name.len, max_len);
+    @memcpy(buf[0..copy_len], name[0..copy_len]);
+    return @intCast(copy_len);
 }
 
 /// Get the pane ID at a specific grid slot position (visual order).

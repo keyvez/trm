@@ -13,8 +13,12 @@ enum TrmBorder {
     static let color        = Color(red: 0x30/255, green: 0x36/255, blue: 0x3d/255)
     static let focusedColor = Color(red: 0x58/255, green: 0xa6/255, blue: 0xff/255)
     static let stackDropColor = Color(red: 0x58/255, green: 0xa6/255, blue: 0xff/255).opacity(0.6)
+    /// Attention ring color — blue ring like cmux notification rings.
+    static let attentionColor = Color(red: 0x58/255, green: 0xa6/255, blue: 0xff/255)
     static let radius: CGFloat  = 8
     static let width: CGFloat   = 1
+    /// Width of the attention ring border (thicker than normal border).
+    static let attentionWidth: CGFloat = 2.5
 }
 
 /// A grid-based layout for terminal surfaces within a single tab.
@@ -46,6 +50,10 @@ struct TrmGridView: View {
     /// The service plugin registry for rendering service plugin overlays.
     @ObservedObject var servicePluginRegistry: ServicePluginRegistry
 
+    /// Set of stable pane IDs that need user attention (e.g. agent waiting for input).
+    /// Drives the animated notification ring around the pane border.
+    var attentionPaneIds: Set<Int> = []
+
     /// The currently peeked sub-pane (expanded overlay), or nil.
     var peekedPane: ObjectIdentifier? = nil
 
@@ -67,6 +75,9 @@ struct TrmGridView: View {
     /// Callback to stack a source pane onto a target pane.
     var onStackPane: ((GridPane, GridPane) -> Void)? = nil
 
+    /// Callback to swap two panes' positions in the grid.
+    var onSwapPane: ((GridPane, GridPane) -> Void)? = nil
+
     /// Callback to unstack (restore) a pane from its stack.
     var onUnstackPane: ((GridPane) -> Void)? = nil
 
@@ -81,6 +92,12 @@ struct TrmGridView: View {
     /// Bumped when a watermark changes to force the overlay to re-evaluate.
     @State private var watermarkVersion: Int = 0
 
+    /// The pane currently being hovered during a drag-and-drop operation.
+    @State private var dropHighlightPaneId: ObjectIdentifier?
+
+    /// Whether the current drop operation is in "stack" mode (Option key held).
+    /// When false, dropping swaps pane positions instead of stacking.
+    @State private var dropIsStackMode: Bool = false
 
     var body: some View {
         content
@@ -162,14 +179,29 @@ struct TrmGridView: View {
     /// Wraps a single pane cell with border, context menu, drag source, and drop target.
     @ViewBuilder
     private func paneCellView(_ pane: GridPane, flatIndex: Int, row: Int, col: Int) -> some View {
+        let isDropTarget = dropHighlightPaneId == pane.id
+        // How many children the cell will have after the drop.
+        let existingCount = pane.stackChildren?.count ?? 1
+        let needsAttention = paneNeedsAttention(pane)
+
         paneView(pane, index: flatIndex)
             .cornerRadius(TrmBorder.radius)
             .overlay(
                 RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
                     .strokeBorder(
                         borderColor(for: pane),
-                        lineWidth: TrmBorder.width
+                        lineWidth: needsAttention ? TrmBorder.attentionWidth : TrmBorder.width
                     )
+                    .allowsHitTesting(false)
+            )
+            .overlay(
+                // Notification ring glow — animated blue ring around panes needing attention
+                NotificationRingView(isActive: needsAttention)
+                    .allowsHitTesting(false)
+            )
+            .overlay(
+                // BonSplit-style drop placeholder — shows where the pane will land
+                dropPlaceholder(isVisible: isDropTarget, isStackMode: dropIsStackMode, stackCount: existingCount)
                     .allowsHitTesting(false)
             )
             .contextMenu {
@@ -182,8 +214,54 @@ struct TrmGridView: View {
             .onDrop(of: [.ghosttySurfaceId], delegate: PaneStackDropDelegate(
                 targetPane: pane,
                 allPanes: panes,
-                onStack: onStackPane
+                onStack: onStackPane,
+                onSwap: onSwapPane,
+                dropHighlightPaneId: $dropHighlightPaneId,
+                dropIsStackMode: $dropIsStackMode
             ))
+    }
+
+    /// Animated drop placeholder.
+    /// - Stack mode (Option held): shrinks to the bottom slot where the pane will land after stacking.
+    /// - Swap mode (default): full-cell highlight indicating a position swap.
+    @ViewBuilder
+    private func dropPlaceholder(isVisible: Bool, isStackMode: Bool, stackCount: Int) -> some View {
+        GeometryReader { geo in
+            let inset: CGFloat = 4
+            let fullW = geo.size.width - inset * 2
+            let fullH = geo.size.height - inset * 2
+
+            let totalAfterDrop = CGFloat(stackCount + 1)
+            let slotH = geo.size.height / totalAfterDrop - inset
+
+            // Stack mode: animate to bottom slot. Swap mode: full cell highlight.
+            let targetW = fullW
+            let targetH = isVisible
+                ? (isStackMode ? slotH : fullH)
+                : fullH
+            let targetY = isVisible && isStackMode
+                ? geo.size.height - (slotH / 2) - inset
+                : geo.size.height / 2
+
+            let fillColor = isStackMode
+                ? Color.accentColor.opacity(0.15)
+                : Color.orange.opacity(0.12)
+            let strokeColor = isStackMode
+                ? Color.accentColor.opacity(0.6)
+                : Color.orange.opacity(0.5)
+
+            RoundedRectangle(cornerRadius: TrmBorder.radius - 2, style: .continuous)
+                .fill(fillColor)
+                .overlay(
+                    RoundedRectangle(cornerRadius: TrmBorder.radius - 2, style: .continuous)
+                        .strokeBorder(strokeColor, lineWidth: 2)
+                )
+                .frame(width: targetW, height: targetH)
+                .position(x: geo.size.width / 2, y: targetY)
+                .opacity(isVisible ? 1 : 0)
+                .animation(.spring(duration: 0.35, bounce: 0.12), value: isVisible)
+                .animation(.spring(duration: 0.35, bounce: 0.12), value: isStackMode)
+        }
     }
 
     /// Dispatch to the appropriate view for each pane type.
@@ -609,6 +687,10 @@ struct TrmGridView: View {
     }
 
     private func borderColor(for pane: GridPane) -> Color {
+        // Attention ring takes priority over focus for border color
+        if paneNeedsAttention(pane) {
+            return TrmBorder.attentionColor
+        }
         switch pane {
         case .terminal(let surface):
             if let focused = focusedSurface, focused === surface {
@@ -627,6 +709,24 @@ struct TrmGridView: View {
             return TrmBorder.color
         case .webview, .plugin:
             return TrmBorder.color
+        }
+    }
+
+    /// Check if a pane (or any child in a stack) needs user attention.
+    private func paneNeedsAttention(_ pane: GridPane) -> Bool {
+        switch pane {
+        case .terminal(let surface):
+            if let pid = surface.paneId {
+                return attentionPaneIds.contains(pid)
+            }
+            return false
+        case .stack(let children):
+            for child in children {
+                if paneNeedsAttention(child) { return true }
+            }
+            return false
+        case .webview, .plugin:
+            return false
         }
     }
 
@@ -653,6 +753,32 @@ struct TrmGridView: View {
             offset = end
         }
         return result
+    }
+}
+
+// MARK: - Notification Ring
+
+/// An animated blue glow ring around panes that need user attention.
+/// Mimics cmux's notification ring: a subtle pulsing border glow.
+private struct NotificationRingView: View {
+    let isActive: Bool
+
+    @State private var glowPhase: Bool = false
+
+    var body: some View {
+        if isActive {
+            RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
+                .strokeBorder(
+                    TrmBorder.attentionColor.opacity(glowPhase ? 0.8 : 0.4),
+                    lineWidth: TrmBorder.attentionWidth
+                )
+                .shadow(color: TrmBorder.attentionColor.opacity(glowPhase ? 0.5 : 0.2), radius: glowPhase ? 8 : 4)
+                .animation(
+                    .easeInOut(duration: 1.5).repeatForever(autoreverses: true),
+                    value: glowPhase
+                )
+                .onAppear { glowPhase = true }
+        }
     }
 }
 
@@ -691,20 +817,52 @@ private struct StackDragBar: View {
 // MARK: - Pane Stack Drop Delegate
 
 /// Drop delegate that handles stacking a dragged terminal pane onto a target cell.
+/// Shows a visual highlight on the target pane during hover.
 struct PaneStackDropDelegate: DropDelegate {
     let targetPane: GridPane
     let allPanes: [GridPane]
     let onStack: ((GridPane, GridPane) -> Void)?
+    let onSwap: ((GridPane, GridPane) -> Void)?
+    @Binding var dropHighlightPaneId: ObjectIdentifier?
+    @Binding var dropIsStackMode: Bool
 
     func validateDrop(info: DropInfo) -> Bool {
-        // Only accept if we have the stacking callback.
-        guard onStack != nil else { return false }
-        // Must have the right type.
+        // Accept if we have either callback.
+        guard onStack != nil || onSwap != nil else { return false }
         return info.hasItemsConforming(to: [.ghosttySurfaceId])
     }
 
+    func dropEntered(info: DropInfo) {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            dropHighlightPaneId = targetPane.id
+            dropIsStackMode = NSEvent.modifierFlags.contains(.option)
+        }
+    }
+
+    func dropExited(info: DropInfo) {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            if dropHighlightPaneId == targetPane.id {
+                dropHighlightPaneId = nil
+            }
+            dropIsStackMode = false
+        }
+    }
+
     func performDrop(info: DropInfo) -> Bool {
-        guard let onStack else { return false }
+        let stackMode = NSEvent.modifierFlags.contains(.option)
+
+        withAnimation(.easeInOut(duration: 0.15)) {
+            dropHighlightPaneId = nil
+            dropIsStackMode = false
+        }
+
+        let callback: ((GridPane, GridPane) -> Void)?
+        if stackMode {
+            callback = onStack
+        } else {
+            callback = onSwap
+        }
+        guard let callback else { return false }
 
         // Load the surface ID from the drop payload.
         let providers = info.itemProviders(for: [.ghosttySurfaceId])
@@ -717,11 +875,10 @@ struct PaneStackDropDelegate: DropDelegate {
             }
 
             DispatchQueue.main.async {
-                // Find the source pane by matching the surface UUID.
                 let sourcePane = self.findPane(byUUID: uuid)
                 guard let sourcePane else { return }
                 guard sourcePane.id != self.targetPane.id else { return }
-                onStack(sourcePane, self.targetPane)
+                callback(sourcePane, self.targetPane)
             }
         }
 
@@ -729,6 +886,15 @@ struct PaneStackDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
+        // Update stack mode live as the user holds/releases Option.
+        let isOption = NSEvent.modifierFlags.contains(.option)
+        if isOption != dropIsStackMode {
+            DispatchQueue.main.async {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    dropIsStackMode = isOption
+                }
+            }
+        }
         return DropProposal(operation: .move)
     }
 

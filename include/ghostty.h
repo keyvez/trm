@@ -1214,7 +1214,7 @@ void termania_destroy(trm_app_t);
 // Polling and pane management
 uint32_t termania_poll(trm_app_t);
 uint8_t  termania_drain_send(trm_app_t, uint32_t*, char*, uint32_t, uint32_t*);
-uint8_t  termania_poll_notification(trm_app_t, char*, uint32_t, char*, uint32_t);
+uint8_t  termania_poll_notification(trm_app_t, char*, uint32_t, char*, uint32_t, uint32_t*);
 uint32_t termania_pane_count(trm_app_t);
 uint32_t termania_alloc_pane_id(trm_app_t);
 uint32_t termania_grid_slot_pane_id(trm_app_t, uint32_t);
@@ -1309,6 +1309,9 @@ uint8_t  termania_text_tap_is_active(trm_app_t, uint32_t);
 
 // Text Tap client count — number of clients connected to the socket
 uint32_t termania_text_tap_client_count(trm_app_t);
+
+// Text Tap: app name of the first subscribed client (returns bytes written)
+uint32_t termania_text_tap_app_name(trm_app_t, char*, uint32_t);
 
 // LLM config accessors
 uint32_t termania_config_llm_provider(trm_app_t, char*, uint32_t);

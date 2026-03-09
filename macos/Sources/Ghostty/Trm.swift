@@ -259,16 +259,19 @@ final class Trm {
         return results
     }
 
-    /// Poll the C API for a pending notification. Returns (title, body) or nil.
-    func pollNotification() -> (title: String, body: String)? {
+    /// Poll the C API for a pending notification. Returns (title, body, paneId) or nil.
+    /// paneId is the source pane that generated the notification, or -1 if unknown.
+    func pollNotification() -> (title: String, body: String, paneId: Int)? {
         guard let h = handle else { return nil }
         var titleBuf = [CChar](repeating: 0, count: 257)
         var bodyBuf = [CChar](repeating: 0, count: 513)
-        let result = termania_poll_notification(h, &titleBuf, UInt32(titleBuf.count - 1), &bodyBuf, UInt32(bodyBuf.count - 1))
+        var paneIdRaw: UInt32 = 0xFFFFFFFF
+        let result = termania_poll_notification(h, &titleBuf, UInt32(titleBuf.count - 1), &bodyBuf, UInt32(bodyBuf.count - 1), &paneIdRaw)
         guard result != 0 else { return nil }
         let title = String(cString: titleBuf)
         let body = String(cString: bodyBuf)
-        return (title, body)
+        let paneId = paneIdRaw == 0xFFFFFFFF ? -1 : Int(paneIdRaw)
+        return (title, body, paneId)
     }
 
     /// Show a native macOS notification.
@@ -303,8 +306,12 @@ final class Trm {
             }
             if let notification = self.pollNotification() {
                 self.showNotification(title: notification.title, body: notification.body)
+                // Use the pane ID from the notification source (text tap client's connected pane).
+                // Falls back to the focused pane if the source is unknown.
                 let paneId: Int
-                if let h = self.handle {
+                if notification.paneId >= 0 {
+                    paneId = notification.paneId
+                } else if let h = self.handle {
                     paneId = Int(termania_focused_pane(h))
                 } else {
                     paneId = 0
