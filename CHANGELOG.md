@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.3 (2026-03-08)
+
+### Added
+
+- **Notification rings**: Panes needing attention now glow with an animated blue ring border that pulses until the pane is focused. Replaces the small icon-only indicator.
+- **CLI socket API**: Full-featured `trm` CLI with subcommands: `notify`, `list-panes`, `send`, `send-all`, `send-command`, `mark-connected`, `mark-disconnected`, `open-browser`, `status`, and `raw`. Communicates over the Text Tap Unix socket.
+- **Split browser pane**: Open a WebView alongside terminal panes with Cmd+Shift+L. Accessible from the View menu and via `trm open-browser --url URL`.
+- **Agent browser integration**: Scriptable WebView API for AI agents. New socket actions: `browser_eval` (execute JS), `browser_navigate`, `browser_snapshot` (accessibility tree), `browser_click`, `browser_fill`. CLI subcommands: `browser-eval`, `browser-navigate`, `browser-snapshot`, `browser-click`, `browser-fill`.
+
+### Fixed
+
+- **Notification pane ID**: Notifications now correctly identify the source pane instead of always using the focused pane.
+
 ## 0.2.2 (2026-02-22)
 
 ### Added
