@@ -1,47 +1,24 @@
 #!/bin/bash
-# Install trm CLI wrapper.
+# Install trm CLI.
 #
-# Creates a `trm` command in /usr/local/bin that launches the trm macOS app.
-# The app must be installed to /Applications/Ghostty.app (the default Xcode
-# build output, renamed or copied).
+# Installs the `trm` command to /usr/local/bin. The CLI supports subcommands
+# for controlling the running trm app via the Text Tap Unix socket, and falls
+# back to launching the app when invoked with no arguments.
 
 set -e
 
-APP_NAME="Ghostty"
 CLI_NAME="trm"
 INSTALL_DIR="/usr/local/bin"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CLI_SOURCE="$SCRIPT_DIR/trm-cli.sh"
 
-# Find the app bundle — check common locations
-APP_PATH=""
-for candidate in \
-    "/Applications/${APP_NAME}.app" \
-    "$HOME/Applications/${APP_NAME}.app" \
-    "$(dirname "$0")/../macos/build/ReleaseLocal/${APP_NAME}.app" \
-    "$(dirname "$0")/../macos/build/Debug/${APP_NAME}.app"; do
-    if [ -d "$candidate" ]; then
-        APP_PATH="$candidate"
-        break
-    fi
-done
-
-if [ -z "$APP_PATH" ]; then
-    echo "Error: Could not find ${APP_NAME}.app"
-    echo "Build with: zig build -Doptimize=ReleaseFast"
-    echo "Then copy macos/build/ReleaseLocal/${APP_NAME}.app to /Applications/"
+if [ ! -f "$CLI_SOURCE" ]; then
+    echo "Error: trm-cli.sh not found at $CLI_SOURCE"
     exit 1
 fi
 
-echo "Found app: $APP_PATH"
+echo "Installing $CLI_NAME CLI to $INSTALL_DIR/$CLI_NAME ..."
+sudo cp "$CLI_SOURCE" "$INSTALL_DIR/$CLI_NAME"
+sudo chmod +x "$INSTALL_DIR/$CLI_NAME"
 
-# Create the CLI wrapper
-WRAPPER="$INSTALL_DIR/$CLI_NAME"
-echo "Installing CLI wrapper to $WRAPPER ..."
-
-sudo tee "$WRAPPER" > /dev/null << SCRIPT
-#!/bin/bash
-open -a "$APP_PATH" "\$@"
-SCRIPT
-
-sudo chmod +x "$WRAPPER"
-
-echo "Done! You can now run: $CLI_NAME"
+echo "Done! Run 'trm --help' for usage."

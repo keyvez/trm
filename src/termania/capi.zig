@@ -82,6 +82,12 @@ const CApp = struct {
     /// The pane ID associated with the pending notification (0xFFFFFFFF = unknown).
     notification_pane_id: u32 = 0xFFFFFFFF,
 
+    // Browser action queue (from text tap open_browser actions)
+    browser_url_buf: [1024]u8 = undefined,
+    browser_url_len: usize = 0,
+    browser_pane_id: u32 = 0xFFFFFFFF,
+    has_browser_action: bool = false,
+
     // Overlay mapping: fg pane ID → bg pane ID
     overlay_map: std.AutoHashMap(u32, u32) = undefined,
     overlay_bg_focused: std.AutoHashMap(u32, bool) = undefined,
@@ -334,6 +340,13 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
                         app.has_notification = true;
                         app.notification_pane_id = resolveNotifyPane(&app.text_tap);
                     },
+                    .open_browser => |ob| {
+                        const ulen = @min(ob.url.len, app.browser_url_buf.len);
+                        @memcpy(app.browser_url_buf[0..ulen], ob.url[0..ulen]);
+                        app.browser_url_len = ulen;
+                        app.browser_pane_id = if (ob.pane) |p| @intCast(p) else 0xFFFFFFFF;
+                        app.has_browser_action = true;
+                    },
                     .context_usage => |cu| {
                         app.context_used_tokens = cu.used_tokens;
                         app.context_total_tokens = cu.total_tokens;
@@ -436,6 +449,33 @@ fn resolveNotifyPane(tap: *@import("text_tap.zig").TextTapServer) u32 {
         if (client.connected_pane) |pane| return pane;
     }
     return 0xFFFFFFFF;
+}
+
+/// Poll for a pending browser action (open_browser). Returns 1 if available.
+/// url_buf/url_max: buffer to receive the URL string.
+/// pane_id_out: receives the target pane ID (0xFFFFFFFF = auto/any).
+export fn termania_poll_browser_action(
+    handle: ?*anyopaque,
+    url_buf: ?[*]u8,
+    url_max: u32,
+    pane_id_out: ?*u32,
+) u8 {
+    const app = getApp(handle) orelse return 0;
+    if (!app.has_browser_action) return 0;
+
+    const u_out = url_buf orelse return 0;
+    const ulen = @min(app.browser_url_len, @as(usize, url_max));
+    @memcpy(u_out[0..ulen], app.browser_url_buf[0..ulen]);
+    if (ulen < url_max) u_out[ulen] = 0;
+
+    if (pane_id_out) |p| {
+        p.* = app.browser_pane_id;
+    }
+
+    app.has_browser_action = false;
+    app.browser_url_len = 0;
+    app.browser_pane_id = 0xFFFFFFFF;
+    return 1;
 }
 
 /// Allocate a globally unique pane ID. Each call returns a fresh ID that will

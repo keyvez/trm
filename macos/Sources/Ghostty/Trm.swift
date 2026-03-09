@@ -274,6 +274,19 @@ final class Trm {
         return (title, body, paneId)
     }
 
+    /// Poll the C API for a pending browser action (open_browser via socket).
+    /// Returns (url, paneId) or nil. paneId is -1 if no target pane specified.
+    func pollBrowserAction() -> (url: String, paneId: Int)? {
+        guard let h = handle else { return nil }
+        var urlBuf = [CChar](repeating: 0, count: 1025)
+        var paneIdRaw: UInt32 = 0xFFFFFFFF
+        let result = termania_poll_browser_action(h, &urlBuf, UInt32(urlBuf.count - 1), &paneIdRaw)
+        guard result != 0 else { return nil }
+        let url = String(cString: urlBuf)
+        let paneId = paneIdRaw == 0xFFFFFFFF ? -1 : Int(paneIdRaw)
+        return (url, paneId)
+    }
+
     /// Show a native macOS notification.
     func showNotification(title: String, body: String) {
         let content = UNMutableNotificationContent()
@@ -320,6 +333,14 @@ final class Trm {
                     name: .trmClaudeNeedsAttention,
                     object: nil,
                     userInfo: ["paneId": paneId]
+                )
+            }
+            // Poll for browser actions (open_browser via socket API).
+            if let browserAction = self.pollBrowserAction() {
+                NotificationCenter.default.post(
+                    name: .trmOpenSplitBrowser,
+                    object: nil,
+                    userInfo: ["url": browserAction.url, "paneId": browserAction.paneId]
                 )
             }
         }

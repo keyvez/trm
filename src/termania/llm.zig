@@ -39,6 +39,8 @@ pub const TermaniaAction = union(enum) {
     },
     swap_panes: struct { a: usize, b: usize },
     focus_pane: struct { pane: usize },
+    /// Open a browser pane alongside the target pane (split browser).
+    open_browser: struct { url: []const u8, pane: ?usize = null },
     message: struct { text: []const u8 },
     notify: struct { title: []const u8, body: []const u8 },
     context_usage: struct {
@@ -87,6 +89,7 @@ pub fn formatActionForDisplay(allocator: Allocator, action: TermaniaAction) ![]u
         .replace_pane => |a| try std.fmt.allocPrint(allocator, "  replace pane {d} with {s}", .{ a.pane, a.pane_type }),
         .swap_panes => |a| try std.fmt.allocPrint(allocator, "  swap pane {d} <-> pane {d}", .{ a.a, a.b }),
         .focus_pane => |a| try std.fmt.allocPrint(allocator, "  focus pane {d}", .{a.pane}),
+        .open_browser => |a| try std.fmt.allocPrint(allocator, "  open browser: {s}", .{a.url}),
         .message => |a| try std.fmt.allocPrint(allocator, "  {s}", .{a.text}),
         .notify => |a| try std.fmt.allocPrint(allocator, "  notify: {s} — {s}", .{ a.title, a.body }),
         .context_usage => |a| try std.fmt.allocPrint(allocator, "  context: {d}/{d} ({d}%)", .{ a.used_tokens, a.total_tokens, a.percentage }),

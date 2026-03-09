@@ -32,6 +32,10 @@ pub const ClientConnection = struct {
     subscribed: bool = false,
     read_buf: [4096]u8 = undefined,
     read_pos: usize = 0,
+    /// Optional app name provided with the subscribe command (heap-allocated).
+    app_name: ?[]const u8 = null,
+    /// The pane this client marked as connected (via mark_connected), or null.
+    connected_pane: ?u32 = null,
 };
 
 /// Text Tap server state.
@@ -119,6 +123,7 @@ pub const TextTapServer = struct {
         // Close all client connections.
         for (self.clients.items) |client| {
             posix.close(client.fd);
+            if (client.app_name) |name| self.allocator.free(name);
         }
         self.clients.clearRetainingCapacity();
 
@@ -172,6 +177,12 @@ pub const TextTapServer = struct {
             if (!alive) {
                 const client = self.clients.orderedRemove(i);
                 posix.close(client.fd);
+                if (client.app_name) |name| self.allocator.free(name);
+                // Clear the pane this client had marked as connected.
+                if (client.connected_pane) |pane| {
+                    _ = self.active_pane_ids.remove(pane);
+                    if (pane < 64) self.active_send_panes &= ~(@as(u64, 1) << @intCast(pane));
+                }
             }
         }
     }
@@ -241,6 +252,11 @@ pub const TextTapServer = struct {
 
         if (std.mem.eql(u8, msg_type, "subscribe")) {
             self.clients.items[idx].subscribed = true;
+            // Parse optional "app" field for the connection pill label.
+            if (extractQuotedValue(self.allocator, trimmed, "app") catch null) |name| {
+                if (self.clients.items[idx].app_name) |old| self.allocator.free(old);
+                self.clients.items[idx].app_name = name;
+            }
             self.respond(idx, "{\"status\": \"subscribed\"}\n");
         } else if (std.mem.eql(u8, msg_type, "unsubscribe")) {
             self.clients.items[idx].subscribed = false;
@@ -272,7 +288,6 @@ pub const TextTapServer = struct {
                 return;
             };
             if (pane < 64) self.active_send_panes |= @as(u64, 1) << @intCast(pane);
-            self.active_pane_ids.put(@intCast(pane), {}) catch {};
             self.respond(idx, "{\"status\": \"queued\"}\n");
         } else if (std.mem.eql(u8, msg_type, "send_all")) {
             const text = extractQuotedValue(self.allocator, trimmed, "text") catch return orelse return;
@@ -286,6 +301,29 @@ pub const TextTapServer = struct {
                 return;
             };
             self.respond(idx, "{\"status\": \"queued\"}\n");
+        } else if (std.mem.eql(u8, msg_type, "mark_connected")) {
+            const pane = extractNumberAfter(trimmed, "pane") orelse {
+                self.respond(idx, "{\"error\": \"missing pane\"}\n");
+                return;
+            };
+            if (pane < 64) self.active_send_panes |= @as(u64, 1) << @intCast(pane);
+            self.active_pane_ids.put(@intCast(pane), {}) catch {};
+            self.clients.items[idx].connected_pane = @intCast(pane);
+            // Parse optional "app" field for the connection pill label.
+            if (extractQuotedValue(self.allocator, trimmed, "app") catch null) |name| {
+                if (self.clients.items[idx].app_name) |old| self.allocator.free(old);
+                self.clients.items[idx].app_name = name;
+            }
+            self.respond(idx, "{\"status\": \"connected\"}\n");
+        } else if (std.mem.eql(u8, msg_type, "mark_disconnected")) {
+            const pane = extractNumberAfter(trimmed, "pane") orelse {
+                self.respond(idx, "{\"error\": \"missing pane\"}\n");
+                return;
+            };
+            _ = self.active_pane_ids.remove(@intCast(pane));
+            if (pane < 64) self.active_send_panes &= ~(@as(u64, 1) << @intCast(pane));
+            self.clients.items[idx].connected_pane = null;
+            self.respond(idx, "{\"status\": \"disconnected\"}\n");
         } else if (std.mem.eql(u8, msg_type, "action")) {
             self.handleActionMessage(idx, trimmed);
         } else if (std.mem.eql(u8, msg_type, "context_update")) {
@@ -312,7 +350,6 @@ pub const TextTapServer = struct {
                 return;
             };
             if (pane < 64) self.active_send_panes |= @as(u64, 1) << @intCast(pane);
-            self.active_pane_ids.put(@intCast(pane), {}) catch {};
             self.respond(idx, "{\"status\": \"queued\"}\n");
         } else if (std.mem.eql(u8, action_type, "send_to_all")) {
             const command = extractQuotedValue(self.allocator, msg, "command") catch return orelse return;
@@ -343,6 +380,16 @@ pub const TextTapServer = struct {
             }) catch {
                 self.allocator.free(title);
                 self.allocator.free(body);
+                return;
+            };
+            self.respond(idx, "{\"status\": \"queued\"}\n");
+        } else if (std.mem.eql(u8, action_type, "open_browser")) {
+            const url = extractQuotedValue(self.allocator, msg, "url") catch return orelse return;
+            const pane = extractNumberAfter(msg, "pane");
+            self.pending_commands.append(.{
+                .action = .{ .open_browser = .{ .url = url, .pane = pane } },
+            }) catch {
+                self.allocator.free(url);
                 return;
             };
             self.respond(idx, "{\"status\": \"queued\"}\n");
@@ -501,6 +548,18 @@ pub const TextTapServer = struct {
     /// Check if a specific pane (by stable ID) is targeted by a Text Tap client.
     pub fn isPaneActive(self: *TextTapServer, pane_id: u32) bool {
         return self.active_pane_ids.contains(pane_id);
+    }
+
+    /// Return the app name of the first connected client that provided one.
+    /// The returned slice is owned by the server and valid until the client
+    /// disconnects or the server is stopped.
+    pub fn connectedAppName(self: *TextTapServer) ?[]const u8 {
+        for (self.clients.items) |client| {
+            if (client.app_name) |name| {
+                if (name.len > 0) return name;
+            }
+        }
+        return null;
     }
 };
 
