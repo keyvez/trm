@@ -17,6 +17,11 @@
 #   mark-connected --pane P      Mark a pane as connected to this tool
 #   mark-disconnected --pane P   Mark a pane as disconnected
 #   open-browser --url U [--pane P] Open a URL in a split browser pane
+#   browser-navigate --url U     Navigate browser to a URL
+#   browser-eval --js CODE       Evaluate JavaScript in browser
+#   browser-snapshot             Snapshot browser accessibility tree
+#   browser-click --selector S   Click an element in the browser
+#   browser-fill --selector S --text T  Fill a form field
 #   status                       Show socket connection status
 #   raw <json>                   Send raw JSON to the socket
 
@@ -122,6 +127,11 @@ Commands:
   mark-connected --pane P [--app N] Mark a pane as connected
   mark-disconnected --pane P        Disconnect from a pane
   open-browser --url U [--pane P]   Open URL in split browser pane
+  browser-navigate --url U          Navigate browser to URL
+  browser-eval --js CODE            Evaluate JavaScript in browser
+  browser-snapshot                   Snapshot browser accessibility tree
+  browser-click --selector S        Click an element in the browser
+  browser-fill --selector S --text T Fill a form field in the browser
   status                            Show socket connection info
   raw <json>                        Send raw JSON to the socket
 
@@ -267,6 +277,80 @@ HELP
         else
             send_to_socket "{\"type\": \"action\", \"action\": \"open_browser\", \"url\": \"$URL_ESC\"}"
         fi
+        ;;
+
+    browser-navigate)
+        shift
+        URL=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --url) URL="$2"; shift 2 ;;
+                *) echo "Unknown option: $1" >&2; exit 1 ;;
+            esac
+        done
+        if [ -z "$URL" ]; then
+            echo "Error: --url is required" >&2
+            exit 1
+        fi
+        URL_ESC=$(json_escape "$URL")
+        send_to_socket "{\"type\": \"action\", \"action\": \"browser_navigate\", \"url\": \"$URL_ESC\"}"
+        ;;
+
+    browser-eval)
+        shift
+        JS=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --js) JS="$2"; shift 2 ;;
+                *) echo "Unknown option: $1" >&2; exit 1 ;;
+            esac
+        done
+        if [ -z "$JS" ]; then
+            echo "Error: --js is required" >&2
+            exit 1
+        fi
+        JS_ESC=$(json_escape "$JS")
+        send_to_socket "{\"type\": \"action\", \"action\": \"browser_eval\", \"code\": \"$JS_ESC\"}"
+        ;;
+
+    browser-snapshot)
+        send_to_socket '{"type": "action", "action": "browser_snapshot"}'
+        ;;
+
+    browser-click)
+        shift
+        SELECTOR=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --selector) SELECTOR="$2"; shift 2 ;;
+                *) echo "Unknown option: $1" >&2; exit 1 ;;
+            esac
+        done
+        if [ -z "$SELECTOR" ]; then
+            echo "Error: --selector is required" >&2
+            exit 1
+        fi
+        SEL_ESC=$(json_escape "$SELECTOR")
+        send_to_socket "{\"type\": \"action\", \"action\": \"browser_click\", \"selector\": \"$SEL_ESC\"}"
+        ;;
+
+    browser-fill)
+        shift
+        SELECTOR="" TEXT=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --selector) SELECTOR="$2"; shift 2 ;;
+                --text)     TEXT="$2"; shift 2 ;;
+                *) echo "Unknown option: $1" >&2; exit 1 ;;
+            esac
+        done
+        if [ -z "$SELECTOR" ] || [ -z "$TEXT" ]; then
+            echo "Error: --selector and --text are required" >&2
+            exit 1
+        fi
+        SEL_ESC=$(json_escape "$SELECTOR")
+        TEXT_ESC=$(json_escape "$TEXT")
+        send_to_socket "{\"type\": \"action\", \"action\": \"browser_fill\", \"selector\": \"$SEL_ESC\", \"text\": \"$TEXT_ESC\"}"
         ;;
 
     status)
