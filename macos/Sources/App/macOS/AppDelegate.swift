@@ -286,6 +286,7 @@ class AppDelegate: NSObject,
 
         // Setup our menu
         setupMenuImages()
+        setupSplitBrowserMenuItem()
 
         // Setup signal handlers
         setupSignals()
@@ -775,6 +776,24 @@ class AppDelegate: NSObject,
         self.menuToggleVisibility?.setImageIfDesired(systemSymbolName: "eye")
         self.menuFloatOnTop?.setImageIfDesired(systemSymbolName: "square.filled.on.square")
         self.menuFindParent?.setImageIfDesired(systemSymbolName: "text.page.badge.magnifyingglass")
+    }
+
+    /// Add "Open Browser" to the View menu with Cmd+Shift+L.
+    private func setupSplitBrowserMenuItem() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        // Find the "View" menu
+        guard let viewMenuItem = mainMenu.items.first(where: { $0.title == "View" }),
+              let viewMenu = viewMenuItem.submenu else { return }
+
+        viewMenu.addItem(NSMenuItem.separator())
+        let item = NSMenuItem(
+            title: "Open Browser",
+            action: #selector(BaseTerminalController.openSplitBrowserAction(_:)),
+            keyEquivalent: "l"
+        )
+        item.keyEquivalentModifierMask = [.command, .shift]
+        item.setImageIfDesired(systemSymbolName: "globe")
+        viewMenu.addItem(item)
     }
 
     /// Sync all of our menu item keyboard shortcuts with the Ghostty configuration.

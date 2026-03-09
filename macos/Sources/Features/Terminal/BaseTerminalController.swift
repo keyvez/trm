@@ -429,6 +429,13 @@ class BaseTerminalController: NSWindowController,
             name: .ghosttyOpenURLInPane,
             object: nil)
 
+        // Split browser (from socket API or Cmd+Shift+L)
+        center.addObserver(
+            self,
+            selector: #selector(handleOpenSplitBrowser(_:)),
+            name: .trmOpenSplitBrowser,
+            object: nil)
+
         // Quick actions
         center.addObserver(
             self,
@@ -2374,6 +2381,29 @@ class BaseTerminalController: NSWindowController,
         insertWebviewPane(pane)
     }
 
+    @objc private func handleOpenSplitBrowser(_ notification: Notification) {
+        guard window?.isKeyWindow == true else { return }
+        let urlString = notification.userInfo?["url"] as? String ?? ""
+        openSplitBrowser(urlString: urlString)
+    }
+
+    /// Open a browser pane alongside the current terminal.
+    /// If urlString is empty, opens about:blank (user can type in the URL bar).
+    func openSplitBrowser(urlString: String = "") {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url: URL
+        if trimmed.isEmpty {
+            url = URL(string: "about:blank")!
+        } else if trimmed.contains("://") {
+            url = URL(string: trimmed) ?? URL(string: "about:blank")!
+        } else {
+            url = URL(string: "https://\(trimmed)") ?? URL(string: "about:blank")!
+        }
+
+        let pane = WebViewPane(url: url)
+        insertWebviewPane(pane)
+    }
+
     // MARK: Quick Actions
 
     /// Accessor for the quick-actions plugin registered in the service plugin registry.
@@ -3940,6 +3970,11 @@ class BaseTerminalController: NSWindowController,
 
     /// No-op — split zoom is not supported in grid layout mode.
     @IBAction func splitZoom(_ sender: Any) {}
+
+    /// Open a browser pane alongside the terminal (Cmd+Shift+L).
+    @IBAction func openSplitBrowserAction(_ sender: Any) {
+        openSplitBrowser()
+    }
 
     @IBAction func increaseFontSize(_ sender: Any) {
         guard let surface = focusedSurface?.surface else { return }
