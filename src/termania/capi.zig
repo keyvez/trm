@@ -939,11 +939,13 @@ fn handleAction(app: *CApp, action: input_mod.AppAction) void {
                 _ = app.grid.removeColFromRow(pos.row);
             }
 
-            // Remove from pane_map and grid_order
+            // Remove from pane_map, grid_order, and watermark maps
             if (app.pane_map.getPtr(id)) |p| {
                 p.deinit();
                 _ = app.pane_map.remove(id);
             }
+            _ = app.watermarks.remove(id);
+            _ = app.watermark_lens.remove(id);
             _ = app.grid_order.orderedRemove(grid_idx);
 
             // Pick next focus: prefer same grid slot, else last
@@ -1112,11 +1114,14 @@ export fn termania_add_overlay(handle: ?*anyopaque, fg_pane_id: u32, ptype: ?[*]
 export fn termania_remove_overlay(handle: ?*anyopaque, fg_pane_id: u32) void {
     const app = getApp(handle) orelse return;
     if (app.overlay_map.fetchRemove(fg_pane_id)) |kv| {
-        // Clean up the background pane
-        if (app.pane_map.getPtr(kv.value)) |bg_p| {
+        const bg_id = kv.value;
+        // Clean up the background pane and its watermark
+        if (app.pane_map.getPtr(bg_id)) |bg_p| {
             bg_p.deinit();
-            _ = app.pane_map.remove(kv.value);
+            _ = app.pane_map.remove(bg_id);
         }
+        _ = app.watermarks.remove(bg_id);
+        _ = app.watermark_lens.remove(bg_id);
     }
     _ = app.overlay_bg_focused.fetchRemove(fg_pane_id);
 }
@@ -1152,9 +1157,13 @@ export fn termania_has_overlay(handle: ?*anyopaque, fg_pane_id: u32) u8 {
 // ---------------------------------------------------------------------------
 
 /// Get the watermark text for a pane by stable pane ID. Returns bytes written.
+/// Only returns a watermark if the pane still exists in the pane map.
 export fn termania_pane_watermark(handle: ?*anyopaque, pane_id: u32, buf: ?[*]u8, max: u32) u32 {
     const app = getApp(handle) orelse return 0;
     const out = buf orelse return 0;
+
+    // Guard: don't return watermarks for deleted panes.
+    if (app.pane_map.get(pane_id) == null) return 0;
 
     const wm_len = app.watermark_lens.get(pane_id) orelse return 0;
     const wm_buf = app.watermarks.get(pane_id) orelse return 0;
@@ -1496,4 +1505,10 @@ export fn termania_text_tap_app_name(handle: ?*anyopaque, buf: [*]u8, max_len: u
 export fn termania_grid_slot_pane_id(handle: ?*anyopaque, grid_idx: u32) u32 {
     const app = getApp(handle) orelse return 0xFFFFFFFF;
     return app.gridSlotToId(@intCast(grid_idx)) orelse 0xFFFFFFFF;
+}
+
+/// Return 1 if the config has session_persistence enabled.
+export fn termania_session_persistence(handle: ?*anyopaque) u8 {
+    const app = getApp(handle) orelse return 0;
+    return if (app.config.session_persistence) 1 else 0;
 }

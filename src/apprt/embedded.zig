@@ -1540,6 +1540,11 @@ pub const CAPI = struct {
         return surface.userdata;
     }
 
+    /// Set the userdata pointer on a surface.
+    export fn ghostty_surface_set_userdata(surface: *Surface, ud: ?*anyopaque) void {
+        surface.userdata = ud;
+    }
+
     /// Returns the app associated with a surface.
     export fn ghostty_surface_app(surface: *Surface) *App {
         return surface.app;

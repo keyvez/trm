@@ -1709,21 +1709,8 @@ extension Ghostty {
             _ app: ghostty_app_t,
             target: ghostty_target_s,
             v: ghostty_action_daemon_session_id_s) {
-            switch target.tag {
-            case GHOSTTY_TARGET_APP:
-                Ghostty.logger.warning("daemon session id does nothing with an app target")
-                return
-
-            case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return }
-                guard let surfaceView = self.surfaceView(from: surface) else { return }
-                guard let sessionId = String(cString: v.session_id!, encoding: .utf8) else { return }
-                NSLog("trm-debug: daemon session id set on surface: %@", sessionId)
-                surfaceView.daemonSessionId = sessionId
-
-            default:
-                assertionFailure()
-            }
+            // TODO: daemon session tracking not yet implemented
+            Ghostty.logger.debug("daemon session id changed (unimplemented)")
         }
 
         private static func setMouseShape(
