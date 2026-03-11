@@ -71,6 +71,60 @@ enum SessionManager {
         return dir
     }
 
+    /// Directory for scrollback snapshot files alongside sessions.
+    static var scrollbackDirectory: URL {
+        let dir = sessionsDirectory.appendingPathComponent("scrollback", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(
+                at: dir,
+                withIntermediateDirectories: true
+            )
+        }
+        return dir
+    }
+
+    /// Maximum size of a single scrollback file (256 KB).
+    private static let maxScrollbackBytes = 256 * 1024
+
+    /// Save scrollback text for a pane associated with a session file.
+    /// Returns the filename (relative to `scrollbackDirectory`) on success.
+    @discardableResult
+    static func saveScrollback(
+        _ text: String,
+        sessionBaseName: String,
+        paneIndex: Int
+    ) -> String? {
+        let filename = "\(sessionBaseName)_pane_\(paneIndex).txt"
+        let fileURL = scrollbackDirectory.appendingPathComponent(filename)
+
+        // Truncate to size limit, cutting from the beginning to keep the
+        // most recent output (tail of the buffer).
+        var data = text
+        if data.utf8.count > maxScrollbackBytes {
+            let suffix = data.suffix(maxScrollbackBytes)
+            // Find the first newline to avoid a partial leading line.
+            if let nl = suffix.firstIndex(of: "\n") {
+                data = String(suffix[suffix.index(after: nl)...])
+            } else {
+                data = String(suffix)
+            }
+        }
+
+        do {
+            try data.write(to: fileURL, atomically: true, encoding: .utf8)
+            return filename
+        } catch {
+            logger.error("Failed to save scrollback for pane \(paneIndex): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Read a scrollback file by filename (relative to `scrollbackDirectory`).
+    static func readScrollback(filename: String) -> String? {
+        let fileURL = scrollbackDirectory.appendingPathComponent(filename)
+        return try? String(contentsOf: fileURL, encoding: .utf8)
+    }
+
     // MARK: - Auto-Save
 
     static func autoSaveAllWindows() {
@@ -87,8 +141,13 @@ enum SessionManager {
         var entries: [AutoSaveEntry] = []
 
         for (index, controller) in controllers.enumerated() {
+            // Save scrollback for each terminal pane before building the TOML,
+            // so that buildCurrentConfigToml can reference the scrollback files.
+            let baseName = "_autosave_\(index)"
+            controller.saveScrollbackSnapshots(sessionBaseName: baseName)
+
             let toml = controller.buildCurrentConfigToml()
-            let filename = "_autosave_\(index).toml"
+            let filename = "\(baseName).toml"
             let fileURL = dir.appendingPathComponent(filename)
 
             let frame: NSRect = controller.window?.frame ?? .zero
@@ -136,6 +195,14 @@ enum SessionManager {
         for file in files where file.hasPrefix("_autosave_") {
             try? fm.removeItem(at: dir.appendingPathComponent(file))
         }
+
+        // Also clear scrollback files for auto-saved sessions.
+        let sbDir = scrollbackDirectory
+        if let sbFiles = try? fm.contentsOfDirectory(atPath: sbDir.path) {
+            for file in sbFiles where file.hasPrefix("_autosave_") {
+                try? fm.removeItem(at: sbDir.appendingPathComponent(file))
+            }
+        }
     }
 
     // MARK: - Auto-Restore
@@ -181,10 +248,15 @@ enum SessionManager {
                     withConfigPath: fileURL.path
                 )
 
-                // Restore window frame
+                // Restore window frame asynchronously so that IO threads
+                // have time to start their event loops before layout triggers
+                // resize messages. Synchronous setFrame during init can deadlock
+                // when the IO mailbox queue fills before the thread is ready.
                 let frame = entry.frame.nsRect
                 if frame.width > 0 && frame.height > 0 {
-                    controller.window?.setFrame(frame, display: true)
+                    DispatchQueue.main.async { [weak controller] in
+                        controller?.window?.setFrame(frame, display: true)
+                    }
                 }
 
                 restored = true

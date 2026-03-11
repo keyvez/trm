@@ -578,8 +578,9 @@ final class Trm {
         let repo: String?
         let initialCommands: [String]
         let patterns: [String]
-        var daemonSessionId: String?
         var stackGroup: String?
+        /// Filename (relative to scrollback directory) for scrollback replay on restore.
+        var scrollbackFile: String?
     }
 
     /// Grid layout config from termania.toml.
@@ -603,15 +604,15 @@ final class Trm {
         defer { termania_destroy(h) }
         var config = readGridConfig(from: h)
 
-        // The C API doesn't know about daemon_session_id or stack_group,
+        // The C API doesn't know about stack_group or scrollback_file,
         // so parse them directly from the TOML file and attach to pane configs.
         let extras = parsePaneExtras(fromPath: path)
         for i in 0..<min(config.panes.count, extras.count) {
-            if let sid = extras[i].daemonSessionId {
-                config.panes[i].daemonSessionId = sid
-            }
             if let sg = extras[i].stackGroup {
                 config.panes[i].stackGroup = sg
+            }
+            if let sbf = extras[i].scrollbackFile {
+                config.panes[i].scrollbackFile = sbf
             }
         }
 
@@ -681,8 +682,7 @@ final class Trm {
                 refreshMs: refreshMs,
                 repo: repo,
                 initialCommands: initialCommands,
-                patterns: patterns,
-                daemonSessionId: nil
+                patterns: patterns
             ))
         }
 
@@ -701,11 +701,11 @@ final class Trm {
 
     /// Extra per-pane fields parsed directly from TOML (not available via C API).
     private struct PaneExtras {
-        var daemonSessionId: String?
         var stackGroup: String?
+        var scrollbackFile: String?
     }
 
-    /// Parse daemon_session_id and stack_group values from a TOML file.
+    /// Parse stack_group values from a TOML file.
     /// Returns an array where index i corresponds to pane i.
     private static func parsePaneExtras(fromPath path: String) -> [PaneExtras] {
         guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
@@ -729,13 +729,13 @@ final class Trm {
 
             guard current != nil else { continue }
 
-            if trimmed.hasPrefix("daemon_session_id") {
-                if let value = parseTomlStringValue(trimmed) {
-                    current?.daemonSessionId = value
-                }
-            } else if trimmed.hasPrefix("stack_group") {
+            if trimmed.hasPrefix("stack_group") {
                 if let value = parseTomlStringValue(trimmed) {
                     current?.stackGroup = value
+                }
+            } else if trimmed.hasPrefix("scrollback_file") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.scrollbackFile = value
                 }
             }
         }

@@ -59,9 +59,15 @@ final class SendTextIndicatorPlugin: ObservableObject, ServicePlugin, Observable
     func overlayView(forPaneId paneId: Int) -> AnyView? {
         // Read pollGeneration to establish SwiftUI dependency.
         _ = pollGeneration
-        guard Trm.shared.isTextTapActive(paneId: paneId) else { return nil }
+        let clientCount = Trm.shared.textTapClientCount()
+        let isActive = Trm.shared.isTextTapActive(paneId: paneId)
+        if clientCount > 0 || isActive {
+            Self.log.debug("overlayView paneId=\(paneId) clients=\(clientCount) active=\(isActive)")
+        }
+        guard isActive else { return nil }
+        let appName = Trm.shared.textTapAppName() ?? "connected"
         return AnyView(
-            SendTextIndicatorView()
+            SendTextIndicatorView(appName: appName)
                 .padding(.bottom, 8)
                 .padding(.leading, 8)
         )
@@ -71,6 +77,10 @@ final class SendTextIndicatorPlugin: ObservableObject, ServicePlugin, Observable
 
     /// Trigger a SwiftUI refresh so `overlayView(forPaneId:)` re-evaluates.
     private func refreshActivePanes() {
+        let clientCount = Trm.shared.textTapClientCount()
+        if clientCount > 0 {
+            Self.log.info("refreshActivePanes: \(clientCount) client(s) connected, gen=\(self.pollGeneration)")
+        }
         // Force a publish so overlay views re-query the Zig stable-ID API.
         // The actual per-pane check happens in overlayView(forPaneId:).
         pollGeneration += 1
@@ -81,11 +91,13 @@ final class SendTextIndicatorPlugin: ObservableObject, ServicePlugin, Observable
 
 /// A small rounded pill indicating this pane is connected to an external app.
 struct SendTextIndicatorView: View {
+    var appName: String = "connected"
+
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: "link")
                 .font(.system(size: 10, weight: .semibold))
-            Text("flan")
+            Text(appName)
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
         }
         .foregroundStyle(.white)

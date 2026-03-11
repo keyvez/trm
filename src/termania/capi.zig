@@ -157,7 +157,11 @@ const CApp = struct {
 
         var tap = text_tap_mod.TextTapServer.init(allocator, cfg.text_tap.socket_path);
         tap.setPaneCount(total_panes);
-        if (start_services and cfg.text_tap.enabled) tap.start() catch {};
+        if (start_services and cfg.text_tap.enabled) {
+            tap.start() catch |err| {
+                std.log.err("text_tap: failed to start server on '{s}': {}", .{ cfg.text_tap.socket_path, err });
+            };
+        }
 
         self.* = .{
             .allocator = allocator,
@@ -1233,12 +1237,6 @@ export fn termania_grid_row_cols_at(handle: ?*anyopaque, index: u32) u32 {
     return @intCast(app.config.grid.row_cols_buf[i]);
 }
 
-/// Check if session persistence is enabled in the termania config.
-export fn termania_session_persistence(handle: ?*anyopaque) u8 {
-    const app = getApp(handle) orelse return 0;
-    return if (app.config.session_persistence) 1 else 0;
-}
-
 /// Get the number of configured panes (from TOML).
 export fn termania_config_pane_count(handle: ?*anyopaque) u32 {
     const app = getApp(handle) orelse return 0;
@@ -1456,10 +1454,20 @@ export fn termania_text_tap_active_panes(handle: ?*anyopaque) u64 {
 
 /// Check if a specific pane (by stable ID) is targeted by a Text Tap client.
 /// Returns 1 if active, 0 otherwise. Also polls the text tap socket.
+///
+/// Text Tap clients typically send grid slot indices (0-based position) in
+/// `mark_connected`, while the Swift overlay queries by stable pane ID.
+/// This function checks both: the stable ID directly, and whether any
+/// grid slot index stored in active_pane_ids maps to the requested pane ID.
 export fn termania_text_tap_is_active(handle: ?*anyopaque, pane_id: u32) u8 {
     const app = getApp(handle) orelse return 0;
     app.text_tap.poll();
+    // Direct match by stable pane ID.
     if (app.text_tap.isPaneActive(pane_id)) return 1;
+    // Check if any active grid slot index maps to this stable pane ID.
+    // Clients send grid indices, so translate via grid_order.
+    const grid_slot = app.paneIdToGridSlot(pane_id) orelse return 0;
+    if (app.text_tap.isPaneActive(@intCast(grid_slot))) return 1;
     return 0;
 }
 

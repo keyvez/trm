@@ -120,6 +120,8 @@ pub const TextTapServer = struct {
 
     /// Stop the server: close all client connections, close listener, remove socket file.
     pub fn stop(self: *TextTapServer) void {
+        if (!self.running) return;
+
         // Close all client connections.
         for (self.clients.items) |client| {
             posix.close(client.fd);
@@ -306,6 +308,7 @@ pub const TextTapServer = struct {
                 self.respond(idx, "{\"error\": \"missing pane\"}\n");
                 return;
             };
+            std.log.info("text_tap: mark_connected pane={d} client_idx={d}", .{ pane, idx });
             if (pane < 64) self.active_send_panes |= @as(u64, 1) << @intCast(pane);
             self.active_pane_ids.put(@intCast(pane), {}) catch {};
             self.clients.items[idx].connected_pane = @intCast(pane);
@@ -313,6 +316,7 @@ pub const TextTapServer = struct {
             if (extractQuotedValue(self.allocator, trimmed, "app") catch null) |name| {
                 if (self.clients.items[idx].app_name) |old| self.allocator.free(old);
                 self.clients.items[idx].app_name = name;
+                std.log.info("text_tap: mark_connected app_name={s}", .{name});
             }
             self.respond(idx, "{\"status\": \"connected\"}\n");
         } else if (std.mem.eql(u8, msg_type, "mark_disconnected")) {

@@ -76,6 +76,12 @@ class BaseTerminalController: NSWindowController,
     /// Dispatch source monitoring the config file for changes.
     private var configFileWatcher: DispatchSourceFileSystemObject?
 
+    /// Timer for periodic scrollback snapshots (every 30 seconds).
+    private var scrollbackSnapshotTimer: Timer?
+
+    /// Session base name for scrollback file naming. Set by `saveScrollbackSnapshots`.
+    private var scrollbackSessionBaseName: String?
+
     /// Debounce work item for config reload after rapid saves.
     private var configReloadDebounce: DispatchWorkItem?
 
@@ -340,11 +346,6 @@ class BaseTerminalController: NSWindowController,
                    !cmd.isEmpty {
                     cfg.command = cmd
                 }
-                // Pass daemon session ID for reconnection
-                if cfg.reconnectSessionId == nil,
-                   let sessionId = firstPane.daemonSessionId, !sessionId.isEmpty {
-                    cfg.reconnectSessionId = sessionId
-                }
             } else if cfg.workingDirectory?.isEmpty != false {
                 // Default to home to avoid macOS Documents permission prompts.
                 cfg.workingDirectory = NSHomeDirectory()
@@ -506,6 +507,7 @@ class BaseTerminalController: NSWindowController,
         terminalOutputScanner.start()
         servicePluginRegistry.startAll()
         startConfigFileWatcher()
+        startScrollbackSnapshotTimer()
     }
 
     deinit {
@@ -567,6 +569,32 @@ class BaseTerminalController: NSWindowController,
 
         setupServicePlugins()
         servicePluginRegistry.startAll()
+    }
+
+    /// Start a repeating 30-second timer that saves scrollback snapshots for all
+    /// terminal panes. The snapshots are written to `SessionManager.scrollbackDirectory`
+    /// and referenced during session auto-save / restore.
+    private func startScrollbackSnapshotTimer() {
+        scrollbackSnapshotTimer?.invalidate()
+
+        // Derive a stable base name from the window number (fallback to object hash).
+        let baseName: String
+        if let windowNumber = window?.windowNumber, windowNumber > 0 {
+            baseName = "_periodic_\(windowNumber)"
+        } else {
+            baseName = "_periodic_\(ObjectIdentifier(self).hashValue)"
+        }
+        scrollbackSessionBaseName = baseName
+
+        scrollbackSnapshotTimer = Timer.scheduledTimer(
+            withTimeInterval: 30,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.saveScrollbackSnapshots(sessionBaseName: self.scrollbackSessionBaseName ?? baseName)
+            }
+        }
     }
 
     /// Start watching the config file for changes via a DispatchSource.
@@ -1019,6 +1047,16 @@ class BaseTerminalController: NSWindowController,
         // because gridPanes filters out stacked children.
         let visualPanesBefore = gridPanes
         let sourceVisualIdx = visualPanesBefore.firstIndex(where: { $0.id == sourceID })
+
+        // If the source is already a non-host child of another stack, remove
+        // it from that stack first so it doesn't appear in two stacks at once.
+        // Also dissolve the old stack if only one pane remains.
+        if let (oldHostID, oldStackIdx) = findStackEntry(for: sourceID), oldHostID != targetID {
+            paneStacks[oldHostID]?.remove(at: oldStackIdx)
+            if let remaining = paneStacks[oldHostID], remaining.count <= 1 {
+                paneStacks.removeValue(forKey: oldHostID)
+            }
+        }
 
         // Build or extend the stack on the target.
         if var existingStack = paneStacks[targetID] {
@@ -3147,6 +3185,44 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
+    /// Scrollback filenames saved by the most recent `saveScrollbackSnapshots` call,
+    /// keyed by `ObjectIdentifier` of the `SurfaceView`.
+    private var savedScrollbackFiles: [ObjectIdentifier: String] = [:]
+
+    /// Save the scrollback buffer of every terminal pane to disk.
+    /// Call this before `buildCurrentConfigToml()` so the TOML can reference the files.
+    func saveScrollbackSnapshots(sessionBaseName: String) {
+        savedScrollbackFiles.removeAll()
+
+        // Flatten stacks the same way buildCurrentConfigToml does.
+        var terminalIndex = 0
+        for pane in gridPanes {
+            let terminals: [Ghostty.SurfaceView]
+            if case .stack(let children) = pane {
+                terminals = children.compactMap {
+                    if case .terminal(let s) = $0 { return s } else { return nil }
+                }
+            } else if case .terminal(let s) = pane {
+                terminals = [s]
+            } else {
+                continue
+            }
+            for surface in terminals {
+                let text = surface.cachedScreenContents.get()
+                if !text.isEmpty {
+                    if let filename = SessionManager.saveScrollback(
+                        text,
+                        sessionBaseName: sessionBaseName,
+                        paneIndex: terminalIndex
+                    ) {
+                        savedScrollbackFiles[ObjectIdentifier(surface)] = filename
+                    }
+                }
+                terminalIndex += 1
+            }
+        }
+    }
+
     func buildCurrentConfigToml() -> String {
         let dateFormatter = ISO8601DateFormatter()
         dateFormatter.formatOptions = [.withInternetDateTime]
@@ -3223,8 +3299,14 @@ class BaseTerminalController: NSWindowController,
                 if let watermark, !watermark.isEmpty {
                     lines.append("watermark = \(tomlQuote(watermark))")
                 }
-                if let sessionId = surface.daemonSessionId, !sessionId.isEmpty {
-                    lines.append("daemon_session_id = \(tomlQuote(sessionId))")
+                if !surface.initialCommands.isEmpty {
+                    let quoted = surface.initialCommands
+                        .map { tomlQuote($0) }
+                        .joined(separator: ", ")
+                    lines.append("initial_commands = [\(quoted)]")
+                }
+                if let sbFile = savedScrollbackFiles[ObjectIdentifier(surface)] {
+                    lines.append("scrollback_file = \(tomlQuote(sbFile))")
                 }
                 if let sg = entry.stackGroup {
                     lines.append("stack_group = \(tomlQuote(sg))")
@@ -3510,6 +3592,15 @@ class BaseTerminalController: NSWindowController,
 
             Ghostty.App.completeClipboardRequest(cc.surface, data: str, state: cc.state, confirmed: true)
         }
+
+        // Restore focus to the terminal surface after the sheet closes.
+        // Without this, the window itself becomes first responder and
+        // the pane stops receiving keyboard input.
+        DispatchQueue.main.async { [weak self] in
+            if let surface = self?.focusedSurface {
+                self?.window?.makeFirstResponder(surface)
+            }
+        }
     }
 
     // MARK: NSWindowController
@@ -3769,11 +3860,35 @@ class BaseTerminalController: NSWindowController,
                 Trm.shared.setWatermark(forPaneId: UInt32(id), text: watermark)
             }
 
-            // Send initial commands after a delay to let the shell start.
+            // Store initial commands on the surface for round-tripping
+            // through session save/restore.
+            if !paneConfig.initialCommands.isEmpty {
+                surface.initialCommands = paneConfig.initialCommands
+            }
+
+            // Build the command list: first replay scrollback (if present),
+            // then run the original initial commands.
+            var commands: [String] = []
+
+            // Replay saved scrollback as terminal output via cat.
+            // The file is also available as $TRM_RESTORE_SCROLLBACK_FILE
+            // for custom shell integrations.
+            if let sbFile = paneConfig.scrollbackFile {
+                let sbPath = SessionManager.scrollbackDirectory
+                    .appendingPathComponent(sbFile).path
+                if FileManager.default.fileExists(atPath: sbPath) {
+                    // Use cat to display the previous scrollback, then clear
+                    // the env var and remove the temp file.
+                    commands.append("cat \"\(sbPath)\" 2>/dev/null; rm -f \"\(sbPath)\"")
+                }
+            }
+
+            commands.append(contentsOf: paneConfig.initialCommands)
+
+            // Send commands after a delay to let the shell start.
             // Stagger each pane by 50ms to avoid overwhelming the system
             // when many panes are created simultaneously.
-            if !paneConfig.initialCommands.isEmpty {
-                let commands = paneConfig.initialCommands
+            if !commands.isEmpty {
                 let delay = 0.5 + Double(surfaceIndex) * 0.05
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                     self?.sendInitialCommandsWhenReady(commands, to: surface)
@@ -3845,14 +3960,18 @@ class BaseTerminalController: NSWindowController,
             if let command = entry.config.command, !command.isEmpty {
                 surfaceConfig.command = command
             }
-            // Pass daemon session ID for reconnection to existing sessions
-            if let sessionId = entry.config.daemonSessionId, !sessionId.isEmpty {
-                surfaceConfig.reconnectSessionId = sessionId
+            // If a scrollback file exists, pass it as an environment variable.
+            // The shell can replay it, or applyPaneConfig will cat it before
+            // running initial commands.
+            if let sbFile = entry.config.scrollbackFile {
+                let sbPath = SessionManager.scrollbackDirectory
+                    .appendingPathComponent(sbFile).path
+                if FileManager.default.fileExists(atPath: sbPath) {
+                    surfaceConfig.environmentVariables["TRM_RESTORE_SCROLLBACK_FILE"] = sbPath
+                }
             }
             let view = Ghostty.SurfaceView(ghosttyApp, baseConfig: surfaceConfig)
             view.paneId = entry.paneId
-            // Also store the daemon session ID on the view for future persistence
-            view.daemonSessionId = entry.config.daemonSessionId
             newViews.append(view)
         }
 
@@ -3938,6 +4057,8 @@ class BaseTerminalController: NSWindowController,
         SessionManager.autoSaveSingleWindow(self)
 
         stopConfigFileWatcher()
+        scrollbackSnapshotTimer?.invalidate()
+        scrollbackSnapshotTimer = nil
         liveSummaryManager.stop()
         terminalOutputScanner.stop()
         servicePluginRegistry.stopAll()

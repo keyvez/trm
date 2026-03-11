@@ -135,12 +135,13 @@ extension Ghostty {
         /// True when the surface is in readonly mode.
         @Published private(set) var readonly: Bool = false
 
-        /// The daemon session ID for this surface, set when using session persistence.
-        var daemonSessionId: String?
-
         /// The command used to start this surface's terminal session.
         /// Stored so it can be persisted in TOML and re-used on restore.
         var initialCommand: String?
+
+        /// The initial commands sent to this pane after shell startup.
+        /// Stored so they can be round-tripped through session save/restore.
+        var initialCommands: [String] = []
 
         /// True when the surface should show a highlight effect (e.g., when presented via goto_split).
         @Published private(set) var highlighted: Bool = false
@@ -900,6 +901,13 @@ extension Ghostty {
         }
 
         override func mouseDown(with event: NSEvent) {
+            // Ensure we have keyboard focus when clicked. In SwiftUI-hosted
+            // grid layouts, focus can be silently lost during view updates;
+            // clicking a pane should always restore it.
+            if !focused, let window = self.window {
+                window.makeFirstResponder(self)
+            }
+
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
