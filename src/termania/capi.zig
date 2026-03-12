@@ -1157,13 +1157,9 @@ export fn termania_has_overlay(handle: ?*anyopaque, fg_pane_id: u32) u8 {
 // ---------------------------------------------------------------------------
 
 /// Get the watermark text for a pane by stable pane ID. Returns bytes written.
-/// Only returns a watermark if the pane still exists in the pane map.
 export fn termania_pane_watermark(handle: ?*anyopaque, pane_id: u32, buf: ?[*]u8, max: u32) u32 {
     const app = getApp(handle) orelse return 0;
     const out = buf orelse return 0;
-
-    // Guard: don't return watermarks for deleted panes.
-    if (app.pane_map.get(pane_id) == null) return 0;
 
     const wm_len = app.watermark_lens.get(pane_id) orelse return 0;
     const wm_buf = app.watermarks.get(pane_id) orelse return 0;
@@ -1494,6 +1490,23 @@ export fn termania_text_tap_app_name(handle: ?*anyopaque, buf: [*]u8, max_len: u
     const app = getApp(handle) orelse return 0;
     app.text_tap.poll();
     const name = app.text_tap.connectedAppName() orelse return 0;
+    if (name.len == 0 or max_len == 0) return 0;
+    const copy_len = @min(name.len, max_len);
+    @memcpy(buf[0..copy_len], name[0..copy_len]);
+    return @intCast(copy_len);
+}
+
+/// Copy the app name of the Text Tap client connected to a specific pane.
+/// Falls back to the global connectedAppName if no per-pane match.
+/// Returns the number of bytes written, or 0 if no name.
+export fn termania_text_tap_app_name_for_pane(handle: ?*anyopaque, pane_id: u32, buf: [*]u8, max_len: u32) u32 {
+    const app = getApp(handle) orelse return 0;
+    app.text_tap.poll();
+    // Try per-pane name (stable ID), then by grid slot, then global fallback.
+    const name = app.text_tap.appNameForPane(pane_id) orelse blk: {
+        const slot = app.paneIdToGridSlot(pane_id) orelse break :blk app.text_tap.connectedAppName();
+        break :blk app.text_tap.appNameForPane(@intCast(slot)) orelse app.text_tap.connectedAppName();
+    } orelse return 0;
     if (name.len == 0 or max_len == 0) return 0;
     const copy_len = @min(name.len, max_len);
     @memcpy(buf[0..copy_len], name[0..copy_len]);

@@ -296,6 +296,22 @@ struct TrmGridView: View {
             paneControls(for: .terminal(surface)),
             alignment: .topTrailing
         )
+        .overlay(alignment: .topLeading) {
+            // Drag handle for top-level panes — allows dragging onto other
+            // panes to stack or swap. Only shown when there are multiple panes.
+            if panes.count > 1 {
+                PaneDragHandle()
+                    .draggable(surface) {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(nsColor: .windowBackgroundColor))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1.5)
+                            )
+                            .frame(width: 120, height: 80)
+                    }
+            }
+        }
         .overlay(
             watermarkOverlay(forPaneId: paneId)
         )
@@ -811,6 +827,29 @@ private struct StackDragBar: View {
             onPeek()
         }
         .help("Double-click to peek")
+    }
+}
+
+// MARK: - Pane Drag Handle
+
+/// A small grip icon in the top-left corner of a terminal pane, visible on hover.
+/// Serves as the drag source for stacking / swapping top-level panes.
+private struct PaneDragHandle: View {
+    @State private var isHovering = false
+
+    var body: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundColor(.secondary.opacity(isHovering ? 0.8 : 0.4))
+            .frame(width: 20, height: 16)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor).opacity(isHovering ? 0.8 : 0.4))
+            )
+            .contentShape(Rectangle())
+            .onHover { isHovering = $0 }
+            .padding(6)
+            .help("Drag to swap or stack (hold Option to stack)")
     }
 }
 

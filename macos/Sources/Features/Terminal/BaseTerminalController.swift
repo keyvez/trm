@@ -2137,9 +2137,17 @@ class BaseTerminalController: NSWindowController,
             // - Stacked pane where stack survives (≥2 remaining): no adjustment (cell stays)
             // - Stacked pane where stack dissolves (1 remaining): no adjustment (cell becomes normal)
             if useGridLayout && !wasInStack {
-                let surfaces = Array(surfaceTree)
-                if let flatIdx = surfaces.firstIndex(where: { $0 === view }) {
-                    let (row, _) = gridPosition(flatIndex: flatIdx)
+                // Use gridPanes (visual grid) to find the row, NOT surfaceTree.
+                // surfaceTree includes stacked children which don't occupy their
+                // own grid cells, so its indices don't map to gridRowCols.
+                let visualPanes = gridPanes
+                if let visualIdx = visualPanes.firstIndex(where: { pane in
+                    switch pane {
+                    case .terminal(let s): return s === view
+                    default: return false
+                    }
+                }) {
+                    let (row, _) = gridPosition(flatIndex: visualIdx)
                     if row < gridRowCols.count {
                         if gridRowCols[row] > 1 {
                             gridRowCols[row] -= 1
@@ -2151,6 +2159,15 @@ class BaseTerminalController: NSWindowController,
                         }
                     }
                 }
+            }
+        }
+
+        // Remove closed pane from paneDisplayOrder to avoid stale entries
+        // that could confuse ensurePaneDisplayOrder or future move operations.
+        if case .leaf(let view) = node {
+            let closedID = ObjectIdentifier(view)
+            if !paneDisplayOrder.isEmpty {
+                paneDisplayOrder.removeAll { $0 == closedID }
             }
         }
 

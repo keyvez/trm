@@ -531,6 +531,17 @@ final class Trm {
         return String(cString: buf)
     }
 
+    /// Returns the app name of the Text Tap client connected to a specific pane,
+    /// or nil if no client is connected to that pane.
+    func textTapAppName(forPaneId paneId: Int) -> String? {
+        guard let h = handle, paneId >= 0 else { return nil }
+        var buf = [CChar](repeating: 0, count: 129)
+        let len = termania_text_tap_app_name_for_pane(h, UInt32(paneId), &buf, UInt32(buf.count - 1))
+        guard len > 0 else { return nil }
+        buf[Int(len)] = 0
+        return String(cString: buf)
+    }
+
     // MARK: - Watermarks
 
     /// Get the watermark text for a pane.
@@ -553,6 +564,12 @@ final class Trm {
     /// Set the watermark text for a pane.
     func setWatermark(forPaneId paneId: UInt32, text: String) {
         guard let h = handle else { return }
+        if text.isEmpty {
+            NSLog("trm-debug: CLEARING watermark for pane %d", paneId)
+            Thread.callStackSymbols.prefix(8).forEach { NSLog("  %@", $0) }
+        } else {
+            NSLog("trm-debug: setting watermark for pane %d to '%@'", paneId, text)
+        }
         text.withCString { cstr in
             termania_set_watermark(h, paneId, cstr, UInt32(text.utf8.count))
         }

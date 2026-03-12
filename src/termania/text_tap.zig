@@ -187,6 +187,13 @@ pub const TextTapServer = struct {
                 }
             }
         }
+
+        // Safety net: if all clients have disconnected, clear all active
+        // state so stale pills/indicators don't linger.
+        if (self.clients.items.len == 0) {
+            self.active_send_panes = 0;
+            self.active_pane_ids.clearRetainingCapacity();
+        }
     }
 
     /// Read from a single client. Returns false if the client should be removed.
@@ -309,6 +316,14 @@ pub const TextTapServer = struct {
                 return;
             };
             std.log.info("text_tap: mark_connected pane={d} client_idx={d}", .{ pane, idx });
+            // Clear previous connected pane if the client is reconnecting
+            // to a different pane, so the old pane's indicator disappears.
+            if (self.clients.items[idx].connected_pane) |old_pane| {
+                if (old_pane != @as(u32, @intCast(pane))) {
+                    _ = self.active_pane_ids.remove(old_pane);
+                    if (old_pane < 64) self.active_send_panes &= ~(@as(u64, 1) << @intCast(old_pane));
+                }
+            }
             if (pane < 64) self.active_send_panes |= @as(u64, 1) << @intCast(pane);
             self.active_pane_ids.put(@intCast(pane), {}) catch {};
             self.clients.items[idx].connected_pane = @intCast(pane);
@@ -612,6 +627,22 @@ pub const TextTapServer = struct {
         for (self.clients.items) |client| {
             if (client.app_name) |name| {
                 if (name.len > 0) return name;
+            }
+        }
+        return null;
+    }
+
+    /// Return the app name of the client connected to a specific pane.
+    /// Looks up the client whose `connected_pane` matches the given pane ID.
+    pub fn appNameForPane(self: *TextTapServer, pane_id: u32) ?[]const u8 {
+        for (self.clients.items) |client| {
+            if (client.connected_pane) |cp| {
+                if (cp == pane_id) {
+                    if (client.app_name) |name| {
+                        if (name.len > 0) return name;
+                    }
+                    return null;
+                }
             }
         }
         return null;

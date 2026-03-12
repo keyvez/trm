@@ -65,7 +65,7 @@ final class SendTextIndicatorPlugin: ObservableObject, ServicePlugin, Observable
             Self.log.debug("overlayView paneId=\(paneId) clients=\(clientCount) active=\(isActive)")
         }
         guard isActive else { return nil }
-        let appName = Trm.shared.textTapAppName() ?? "connected"
+        let appName = Trm.shared.textTapAppName(forPaneId: paneId) ?? Trm.shared.textTapAppName() ?? "connected"
         return AnyView(
             SendTextIndicatorView(appName: appName)
                 .padding(.bottom, 8)

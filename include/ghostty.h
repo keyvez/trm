@@ -1314,6 +1314,9 @@ uint32_t termania_text_tap_client_count(trm_app_t);
 // Text Tap: app name of the first subscribed client (returns bytes written)
 uint32_t termania_text_tap_app_name(trm_app_t, char*, uint32_t);
 
+// Text Tap: app name of the client connected to a specific pane
+uint32_t termania_text_tap_app_name_for_pane(trm_app_t, uint32_t, char*, uint32_t);
+
 // LLM config accessors
 uint32_t termania_config_llm_provider(trm_app_t, char*, uint32_t);
 uint32_t termania_config_llm_api_key(trm_app_t, char*, uint32_t);
