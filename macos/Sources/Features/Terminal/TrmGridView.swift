@@ -289,19 +289,12 @@ struct TrmGridView: View {
     @ViewBuilder
     private func terminalPaneView(_ surface: Ghostty.SurfaceView, index: Int, paneId: Int) -> some View {
         VStack(spacing: 0) {
-            // Drag bar above the terminal surface — sits outside the NSView
-            // so mouse events aren't swallowed by the GPU surface.
+            // Drag bar above the terminal surface — uses an AppKit NSView
+            // to initiate drags, since SwiftUI .draggable gets swallowed
+            // by the GPU-rendered terminal surface below.
             if panes.count > 1 {
-                PaneDragBar()
-                    .draggable(surface) {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color(nsColor: .windowBackgroundColor))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1.5)
-                            )
-                            .frame(width: 120, height: 80)
-                    }
+                PaneDragBar(surface: surface)
+                    .frame(height: 6)
             }
 
             Ghostty.InspectableSurface(
@@ -834,24 +827,129 @@ private struct StackDragBar: View {
 // MARK: - Pane Drag Bar
 
 /// A thin drag bar at the top of a top-level terminal pane.
-/// Same pattern as `StackDragBar` but for non-stacked cells.
-private struct PaneDragBar: View {
-    @State private var isHovering = false
+/// Uses an AppKit NSView underneath so that drag initiation works reliably
+/// next to GPU-rendered terminal surfaces (SwiftUI `.draggable` gets
+/// swallowed by the NSView-backed surface).
+private struct PaneDragBar: NSViewRepresentable {
+    let surface: Ghostty.SurfaceView
 
-    var body: some View {
-        HStack(spacing: 3) {
-            ForEach(0..<3, id: \.self) { _ in
-                Circle()
-                    .fill(Color.secondary.opacity(isHovering ? 0.6 : 0.3))
-                    .frame(width: 3, height: 3)
-            }
+    func makeNSView(context: Context) -> DragBarNSView {
+        let view = DragBarNSView()
+        view.surface = surface
+        return view
+    }
+
+    func updateNSView(_ nsView: DragBarNSView, context: Context) {
+        nsView.surface = surface
+    }
+}
+
+/// AppKit view that renders grip dots and initiates an NSDraggingSession on drag.
+private final class DragBarNSView: NSView, NSDraggingSource {
+    var surface: Ghostty.SurfaceView?
+    private var isHovering = false
+    private var dragStart: NSPoint?
+
+    override var isFlipped: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setupTrackingArea()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupTrackingArea()
+    }
+
+    private func setupTrackingArea() {
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(area)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let bgAlpha: CGFloat = isHovering ? 0.8 : 0.6
+        NSColor.windowBackgroundColor.withAlphaComponent(bgAlpha).setFill()
+        dirtyRect.fill()
+
+        let dotAlpha: CGFloat = isHovering ? 0.6 : 0.3
+        let dotColor = NSColor.secondaryLabelColor.withAlphaComponent(dotAlpha)
+        let dotSize: CGFloat = 3
+        let spacing: CGFloat = 3
+        let totalWidth = dotSize * 3 + spacing * 2
+        var x = (bounds.width - totalWidth) / 2
+        let y = (bounds.height - dotSize) / 2
+
+        for _ in 0..<3 {
+            let rect = NSRect(x: x, y: y, width: dotSize, height: dotSize)
+            dotColor.setFill()
+            NSBezierPath(ovalIn: rect).fill()
+            x += dotSize + spacing
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: 6)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
-        .contentShape(Rectangle())
-        .onHover { isHovering = $0 }
-        .help("Drag to swap or stack (hold Option to stack)")
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: 6)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        NSCursor.openHand.set()
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        NSCursor.arrow.set()
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        dragStart = convert(event.locationInWindow, from: nil)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let surface, let start = dragStart else { return }
+        let current = convert(event.locationInWindow, from: nil)
+        let dx = current.x - start.x
+        let dy = current.y - start.y
+        guard dx * dx + dy * dy > 9 else { return } // 3pt threshold
+
+        dragStart = nil
+
+        guard let item = surface.pasteboardItem() else { return }
+        let draggingItem = NSDraggingItem(pasteboardWriter: item)
+        draggingItem.setDraggingFrame(
+            NSRect(x: 0, y: 0, width: 120, height: 80),
+            contents: NSImage(size: NSSize(width: 120, height: 80), flipped: false) { rect in
+                NSColor.windowBackgroundColor.setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
+                NSColor.separatorColor.setStroke()
+                let path = NSBezierPath(roundedRect: rect.insetBy(dx: 0.75, dy: 0.75), xRadius: 8, yRadius: 8)
+                path.lineWidth = 1.5
+                path.stroke()
+                return true
+            }
+        )
+
+        beginDraggingSession(with: [draggingItem], event: event, source: self)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStart = nil
+    }
+
+    // MARK: NSDraggingSource
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        .move
     }
 }
 
