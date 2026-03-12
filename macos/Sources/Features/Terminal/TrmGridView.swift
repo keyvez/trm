@@ -288,19 +288,11 @@ struct TrmGridView: View {
     /// - `paneId`: the stable Zig pane ID (monotonic u32, survives pane close/reorder)
     @ViewBuilder
     private func terminalPaneView(_ surface: Ghostty.SurfaceView, index: Int, paneId: Int) -> some View {
-        Ghostty.InspectableSurface(
-            surfaceView: surface,
-            isSplit: panes.count > 1
-        )
-        .overlay(
-            paneControls(for: .terminal(surface)),
-            alignment: .topTrailing
-        )
-        .overlay(alignment: .topLeading) {
-            // Drag handle for top-level panes — allows dragging onto other
-            // panes to stack or swap. Only shown when there are multiple panes.
+        VStack(spacing: 0) {
+            // Drag bar above the terminal surface — sits outside the NSView
+            // so mouse events aren't swallowed by the GPU surface.
             if panes.count > 1 {
-                PaneDragHandle()
+                PaneDragBar()
                     .draggable(surface) {
                         RoundedRectangle(cornerRadius: 8)
                             .fill(Color(nsColor: .windowBackgroundColor))
@@ -311,17 +303,26 @@ struct TrmGridView: View {
                             .frame(width: 120, height: 80)
                     }
             }
+
+            Ghostty.InspectableSurface(
+                surfaceView: surface,
+                isSplit: panes.count > 1
+            )
+            .overlay(
+                paneControls(for: .terminal(surface)),
+                alignment: .topTrailing
+            )
+            .overlay(
+                watermarkOverlay(forPaneId: paneId)
+            )
+            .overlay(
+                servicePluginOverlays(forPaneId: paneId)
+            )
+            .overlay(
+                liveSummaryOverlay(forPaneId: paneId),
+                alignment: .bottom
+            )
         }
-        .overlay(
-            watermarkOverlay(forPaneId: paneId)
-        )
-        .overlay(
-            servicePluginOverlays(forPaneId: paneId)
-        )
-        .overlay(
-            liveSummaryOverlay(forPaneId: paneId),
-            alignment: .bottom
-        )
     }
 
     /// A webview pane with navigation controls, URL bar, and action buttons.
@@ -830,26 +831,27 @@ private struct StackDragBar: View {
     }
 }
 
-// MARK: - Pane Drag Handle
+// MARK: - Pane Drag Bar
 
-/// A small grip icon in the top-left corner of a terminal pane, visible on hover.
-/// Serves as the drag source for stacking / swapping top-level panes.
-private struct PaneDragHandle: View {
+/// A thin drag bar at the top of a top-level terminal pane.
+/// Same pattern as `StackDragBar` but for non-stacked cells.
+private struct PaneDragBar: View {
     @State private var isHovering = false
 
     var body: some View {
-        Image(systemName: "line.3.horizontal")
-            .font(.system(size: 9, weight: .bold))
-            .foregroundColor(.secondary.opacity(isHovering ? 0.8 : 0.4))
-            .frame(width: 20, height: 16)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(Color(nsColor: .windowBackgroundColor).opacity(isHovering ? 0.8 : 0.4))
-            )
-            .contentShape(Rectangle())
-            .onHover { isHovering = $0 }
-            .padding(6)
-            .help("Drag to swap or stack (hold Option to stack)")
+        HStack(spacing: 3) {
+            ForEach(0..<3, id: \.self) { _ in
+                Circle()
+                    .fill(Color.secondary.opacity(isHovering ? 0.6 : 0.3))
+                    .frame(width: 3, height: 3)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 6)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+        .help("Drag to swap or stack (hold Option to stack)")
     }
 }
 
