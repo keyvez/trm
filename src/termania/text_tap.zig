@@ -26,6 +26,50 @@ pub const TapTarget = union(enum) {
     all: void,
 };
 
+/// cmux-compatible API method identifiers.
+pub const CmuxMethod = enum(u8) {
+    system_ping = 0,
+    system_capabilities = 1,
+    system_identify = 2,
+    surface_list = 3,
+    surface_send_text = 4,
+    surface_send_key = 5,
+    surface_split = 6,
+    surface_focus = 7,
+    workspace_list = 8,
+    workspace_current = 9,
+    notification_create = 10,
+
+    pub fn fromString(s: []const u8) ?CmuxMethod {
+        if (std.mem.eql(u8, s, "system.ping")) return .system_ping;
+        if (std.mem.eql(u8, s, "system.capabilities")) return .system_capabilities;
+        if (std.mem.eql(u8, s, "system.identify")) return .system_identify;
+        if (std.mem.eql(u8, s, "surface.list")) return .surface_list;
+        if (std.mem.eql(u8, s, "surface.send_text")) return .surface_send_text;
+        if (std.mem.eql(u8, s, "surface.send_key")) return .surface_send_key;
+        if (std.mem.eql(u8, s, "surface.split")) return .surface_split;
+        if (std.mem.eql(u8, s, "surface.focus")) return .surface_focus;
+        if (std.mem.eql(u8, s, "workspace.list")) return .workspace_list;
+        if (std.mem.eql(u8, s, "workspace.current")) return .workspace_current;
+        if (std.mem.eql(u8, s, "notification.create")) return .notification_create;
+        return null;
+    }
+};
+
+/// A pending cmux query waiting for Swift to respond.
+pub const CmuxPendingQuery = struct {
+    client_fd: posix.socket_t,
+    request_id: [64]u8 = undefined,
+    request_id_len: usize = 0,
+    method: CmuxMethod,
+};
+
+/// A cmux response queued by Swift, ready to send to the client.
+pub const CmuxResponse = struct {
+    client_fd: posix.socket_t,
+    data: []const u8, // heap-allocated JSON response with trailing newline
+};
+
 /// A connected tap client.
 pub const ClientConnection = struct {
     fd: posix.socket_t,
@@ -55,6 +99,10 @@ pub const TextTapServer = struct {
     active_send_panes: u64 = 0,
     /// Set of stable pane IDs targeted by send_command actions.
     active_pane_ids: std.AutoHashMap(u32, void) = undefined,
+    /// Pending cmux queries for Swift to process.
+    cmux_pending: std.array_list.Managed(CmuxPendingQuery),
+    /// Queued cmux responses from Swift, ready to write to clients.
+    cmux_responses: std.array_list.Managed(CmuxResponse),
 
     pub fn init(allocator: std.mem.Allocator, socket_path: []const u8) TextTapServer {
         return .{
@@ -63,11 +111,16 @@ pub const TextTapServer = struct {
             .pending_commands = std.array_list.Managed(TapCommand).init(allocator),
             .clients = std.array_list.Managed(ClientConnection).init(allocator),
             .active_pane_ids = std.AutoHashMap(u32, void).init(allocator),
+            .cmux_pending = std.array_list.Managed(CmuxPendingQuery).init(allocator),
+            .cmux_responses = std.array_list.Managed(CmuxResponse).init(allocator),
         };
     }
 
     pub fn deinit(self: *TextTapServer) void {
         if (self.running) self.stop();
+        for (self.cmux_responses.items) |r| self.allocator.free(r.data);
+        self.cmux_responses.deinit();
+        self.cmux_pending.deinit();
         self.pending_commands.deinit();
         self.clients.deinit();
         self.active_pane_ids.deinit();
@@ -151,6 +204,9 @@ pub const TextTapServer = struct {
 
         // Read from existing clients (iterate in reverse for safe removal).
         self.readFromClients();
+
+        // Flush any queued cmux responses to their clients.
+        self.sendCmuxResponses();
     }
 
     /// Accept all pending connections on the listener socket.
@@ -170,6 +226,17 @@ pub const TextTapServer = struct {
         }
     }
 
+    /// Check if a client fd has pending cmux queries or responses.
+    fn hasPendingCmux(self: *TextTapServer, fd: posix.socket_t) bool {
+        for (self.cmux_pending.items) |q| {
+            if (q.client_fd == fd) return true;
+        }
+        for (self.cmux_responses.items) |r| {
+            if (r.client_fd == fd) return true;
+        }
+        return false;
+    }
+
     /// Read available data from all connected clients and process commands.
     fn readFromClients(self: *TextTapServer) void {
         var i: usize = self.clients.items.len;
@@ -177,6 +244,9 @@ pub const TextTapServer = struct {
             i -= 1;
             const alive = self.readFromClient(i);
             if (!alive) {
+                // Don't close/remove if this client has pending cmux queries.
+                // The fd must stay open so Swift can respond asynchronously.
+                if (self.hasPendingCmux(self.clients.items[i].fd)) continue;
                 const client = self.clients.orderedRemove(i);
                 posix.close(client.fd);
                 if (client.app_name) |name| self.allocator.free(name);
@@ -255,6 +325,12 @@ pub const TextTapServer = struct {
     fn handleClientMessage(self: *TextTapServer, idx: usize, msg: []const u8) void {
         const trimmed = std.mem.trim(u8, msg, " \t\r");
         if (trimmed.len == 0) return;
+
+        // Detect cmux protocol: messages with "method" key.
+        if (extractQuotedValueStatic(trimmed, "method")) |_| {
+            self.handleCmuxMessage(idx, trimmed);
+            return;
+        }
 
         // Extract the "type" field.
         const msg_type = extractQuotedValueStatic(trimmed, "type") orelse return;
@@ -646,6 +722,242 @@ pub const TextTapServer = struct {
             }
         }
         return null;
+    }
+
+    /// Handle a cmux-format message: {"id":"...","method":"...","params":{...}}
+    fn handleCmuxMessage(self: *TextTapServer, idx: usize, msg: []const u8) void {
+        const request_id = extractQuotedValueStatic(msg, "id") orelse {
+            self.respond(idx, "{\"error\":\"missing id\"}\n");
+            return;
+        };
+        const method_str = extractQuotedValueStatic(msg, "method") orelse {
+            self.respond(idx, "{\"error\":\"missing method\"}\n");
+            return;
+        };
+
+        const method = CmuxMethod.fromString(method_str) orelse {
+            // Unknown method — send error response with the request id.
+            var buf: [256]u8 = undefined;
+            const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":false,\"error\":\"unknown method: {s}\"}}\n", .{ request_id, method_str }) catch return;
+            self.respond(idx, resp);
+            return;
+        };
+
+        switch (method) {
+            // Phase 1: Zig-only, immediate response
+            .system_ping => {
+                var buf: [128]u8 = undefined;
+                const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":true,\"result\":{{\"pong\":true}}}}\n", .{request_id}) catch return;
+                self.respond(idx, resp);
+            },
+            .system_capabilities => {
+                var buf: [512]u8 = undefined;
+                const resp = std.fmt.bufPrint(&buf,
+                    "{{\"id\":\"{s}\",\"ok\":true,\"result\":{{\"methods\":[" ++
+                    "\"system.ping\",\"system.capabilities\",\"system.identify\"," ++
+                    "\"surface.list\",\"surface.send_text\",\"surface.send_key\"," ++
+                    "\"surface.split\",\"surface.focus\"," ++
+                    "\"workspace.list\",\"workspace.current\"," ++
+                    "\"notification.create\"" ++
+                    "]}}}}\n", .{request_id}) catch return;
+                self.respond(idx, resp);
+            },
+            .surface_send_text => {
+                self.handleCmuxSendText(idx, request_id, msg);
+            },
+            .surface_send_key => {
+                self.handleCmuxSendKey(idx, request_id, msg);
+            },
+            .notification_create => {
+                self.handleCmuxNotify(idx, request_id, msg);
+            },
+
+            // Phase 2 & 3: Need Swift data — queue as pending
+            .system_identify,
+            .surface_list,
+            .surface_split,
+            .surface_focus,
+            .workspace_list,
+            .workspace_current,
+            => {
+                var query = CmuxPendingQuery{
+                    .client_fd = self.clients.items[idx].fd,
+                    .method = method,
+                };
+                const id_len = @min(request_id.len, query.request_id.len);
+                @memcpy(query.request_id[0..id_len], request_id[0..id_len]);
+                query.request_id_len = id_len;
+                self.cmux_pending.append(query) catch {
+                    var buf: [128]u8 = undefined;
+                    const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":false,\"error\":\"queue full\"}}\n", .{request_id}) catch return;
+                    self.respond(idx, resp);
+                };
+            },
+        }
+    }
+
+    /// Handle surface.send_text — maps to existing send action.
+    fn handleCmuxSendText(self: *TextTapServer, idx: usize, request_id: []const u8, msg: []const u8) void {
+        // Parse "surface_id" from params to get pane target, or "text" directly from params.
+        const text = extractQuotedValue(self.allocator, msg, "text") catch return orelse {
+            var buf: [128]u8 = undefined;
+            const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":false,\"error\":\"missing text param\"}}\n", .{request_id}) catch return;
+            self.respond(idx, resp);
+            return;
+        };
+
+        // Try to extract pane from surface_id like "surface-3"
+        const surface_id = extractQuotedValueStatic(msg, "surface_id");
+        const pane: usize = if (surface_id) |sid| blk: {
+            if (std.mem.startsWith(u8, sid, "surface-")) {
+                break :blk std.fmt.parseInt(usize, sid["surface-".len..], 10) catch 0;
+            }
+            break :blk 0;
+        } else blk: {
+            break :blk extractNumberAfter(msg, "pane") orelse 0;
+        };
+
+        self.pending_commands.append(.{
+            .send = .{
+                .target = .{ .pane = pane },
+                .input = text,
+            },
+        }) catch {
+            self.allocator.free(text);
+            return;
+        };
+        if (pane < 64) self.active_send_panes |= @as(u64, 1) << @intCast(pane);
+
+        var buf: [128]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":true,\"result\":{{}}}}\n", .{request_id}) catch return;
+        self.respond(idx, resp);
+    }
+
+    /// Handle surface.send_key — send escape sequences for named keys.
+    fn handleCmuxSendKey(self: *TextTapServer, idx: usize, request_id: []const u8, msg: []const u8) void {
+        const key_name = extractQuotedValueStatic(msg, "key") orelse {
+            var buf: [128]u8 = undefined;
+            const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":false,\"error\":\"missing key param\"}}\n", .{request_id}) catch return;
+            self.respond(idx, resp);
+            return;
+        };
+
+        // Map key names to escape sequences
+        const seq: []const u8 = if (std.mem.eql(u8, key_name, "Enter") or std.mem.eql(u8, key_name, "Return"))
+            "\r"
+        else if (std.mem.eql(u8, key_name, "Tab"))
+            "\t"
+        else if (std.mem.eql(u8, key_name, "Escape"))
+            "\x1b"
+        else if (std.mem.eql(u8, key_name, "Backspace"))
+            "\x7f"
+        else if (std.mem.eql(u8, key_name, "Up"))
+            "\x1b[A"
+        else if (std.mem.eql(u8, key_name, "Down"))
+            "\x1b[B"
+        else if (std.mem.eql(u8, key_name, "Right"))
+            "\x1b[C"
+        else if (std.mem.eql(u8, key_name, "Left"))
+            "\x1b[D"
+        else if (std.mem.eql(u8, key_name, "Home"))
+            "\x1b[H"
+        else if (std.mem.eql(u8, key_name, "End"))
+            "\x1b[F"
+        else if (std.mem.eql(u8, key_name, "Delete"))
+            "\x1b[3~"
+        else if (std.mem.eql(u8, key_name, "PageUp"))
+            "\x1b[5~"
+        else if (std.mem.eql(u8, key_name, "PageDown"))
+            "\x1b[6~"
+        else {
+            var buf2: [128]u8 = undefined;
+            const resp = std.fmt.bufPrint(&buf2, "{{\"id\":\"{s}\",\"ok\":false,\"error\":\"unknown key: {s}\"}}\n", .{ request_id, key_name }) catch return;
+            self.respond(idx, resp);
+            return;
+        };
+
+        const text = self.allocator.dupe(u8, seq) catch return;
+
+        const surface_id = extractQuotedValueStatic(msg, "surface_id");
+        const pane: usize = if (surface_id) |sid| blk: {
+            if (std.mem.startsWith(u8, sid, "surface-")) {
+                break :blk std.fmt.parseInt(usize, sid["surface-".len..], 10) catch 0;
+            }
+            break :blk 0;
+        } else blk: {
+            break :blk extractNumberAfter(msg, "pane") orelse 0;
+        };
+
+        self.pending_commands.append(.{
+            .send = .{
+                .target = .{ .pane = pane },
+                .input = text,
+            },
+        }) catch {
+            self.allocator.free(text);
+            return;
+        };
+        if (pane < 64) self.active_send_panes |= @as(u64, 1) << @intCast(pane);
+
+        var buf: [128]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":true,\"result\":{{}}}}\n", .{request_id}) catch return;
+        self.respond(idx, resp);
+    }
+
+    /// Handle notification.create — maps to existing notify action.
+    fn handleCmuxNotify(self: *TextTapServer, idx: usize, request_id: []const u8, msg: []const u8) void {
+        const title = extractQuotedValue(self.allocator, msg, "title") catch return orelse {
+            var buf: [128]u8 = undefined;
+            const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":false,\"error\":\"missing title\"}}\n", .{request_id}) catch return;
+            self.respond(idx, resp);
+            return;
+        };
+        const body = extractQuotedValue(self.allocator, msg, "body") catch return orelse {
+            self.allocator.free(title);
+            var buf: [128]u8 = undefined;
+            const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":false,\"error\":\"missing body\"}}\n", .{request_id}) catch return;
+            self.respond(idx, resp);
+            return;
+        };
+
+        self.pending_commands.append(.{
+            .action = .{ .notify = .{ .title = title, .body = body } },
+        }) catch {
+            self.allocator.free(title);
+            self.allocator.free(body);
+            return;
+        };
+
+        var buf: [128]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":true,\"result\":{{}}}}\n", .{request_id}) catch return;
+        self.respond(idx, resp);
+    }
+
+    /// Drain pending cmux queries for Swift to process.
+    /// Returns the pending queries and clears the list.
+    pub fn drainCmuxQueries(self: *TextTapServer) []const CmuxPendingQuery {
+        return self.cmux_pending.toOwnedSlice() catch return &.{};
+    }
+
+    /// Queue a cmux response from Swift. The data must be a heap-allocated
+    /// JSON string with trailing newline.
+    pub fn queueCmuxResponse(self: *TextTapServer, client_fd: posix.socket_t, data: []const u8) void {
+        self.cmux_responses.append(.{
+            .client_fd = client_fd,
+            .data = data,
+        }) catch {
+            self.allocator.free(data);
+        };
+    }
+
+    /// Write all queued cmux responses to their respective clients.
+    fn sendCmuxResponses(self: *TextTapServer) void {
+        const responses = self.cmux_responses.toOwnedSlice() catch return;
+        defer self.allocator.free(responses);
+        for (responses) |r| {
+            _ = posix.write(r.client_fd, r.data) catch {};
+            self.allocator.free(r.data);
+        }
     }
 };
 
@@ -1205,6 +1517,154 @@ test "broadcastPaneContent formats correctly" {
         const response = buf[0..n];
         try testing.expect(std.mem.indexOf(u8, response, "pane_output") != null);
         try testing.expect(std.mem.indexOf(u8, response, "hello world") != null);
+    }
+
+    server.stop();
+}
+
+test "cmux system.ping" {
+    const path = "/tmp/test_termania_cmux_ping.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll();
+
+    _ = try posix.write(client_fd, "{\"id\":\"r1\",\"method\":\"system.ping\",\"params\":{}}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    var buf: [256]u8 = undefined;
+    std.Thread.sleep(1_000_000);
+    const n = posix.read(client_fd, &buf) catch 0;
+    if (n > 0) {
+        const response = buf[0..n];
+        try testing.expect(std.mem.indexOf(u8, response, "\"pong\":true") != null);
+        try testing.expect(std.mem.indexOf(u8, response, "\"id\":\"r1\"") != null);
+    }
+
+    server.stop();
+}
+
+test "cmux system.capabilities" {
+    const path = "/tmp/test_termania_cmux_caps.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll();
+
+    _ = try posix.write(client_fd, "{\"id\":\"r2\",\"method\":\"system.capabilities\",\"params\":{}}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    var buf: [512]u8 = undefined;
+    std.Thread.sleep(1_000_000);
+    const n = posix.read(client_fd, &buf) catch 0;
+    if (n > 0) {
+        const response = buf[0..n];
+        try testing.expect(std.mem.indexOf(u8, response, "\"methods\"") != null);
+        try testing.expect(std.mem.indexOf(u8, response, "system.ping") != null);
+    }
+
+    server.stop();
+}
+
+test "cmux surface.send_text queues command" {
+    const path = "/tmp/test_termania_cmux_send.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll();
+
+    _ = try posix.write(client_fd, "{\"id\":\"r3\",\"method\":\"surface.send_text\",\"params\":{\"surface_id\":\"surface-0\",\"text\":\"hello\"}}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    const cmds = server.drainCommands();
+    defer {
+        for (cmds) |cmd| {
+            switch (cmd) {
+                .send => |send_cmd| testing.allocator.free(send_cmd.input),
+                else => {},
+            }
+        }
+        testing.allocator.free(cmds);
+    }
+    try testing.expectEqual(@as(usize, 1), cmds.len);
+
+    server.stop();
+}
+
+test "cmux surface.list queues pending query" {
+    const path = "/tmp/test_termania_cmux_list.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll();
+
+    _ = try posix.write(client_fd, "{\"id\":\"r4\",\"method\":\"surface.list\",\"params\":{}}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    const queries = server.drainCmuxQueries();
+    defer testing.allocator.free(queries);
+    try testing.expectEqual(@as(usize, 1), queries.len);
+    try testing.expectEqual(CmuxMethod.surface_list, queries[0].method);
+
+    server.stop();
+}
+
+test "cmux unknown method returns error" {
+    const path = "/tmp/test_termania_cmux_unknown.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll();
+
+    _ = try posix.write(client_fd, "{\"id\":\"r5\",\"method\":\"bogus.method\",\"params\":{}}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    var buf: [256]u8 = undefined;
+    std.Thread.sleep(1_000_000);
+    const n = posix.read(client_fd, &buf) catch 0;
+    if (n > 0) {
+        const response = buf[0..n];
+        try testing.expect(std.mem.indexOf(u8, response, "\"ok\":false") != null);
     }
 
     server.stop();

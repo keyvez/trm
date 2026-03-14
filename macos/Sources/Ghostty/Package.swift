@@ -448,6 +448,9 @@ extension Notification.Name {
     /// Open a split browser pane (from socket API or keyboard shortcut).
     /// userInfo: "url" (String), "paneId" (Int, -1 = auto)
     static let trmOpenSplitBrowser = Notification.Name("app.roj.trm.openSplitBrowser")
+
+    /// cmux query from text tap socket. userInfo: "method" (UInt8), "requestId" (String), "clientIdx" (UInt32)
+    static let trmCmuxQuery = Notification.Name("app.roj.trm.cmuxQuery")
 }
 
 // NOTE: I am moving all of these to Notification.Name extensions over time. This

@@ -360,8 +360,11 @@ class BaseTerminalController: NSWindowController,
             self.hasExternalSurfaceTree = true
             self.surfaceTree = tree
         } else {
-            let initialView = Ghostty.SurfaceView(ghostty_app, baseConfig: initialConfig)
-            initialView.paneId = Trm.shared.allocPaneId()
+            var cfg = initialConfig ?? Ghostty.SurfaceConfiguration()
+            let paneId = Trm.shared.allocPaneId()
+            Self.injectCmuxEnvVars(into: &cfg, paneId: paneId)
+            let initialView = Ghostty.SurfaceView(ghostty_app, baseConfig: cfg)
+            initialView.paneId = paneId
             Self.setDefaultWatermark(forPaneId: initialView.paneId!)
             self.surfaceTree = .init(view: initialView)
         }
@@ -456,6 +459,13 @@ class BaseTerminalController: NSWindowController,
             self,
             selector: #selector(handleShortcutExecute(_:)),
             name: .trmShortcutExecute,
+            object: nil)
+
+        // cmux-compatible API queries
+        center.addObserver(
+            self,
+            selector: #selector(handleCmuxQuery(_:)),
+            name: .trmCmuxQuery,
             object: nil)
 
         // Command lifecycle — notify scanner subscribers when a command finishes
@@ -676,8 +686,25 @@ class BaseTerminalController: NSWindowController,
         didReconcile: Bool = false
     ) -> Ghostty.SurfaceView? {
         guard let ghostty_app = ghostty.app else { return nil }
-        let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
-        newView.paneId = nextAvailablePaneId()
+
+        // Validate that oldView is still in the surface tree. If a pane was
+        // just closed and focusedSurface hasn't updated yet, oldView could be
+        // stale. Fall back to any live surface.
+        let anchorView: Ghostty.SurfaceView
+        if surfaceTree.contains(where: { $0 === oldView }) {
+            anchorView = oldView
+        } else if let fallback = Array(surfaceTree).first {
+            Ghostty.logger.warning("newGridPane: oldView not in tree, using fallback")
+            anchorView = fallback
+        } else {
+            return nil
+        }
+
+        let newPaneId = nextAvailablePaneId()
+        var newConfig = config ?? Ghostty.SurfaceConfiguration()
+        Self.injectCmuxEnvVars(into: &newConfig, paneId: newPaneId)
+        let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: newConfig)
+        newView.paneId = newPaneId
         Self.setDefaultWatermark(forPaneId: newView.paneId!)
 
         // Use the VISUAL order (gridPanes respects paneDisplayOrder) to find
@@ -688,10 +715,10 @@ class BaseTerminalController: NSWindowController,
         let visualIndex = visualPanes.firstIndex(where: { pane in
             switch pane {
             case .terminal(let s):
-                return s === oldView
+                return s === anchorView
             case .stack(let children):
                 return children.contains(where: {
-                    if case .terminal(let s) = $0 { return s === oldView }
+                    if case .terminal(let s) = $0 { return s === anchorView }
                     return false
                 })
             default:
@@ -710,7 +737,7 @@ class BaseTerminalController: NSWindowController,
         guard visualRowStart < visualPanes.count else {
             reconcileGridRowCols()
             guard !didReconcile else { return nil }
-            return newGridPane(at: oldView, direction: direction, baseConfig: config, didReconcile: true)
+            return newGridPane(at: anchorView, direction: direction, baseConfig: config, didReconcile: true)
         }
 
         // Helper: extract a SurfaceView from a GridPane.
@@ -732,31 +759,31 @@ class BaseTerminalController: NSWindowController,
         // .right (append after), so we need to pick the correct tree-order
         // neighbour as anchor.
         let treeSurfaces = Array(surfaceTree)
-        let oldTreeIndex = treeSurfaces.firstIndex(where: { $0 === oldView }) ?? 0
+        let oldTreeIndex = treeSurfaces.firstIndex(where: { $0 === anchorView }) ?? 0
 
         let insertAfter: Ghostty.SurfaceView
         switch direction {
         case .right:
-            insertAfter = oldView
+            insertAfter = anchorView
         case .left:
             if oldTreeIndex > 0 {
                 insertAfter = treeSurfaces[oldTreeIndex - 1]
             } else {
-                insertAfter = oldView
+                insertAfter = anchorView
             }
         case .down:
             // Insert after the last surface of the current VISUAL row.
             if let s = surface(of: visualPanes[visualRowEnd]) {
                 insertAfter = s
             } else {
-                insertAfter = oldView
+                insertAfter = anchorView
             }
         case .up:
             // Insert before the first surface of the current VISUAL row.
             if visualRowStart > 0, let s = surface(of: visualPanes[visualRowStart - 1]) {
                 insertAfter = s
             } else {
-                insertAfter = oldView
+                insertAfter = anchorView
             }
         }
 
@@ -805,7 +832,7 @@ class BaseTerminalController: NSWindowController,
         replaceSurfaceTree(
             newTree,
             moveFocusTo: newView,
-            moveFocusFrom: oldView,
+            moveFocusFrom: anchorView,
             undoAction: "New Pane")
 
         return newView
@@ -828,11 +855,22 @@ class BaseTerminalController: NSWindowController,
     /// If they've drifted (e.g. a surface failed to create during session
     /// restore), rebuild `gridRowCols` to reflect the real pane count.
     private func reconcileGridRowCols() {
+        let actualCount = gridPanes.count
+        let totalBefore = gridRowCols.reduce(0, +)
         var layout = GridLayout<ObjectIdentifier>(
             rowCols: gridRowCols,
             displayOrder: paneDisplayOrder
         )
-        layout.reconcile(actualCount: gridPanes.count)
+        layout.reconcile(actualCount: actualCount)
+
+        // Log if reconcile made a significant change — helps diagnose ghost-pane bugs.
+        let totalAfter = layout.rowCols.reduce(0, +)
+        if totalAfter != totalBefore {
+            Ghostty.logger.warning(
+                "reconcileGridRowCols: \(self.gridRowCols) (\(totalBefore)) → \(layout.rowCols) (\(totalAfter)), gridPanes=\(actualCount), surfaces=\(Array(self.surfaceTree).count), stacks=\(self.paneStacks.count)"
+            )
+        }
+
         gridRowCols = layout.rowCols
     }
 
@@ -2094,12 +2132,21 @@ class BaseTerminalController: NSWindowController,
     /// This does no confirmation and assumes confirmation is already done.
     private func removeSurfaceNode(_ node: SplitTree<Ghostty.SurfaceView>.Node) {
         // Move focus if the closed surface was focused and we have a next target
-        let nextFocus: Ghostty.SurfaceView? = if node.contains(
-            where: { $0 == focusedSurface }
-        ) {
+        let closingFocused = node.contains(where: { $0 == focusedSurface })
+        // Capture the current focusedSurface before we update it, so we can
+        // pass the correct moveFocusFrom to replaceSurfaceTree.
+        let previousFocus = focusedSurface
+        let nextFocus: Ghostty.SurfaceView? = if closingFocused {
             findNextFocusTargetAfterClosing(node: node)
         } else {
             nil
+        }
+
+        // Synchronously clear focusedSurface so that any code running between
+        // now and the async focus move in replaceSurfaceTree won't use a stale
+        // reference to a surface that's being removed from the tree.
+        if closingFocused {
+            focusedSurface = nextFocus
         }
 
         // Clean up stacks for the closed surface.
@@ -2149,6 +2196,7 @@ class BaseTerminalController: NSWindowController,
                 }) {
                     let (row, _) = gridPosition(flatIndex: visualIdx)
                     if row < gridRowCols.count {
+                        let before = gridRowCols
                         if gridRowCols[row] > 1 {
                             gridRowCols[row] -= 1
                         } else {
@@ -2157,7 +2205,10 @@ class BaseTerminalController: NSWindowController,
                         if gridRowCols.isEmpty {
                             gridRowCols = [1]
                         }
+                        Ghostty.logger.info("removeSurface grid: \(before) → \(self.gridRowCols), closed row=\(row), visualPanes=\(visualPanes.count), surfaces=\(Array(self.surfaceTree).count)")
                     }
+                } else {
+                    Ghostty.logger.warning("removeSurface: could not find closing pane in gridPanes (\(visualPanes.count) entries), gridRowCols=\(self.gridRowCols)")
                 }
             }
         }
@@ -2180,7 +2231,7 @@ class BaseTerminalController: NSWindowController,
         replaceSurfaceTree(
             surfaceTree.removing(node),
             moveFocusTo: nextFocus,
-            moveFocusFrom: focusedSurface,
+            moveFocusFrom: previousFocus,
             undoAction: "Close Terminal"
         )
 
@@ -2191,8 +2242,18 @@ class BaseTerminalController: NSWindowController,
         // over-correct because gridPanes.count dropped but gridRowCols
         // intentionally stayed the same (the cell persists for remaining
         // stack members).
+        //
+        // Only allow reconcile to SHRINK during close, never grow. Growing
+        // (adding new rows) during a close operation means stacked panes are
+        // being counted as separate cells, which would cause them to spill
+        // into new rows at the bottom.
         if useGridLayout && !wasInStack {
+            let savedRowCols = gridRowCols
             reconcileGridRowCols()
+            if gridRowCols.reduce(0, +) > savedRowCols.reduce(0, +) {
+                Ghostty.logger.warning("removeSurface: reconcile grew grid \(savedRowCols) → \(self.gridRowCols), reverting")
+                gridRowCols = savedRowCols
+            }
         }
     }
 
@@ -2300,6 +2361,101 @@ class BaseTerminalController: NSWindowController,
                 }
             }
         }
+    }
+
+    // MARK: - cmux-Compatible API
+
+    @objc private func handleCmuxQuery(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let method = userInfo["method"] as? UInt8,
+              let requestId = userInfo["requestId"] as? String,
+              let clientIdx = userInfo["clientIdx"] as? UInt32 else { return }
+
+        // Only one controller should respond to avoid duplicate responses.
+        // Prefer the main window; if no window is main (e.g., trm is in the
+        // background), fall back to any controller that has a window.
+        if let w = window {
+            if !w.isMainWindow {
+                // Check if another controller owns the main window.
+                let mainExists = NSApp.windows.contains { $0.isMainWindow && $0.windowController is BaseTerminalController && $0 !== w }
+                if mainExists { return }
+            }
+        } else {
+            return
+        }
+
+        let json: String
+        switch method {
+        case 2: // system.identify
+            json = buildCmuxIdentifyResponse(requestId: requestId)
+        case 3: // surface.list
+            json = buildCmuxSurfaceListResponse(requestId: requestId)
+        case 7: // surface.focus
+            // surface.focus is handled as an action — need params from original message.
+            // For now, acknowledge; the actual focus happens via existing focus_pane action.
+            json = "{\"id\":\"\(requestId)\",\"ok\":true,\"result\":{}}"
+        case 8: // workspace.list
+            json = buildCmuxWorkspaceListResponse(requestId: requestId)
+        case 9: // workspace.current
+            json = "{\"id\":\"\(requestId)\",\"ok\":true,\"result\":{\"workspace_id\":\"workspace-0\",\"name\":\"default\"}}"
+        case 6: // surface.split — acknowledge; actual split comes through existing mechanism
+            json = "{\"id\":\"\(requestId)\",\"ok\":true,\"result\":{}}"
+        default:
+            json = "{\"id\":\"\(requestId)\",\"ok\":false,\"error\":\"unhandled method\"}"
+        }
+
+        Trm.shared.respondCmux(clientIdx: clientIdx, resultJSON: json)
+    }
+
+    private func buildCmuxSurfaceListResponse(requestId: String) -> String {
+        let surfaces = gridSurfaces
+        var entries: [String] = []
+        for (index, surface) in surfaces.enumerated() {
+            let paneId = surface.paneId ?? index
+            let title = surface.title.isEmpty ? "Shell" : surface.title
+            let isFocused = surface === focusedSurface
+            let escapedTitle = title
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            entries.append(
+                "{\"surface_id\":\"surface-\(paneId)\"," +
+                "\"pane_id\":\"\(paneId)\"," +
+                "\"title\":\"\(escapedTitle)\"," +
+                "\"focused\":\(isFocused)," +
+                "\"workspace_id\":\"workspace-0\"," +
+                "\"window_id\":\"window-0\"}"
+            )
+        }
+        let surfacesJSON = "[" + entries.joined(separator: ",") + "]"
+        return "{\"id\":\"\(requestId)\",\"ok\":true,\"result\":{\"surfaces\":\(surfacesJSON)}}"
+    }
+
+    private func buildCmuxIdentifyResponse(requestId: String) -> String {
+        let surfaces = gridSurfaces
+        let focusedIndex = surfaces.firstIndex(where: { $0 === focusedSurface }) ?? 0
+        let focusedPaneId = focusedSurface?.paneId ?? focusedIndex
+        return "{\"id\":\"\(requestId)\",\"ok\":true,\"result\":{" +
+            "\"window_id\":\"window-0\"," +
+            "\"workspace_id\":\"workspace-0\"," +
+            "\"pane_id\":\"pane-\(focusedPaneId)\"," +
+            "\"surface_id\":\"surface-\(focusedPaneId)\"}}"
+    }
+
+    private func buildCmuxWorkspaceListResponse(requestId: String) -> String {
+        return "{\"id\":\"\(requestId)\",\"ok\":true,\"result\":{\"workspaces\":[" +
+            "{\"workspace_id\":\"workspace-0\",\"name\":\"default\",\"active\":true}" +
+            "]}}"
+    }
+
+    /// Inject cmux/trm env vars into a surface configuration for a given pane ID.
+    static func injectCmuxEnvVars(into config: inout Ghostty.SurfaceConfiguration, paneId: Int) {
+        if let socketPath = Trm.shared.cmuxSocketPath() {
+            config.environmentVariables["TRM_SOCKET_PATH"] = socketPath
+            config.environmentVariables["CMUX_SOCKET_PATH"] = socketPath
+        }
+        config.environmentVariables["TRM_PANE_ID"] = "\(paneId)"
+        config.environmentVariables["CMUX_SURFACE_ID"] = "surface-\(paneId)"
+        config.environmentVariables["CMUX_WORKSPACE_ID"] = "workspace-0"
     }
 
     @objc private func didChangeScreenParametersNotification(_ notification: Notification) {

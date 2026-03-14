@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.4 (2026-03-12)
+
+### Added
+
+- **cmux-compatible API**: Dual-protocol support on the Text Tap socket. Tools built for cmux automatically work with trm. Supports `system.ping`, `system.capabilities`, `system.identify`, `surface.list`, `surface.send_text`, `surface.send_key`, `workspace.list`, `workspace.current`, and `notification.create`. Phase 2 methods (`surface.list`, `system.identify`) use a response queue through Swift for live data.
+- **cmux CLI subcommands**: New `trm ping`, `trm list-surfaces`, `trm identify`, `trm capabilities`, `trm send-key`, and `trm send-text` commands using the cmux protocol.
+- **cmux env vars**: Child processes receive `CMUX_SOCKET_PATH`, `CMUX_SURFACE_ID`, `CMUX_WORKSPACE_ID`, `TRM_SOCKET_PATH`, and `TRM_PANE_ID` environment variables for tool integration.
+
 ## 0.2.3 (2026-03-08)
 
 ### Added

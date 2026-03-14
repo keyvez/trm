@@ -1317,6 +1317,11 @@ uint32_t termania_text_tap_app_name(trm_app_t, char*, uint32_t);
 // Text Tap: app name of the client connected to a specific pane
 uint32_t termania_text_tap_app_name_for_pane(trm_app_t, uint32_t, char*, uint32_t);
 
+// cmux-compatible API (dual-protocol on text tap socket)
+uint8_t  termania_cmux_drain_query(trm_app_t, uint8_t*, char*, uint32_t, uint32_t*, uint32_t*);
+void     termania_cmux_respond(trm_app_t, uint32_t, const char*, uint32_t);
+uint32_t termania_cmux_socket_path(trm_app_t, char*, uint32_t);
+
 // LLM config accessors
 uint32_t termania_config_llm_provider(trm_app_t, char*, uint32_t);
 uint32_t termania_config_llm_api_key(trm_app_t, char*, uint32_t);

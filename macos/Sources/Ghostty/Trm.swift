@@ -374,6 +374,19 @@ final class Trm {
                     ]
                 )
             }
+            // Drain cmux queries and post them for BaseTerminalController.
+            let cmuxQueries = self.drainCmuxQueries()
+            for query in cmuxQueries {
+                NotificationCenter.default.post(
+                    name: .trmCmuxQuery,
+                    object: nil,
+                    userInfo: [
+                        "method": query.method,
+                        "requestId": query.requestId,
+                        "clientIdx": query.clientIdx,
+                    ]
+                )
+            }
         }
     }
 
@@ -839,6 +852,50 @@ final class Trm {
     private static func readPanePattern(_ h: trm_app_t, pane: UInt32, patIndex: UInt32) -> String? {
         var buf = [CChar](repeating: 0, count: 513)
         let len = termania_config_pane_pattern(h, pane, patIndex, &buf, UInt32(buf.count - 1))
+        guard len > 0 else { return nil }
+        buf[Int(len)] = 0
+        return String(cString: buf)
+    }
+
+    // MARK: - cmux-Compatible API
+
+    /// A cmux query drained from the Zig text tap layer.
+    struct CmuxQuery {
+        let method: UInt8
+        let requestId: String
+        let clientIdx: UInt32
+    }
+
+    /// Drain all pending cmux queries from the C API buffer.
+    func drainCmuxQueries() -> [CmuxQuery] {
+        guard let h = handle else { return [] }
+        var results: [CmuxQuery] = []
+        var method: UInt8 = 0
+        var reqIdBuf = [CChar](repeating: 0, count: 65)
+        var reqIdLen: UInt32 = 0
+        var clientIdx: UInt32 = 0
+        while termania_cmux_drain_query(h, &method, &reqIdBuf, UInt32(reqIdBuf.count - 1), &reqIdLen, &clientIdx) != 0 {
+            reqIdBuf[Int(reqIdLen)] = 0
+            let requestId = String(cString: reqIdBuf)
+            results.append(CmuxQuery(method: method, requestId: requestId, clientIdx: clientIdx))
+            reqIdLen = 0
+        }
+        return results
+    }
+
+    /// Send a cmux JSON response back through the text tap socket.
+    func respondCmux(clientIdx: UInt32, resultJSON: String) {
+        guard let h = handle else { return }
+        resultJSON.withCString { cstr in
+            termania_cmux_respond(h, clientIdx, cstr, UInt32(resultJSON.utf8.count))
+        }
+    }
+
+    /// Get the text tap socket path for setting env vars.
+    func cmuxSocketPath() -> String? {
+        guard let h = handle else { return nil }
+        var buf = [CChar](repeating: 0, count: 257)
+        let len = termania_cmux_socket_path(h, &buf, UInt32(buf.count - 1))
         guard len > 0 else { return nil }
         buf[Int(len)] = 0
         return String(cString: buf)

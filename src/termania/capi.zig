@@ -112,6 +112,13 @@ const CApp = struct {
     send_queue_lens: [8]u32 = .{0} ** 8,
     send_queue_count: u32 = 0,
 
+    // cmux query buffer: pending queries from text tap for Swift to drain.
+    cmux_query_methods: [8]u8 = .{0} ** 8,
+    cmux_query_req_ids: [8][64]u8 = undefined,
+    cmux_query_req_id_lens: [8]u32 = .{0} ** 8,
+    cmux_query_client_fds: [8]u32 = .{0} ** 8,
+    cmux_query_count: u32 = 0,
+
     fn init(allocator: std.mem.Allocator) !*CApp {
         return initInternal(allocator, true);
     }
@@ -383,6 +390,21 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
                     else => {},
                 }
             },
+        }
+    }
+
+    // Drain cmux pending queries from text tap into the C API buffer.
+    const cmux_queries = app.text_tap.drainCmuxQueries();
+    defer app.allocator.free(cmux_queries);
+    for (cmux_queries) |q| {
+        if (app.cmux_query_count < 8) {
+            const qi = app.cmux_query_count;
+            app.cmux_query_methods[qi] = @intFromEnum(q.method);
+            const id_len = @min(q.request_id_len, app.cmux_query_req_ids[qi].len);
+            @memcpy(app.cmux_query_req_ids[qi][0..id_len], q.request_id[0..id_len]);
+            app.cmux_query_req_id_lens[qi] = @intCast(id_len);
+            app.cmux_query_client_fds[qi] = @intCast(q.client_fd);
+            app.cmux_query_count += 1;
         }
     }
 
@@ -1511,6 +1533,84 @@ export fn termania_text_tap_app_name_for_pane(handle: ?*anyopaque, pane_id: u32,
     const copy_len = @min(name.len, max_len);
     @memcpy(buf[0..copy_len], name[0..copy_len]);
     return @intCast(copy_len);
+}
+
+/// Drain one pending cmux query from the buffer.
+/// Returns 1 if a query was available, 0 otherwise.
+/// method_out: receives the CmuxMethod enum value (u8).
+/// req_id_buf/req_id_max: buffer to receive the request ID string.
+/// req_id_len_out: receives the actual request ID length.
+/// client_fd_out: receives the client fd for routing the response.
+export fn termania_cmux_drain_query(
+    handle: ?*anyopaque,
+    method_out: ?*u8,
+    req_id_buf: ?[*]u8,
+    req_id_max: u32,
+    req_id_len_out: ?*u32,
+    client_fd_out: ?*u32,
+) u8 {
+    const app = getApp(handle) orelse return 0;
+    if (app.cmux_query_count == 0) return 0;
+
+    const m_out = method_out orelse return 0;
+    const r_out = req_id_buf orelse return 0;
+    const rl_out = req_id_len_out orelse return 0;
+    const ci_out = client_fd_out orelse return 0;
+
+    // Pop the first entry
+    m_out.* = app.cmux_query_methods[0];
+    const rlen = @min(@as(usize, app.cmux_query_req_id_lens[0]), @as(usize, req_id_max));
+    @memcpy(r_out[0..rlen], app.cmux_query_req_ids[0][0..rlen]);
+    rl_out.* = @intCast(rlen);
+    ci_out.* = app.cmux_query_client_fds[0];
+
+    // Shift remaining entries down
+    app.cmux_query_count -= 1;
+    const remaining = app.cmux_query_count;
+    if (remaining > 0) {
+        for (0..remaining) |i| {
+            app.cmux_query_methods[i] = app.cmux_query_methods[i + 1];
+            app.cmux_query_req_ids[i] = app.cmux_query_req_ids[i + 1];
+            app.cmux_query_req_id_lens[i] = app.cmux_query_req_id_lens[i + 1];
+            app.cmux_query_client_fds[i] = app.cmux_query_client_fds[i + 1];
+        }
+    }
+
+    return 1;
+}
+
+/// Queue a cmux response from Swift. The response JSON is copied into a
+/// heap-allocated buffer and queued for the text tap to send to the client.
+export fn termania_cmux_respond(
+    handle: ?*anyopaque,
+    client_fd: u32,
+    result_json: ?[*]const u8,
+    result_len: u32,
+) void {
+    const app = getApp(handle) orelse return;
+    const json = result_json orelse return;
+    const len = @as(usize, result_len);
+
+    // Copy the response data and add a newline.
+    const data = app.allocator.alloc(u8, len + 1) catch return;
+    @memcpy(data[0..len], json[0..len]);
+    data[len] = '\n';
+
+    app.text_tap.queueCmuxResponse(@intCast(client_fd), data);
+}
+
+/// Get the text tap socket path. Copies into buf, returns bytes written.
+export fn termania_cmux_socket_path(
+    handle: ?*anyopaque,
+    buf: ?[*]u8,
+    max_len: u32,
+) u32 {
+    const app = getApp(handle) orelse return 0;
+    const out = buf orelse return 0;
+    const path = app.text_tap.socket_path;
+    const len = @min(path.len, @as(usize, max_len));
+    @memcpy(out[0..len], path[0..len]);
+    return @intCast(len);
 }
 
 /// Get the pane ID at a specific grid slot position (visual order).

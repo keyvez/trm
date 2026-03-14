@@ -24,6 +24,12 @@
 #   browser-fill --selector S --text T  Fill a form field
 #   status                       Show socket connection status
 #   raw <json>                   Send raw JSON to the socket
+#   ping                         Ping (cmux protocol)
+#   list-surfaces                List surfaces (cmux protocol)
+#   identify                     Identify focused surface (cmux protocol)
+#   capabilities                 List cmux methods
+#   send-key --key K             Send a named key (cmux protocol)
+#   send-text --text T           Send text (cmux protocol)
 
 set -e
 
@@ -41,37 +47,35 @@ fi
 # Helper: send JSON to socket and read response
 send_to_socket() {
     local json="$1"
+    local timeout="${2:-2}"
     if [ ! -S "$SOCKET_PATH" ]; then
         echo "Error: trm socket not found at $SOCKET_PATH" >&2
         echo "Is trm running?" >&2
         exit 1
     fi
-    # Use socat if available, fall back to nc
-    if command -v socat &>/dev/null; then
-        echo "$json" | socat - UNIX-CONNECT:"$SOCKET_PATH"
-    elif command -v nc &>/dev/null; then
-        echo "$json" | nc -U -w 1 "$SOCKET_PATH"
-    else
-        # Pure bash: use /dev/tcp redirect via coproc
-        # Fall back to python if available
-        if command -v python3 &>/dev/null; then
-            python3 -c "
-import socket, sys, json
+    # Use python3 for reliable bidirectional communication.
+    # nc closes on stdin EOF before async responses arrive.
+    if command -v python3 &>/dev/null; then
+        python3 -c "
+import socket, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect('$SOCKET_PATH')
 s.sendall(b'$json\n')
-s.settimeout(2.0)
+s.settimeout($timeout)
 try:
-    data = s.recv(4096)
+    data = s.recv(8192)
     sys.stdout.write(data.decode())
 except socket.timeout:
     pass
 s.close()
 "
-        else
-            echo "Error: requires socat, nc, or python3" >&2
-            exit 1
-        fi
+    elif command -v socat &>/dev/null; then
+        echo "$json" | socat -t "$timeout" - UNIX-CONNECT:"$SOCKET_PATH"
+    elif command -v nc &>/dev/null; then
+        echo "$json" | nc -U -w "$timeout" "$SOCKET_PATH"
+    else
+        echo "Error: requires python3, socat, or nc" >&2
+        exit 1
     fi
 }
 
@@ -134,6 +138,14 @@ Commands:
   browser-fill --selector S --text T Fill a form field in the browser
   status                            Show socket connection info
   raw <json>                        Send raw JSON to the socket
+
+cmux-compatible commands:
+  ping                              Ping the terminal (cmux protocol)
+  list-surfaces                     List surfaces with IDs and focus state
+  identify                          Identify focused window/workspace/surface
+  capabilities                      List supported cmux methods
+  send-key --key K [--surface S]    Send a named key (Enter, Tab, Up, etc.)
+  send-text --text T [--surface S]  Send text via cmux protocol
 
 Environment:
   TRM_SOCKET_PATH   Override socket path (default: /tmp/trm.sock)
@@ -365,6 +377,69 @@ HELP
             exit 1
         fi
         send_to_socket "$1"
+        ;;
+
+    # cmux-compatible subcommands
+    ping)
+        send_to_socket '{"id":"cli-ping","method":"system.ping","params":{}}'
+        ;;
+
+    list-surfaces)
+        send_to_socket '{"id":"cli-ls","method":"surface.list","params":{}}' 3
+        ;;
+
+    identify)
+        send_to_socket '{"id":"cli-id","method":"system.identify","params":{}}' 3
+        ;;
+
+    capabilities)
+        send_to_socket '{"id":"cli-caps","method":"system.capabilities","params":{}}'
+        ;;
+
+    send-key)
+        shift
+        KEY="" SURFACE=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --key)     KEY="$2"; shift 2 ;;
+                --surface) SURFACE="$2"; shift 2 ;;
+                *) echo "Unknown option: $1" >&2; exit 1 ;;
+            esac
+        done
+        if [ -z "$KEY" ]; then
+            echo "Error: --key is required" >&2
+            exit 1
+        fi
+        KEY_ESC=$(json_escape "$KEY")
+        if [ -n "$SURFACE" ]; then
+            SURFACE_ESC=$(json_escape "$SURFACE")
+            send_to_socket "{\"id\":\"cli-sk\",\"method\":\"surface.send_key\",\"params\":{\"key\":\"$KEY_ESC\",\"surface_id\":\"$SURFACE_ESC\"}}"
+        else
+            send_to_socket "{\"id\":\"cli-sk\",\"method\":\"surface.send_key\",\"params\":{\"key\":\"$KEY_ESC\"}}"
+        fi
+        ;;
+
+    send-text)
+        shift
+        TEXT="" SURFACE=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --text)    TEXT="$2"; shift 2 ;;
+                --surface) SURFACE="$2"; shift 2 ;;
+                *) echo "Unknown option: $1" >&2; exit 1 ;;
+            esac
+        done
+        if [ -z "$TEXT" ]; then
+            echo "Error: --text is required" >&2
+            exit 1
+        fi
+        TEXT_ESC=$(json_escape "$TEXT")
+        if [ -n "$SURFACE" ]; then
+            SURFACE_ESC=$(json_escape "$SURFACE")
+            send_to_socket "{\"id\":\"cli-st\",\"method\":\"surface.send_text\",\"params\":{\"text\":\"$TEXT_ESC\",\"surface_id\":\"$SURFACE_ESC\"}}"
+        else
+            send_to_socket "{\"id\":\"cli-st\",\"method\":\"surface.send_text\",\"params\":{\"text\":\"$TEXT_ESC\"}}"
+        fi
         ;;
 
     *)
