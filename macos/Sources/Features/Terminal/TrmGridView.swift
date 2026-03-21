@@ -149,6 +149,18 @@ struct TrmGridView: View {
         } else if panes.count == 1 {
             // Single pane — no grid chrome, just the pane
             paneView(panes[0], index: 0)
+                .overlay(
+                    dropPlaceholder(isVisible: dropHighlightPaneId == panes[0].id, isStackMode: dropIsStackMode, stackCount: 1)
+                        .allowsHitTesting(false)
+                )
+                .onDrop(of: [.ghosttySurfaceId], delegate: PaneStackDropDelegate(
+                    targetPane: panes[0],
+                    allPanes: panes,
+                    onStack: onStackPane,
+                    onSwap: onSwapPane,
+                    dropHighlightPaneId: $dropHighlightPaneId,
+                    dropIsStackMode: $dropIsStackMode
+                ))
                 .contextMenu {
                     if let pid = paneIdForPane(panes[0]) {
                         pluginsMenu(forPaneId: pid)
@@ -974,7 +986,8 @@ struct PaneStackDropDelegate: DropDelegate {
     func dropEntered(info: DropInfo) {
         withAnimation(.easeInOut(duration: 0.15)) {
             dropHighlightPaneId = targetPane.id
-            dropIsStackMode = NSEvent.modifierFlags.contains(.option)
+            // Default is stack mode; Option switches to swap.
+            dropIsStackMode = !NSEvent.modifierFlags.contains(.option)
         }
     }
 
@@ -988,7 +1001,8 @@ struct PaneStackDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        let stackMode = NSEvent.modifierFlags.contains(.option)
+        // Default: stack the pane (create sub-pane). Option+drop = swap positions.
+        let swapMode = NSEvent.modifierFlags.contains(.option)
 
         withAnimation(.easeInOut(duration: 0.15)) {
             dropHighlightPaneId = nil
@@ -996,10 +1010,10 @@ struct PaneStackDropDelegate: DropDelegate {
         }
 
         let callback: ((GridPane, GridPane) -> Void)?
-        if stackMode {
-            callback = onStack
-        } else {
+        if swapMode {
             callback = onSwap
+        } else {
+            callback = onStack
         }
         guard let callback else { return false }
 
@@ -1025,12 +1039,12 @@ struct PaneStackDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        // Update stack mode live as the user holds/releases Option.
-        let isOption = NSEvent.modifierFlags.contains(.option)
-        if isOption != dropIsStackMode {
+        // Stack is default; Option switches to swap. Update live as modifier changes.
+        let isStack = !NSEvent.modifierFlags.contains(.option)
+        if isStack != dropIsStackMode {
             DispatchQueue.main.async {
                 withAnimation(.easeInOut(duration: 0.15)) {
-                    dropIsStackMode = isOption
+                    dropIsStackMode = isStack
                 }
             }
         }
