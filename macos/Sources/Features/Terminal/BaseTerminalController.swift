@@ -557,6 +557,15 @@ class BaseTerminalController: NSWindowController,
         let shortcutExtractorPlugin = ShortcutExtractorPlugin()
         servicePluginRegistry.register(shortcutExtractorPlugin, disabledByDefault: true)
 
+        let claudePromptPlugin = ClaudePromptPlugin()
+        claudePromptPlugin.pwdProvider = { [weak self] in
+            guard let self else { return [] }
+            return self.gridSurfaces.map { surface in
+                (paneId: surface.paneId ?? 0, pwd: surface.pwd)
+            }
+        }
+        servicePluginRegistry.register(claudePromptPlugin)
+
         // Subprocess plugin example (Phase 2/3 integration path):
         //
         // let subprocessPlugin = SubprocessPluginHost(
