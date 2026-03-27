@@ -57,7 +57,7 @@ pub fn init(
     // it to the final app built with Swift.
     const xcframework = XCFrameworkStep.create(b, .{
         .name = "GhosttyKit",
-        .out_path = "macos/GhosttyKit.xcframework",
+        .out_path = b.pathFromRoot("macos/GhosttyKit.xcframework"),
         .libraries = switch (target) {
             .universal => &.{
                 .{
