@@ -468,6 +468,13 @@ class BaseTerminalController: NSWindowController,
             name: .trmCmuxQuery,
             object: nil)
 
+        // surface.focus RPC: focus a pane by ID
+        center.addObserver(
+            self,
+            selector: #selector(handleFocusPane(_:)),
+            name: .trmFocusPane,
+            object: nil)
+
         // Command lifecycle — notify scanner subscribers when a command finishes
         center.addObserver(
             self,
@@ -2373,6 +2380,13 @@ class BaseTerminalController: NSWindowController,
     }
 
     // MARK: - cmux-Compatible API
+
+    @objc private func handleFocusPane(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let paneId = userInfo["paneId"] as? Int else { return }
+        guard let surface = gridSurfaces.first(where: { ($0.paneId ?? -1) == paneId }) else { return }
+        focusSurface(surface)
+    }
 
     @objc private func handleCmuxQuery(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
