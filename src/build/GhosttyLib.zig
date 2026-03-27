@@ -5,6 +5,7 @@ const RunStep = std.Build.Step.Run;
 const Config = @import("Config.zig");
 const SharedDeps = @import("SharedDeps.zig");
 const LibtoolStep = @import("LibtoolStep.zig");
+const MergeStaticLibsStep = @import("MergeStaticLibsStep.zig");
 const LipoStep = @import("LipoStep.zig");
 
 /// The step that generates the file.
@@ -51,16 +52,22 @@ pub fn initStatic(
     };
 
     // Create a static lib that contains all our dependencies.
-    const libtool = LibtoolStep.create(b, .{
+    // Use MergeStaticLibsStep instead of LibtoolStep to avoid two bugs in
+    // Apple's libtool in Xcode 26.x:
+    //   1. libtool silently drops objects not 8-byte aligned.
+    //   2. libtool deduplicates objects by basename.
+    // MergeStaticLibsStep also patches the arm64 platform tag bug in
+    // Zig 0.15.2 (platform=7/iOS-sim emitted instead of platform=1/macOS).
+    const merge = MergeStaticLibsStep.create(b, .{
         .name = "ghostty",
         .out_name = "libghostty-fat.a",
         .sources = lib_list.items,
     });
-    libtool.step.dependOn(&lib.step);
+    merge.step.dependOn(&lib.step);
 
     return .{
-        .step = libtool.step,
-        .output = libtool.output,
+        .step = &merge.step,
+        .output = merge.output,
 
         // Static libraries cannot have dSYMs because they aren't linked.
         .dsym = null,
