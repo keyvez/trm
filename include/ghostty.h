@@ -1246,6 +1246,7 @@ const char* termania_font_family(trm_app_t);
 // Focus management
 uint32_t termania_focused_pane(trm_app_t);
 void termania_set_focused_pane(trm_app_t, uint32_t);
+uint8_t  termania_drain_focus_pane(trm_app_t, uint32_t*);
 
 // UI config
 float termania_title_bar_height(trm_app_t);
