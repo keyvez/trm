@@ -451,6 +451,9 @@ extension Notification.Name {
 
     /// cmux query from text tap socket. userInfo: "method" (UInt8), "requestId" (String), "clientIdx" (UInt32)
     static let trmCmuxQuery = Notification.Name("app.roj.trm.cmuxQuery")
+
+    /// Focus a specific pane by pane ID (from surface.focus RPC). userInfo: "paneId" (Int)
+    static let trmFocusPane = Notification.Name("app.roj.trm.focusPane")
 }
 
 // NOTE: I am moving all of these to Notification.Name extensions over time. This

@@ -772,11 +772,14 @@ pub const TextTapServer = struct {
                 self.handleCmuxNotify(idx, request_id, msg);
             },
 
+            .surface_focus => {
+                self.handleCmuxSurfaceFocus(idx, request_id, msg);
+            },
+
             // Phase 2 & 3: Need Swift data — queue as pending
             .system_identify,
             .surface_list,
             .surface_split,
-            .surface_focus,
             .workspace_list,
             .workspace_current,
             => {
@@ -827,6 +830,29 @@ pub const TextTapServer = struct {
             return;
         };
         if (pane < 64) self.active_send_panes |= @as(u64, 1) << @intCast(pane);
+
+        var buf: [128]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":true,\"result\":{{}}}}\n", .{request_id}) catch return;
+        self.respond(idx, resp);
+    }
+
+    /// Handle surface.focus — focus a specific pane by surface_id.
+    fn handleCmuxSurfaceFocus(self: *TextTapServer, idx: usize, request_id: []const u8, msg: []const u8) void {
+        const surface_id = extractQuotedValueStatic(msg, "surface_id") orelse {
+            var buf: [128]u8 = undefined;
+            const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":false,\"error\":\"missing surface_id\"}}\n", .{request_id}) catch return;
+            self.respond(idx, resp);
+            return;
+        };
+
+        const pane: usize = if (std.mem.startsWith(u8, surface_id, "surface-"))
+            std.fmt.parseInt(usize, surface_id["surface-".len..], 10) catch 0
+        else
+            0;
+
+        self.pending_commands.append(.{
+            .action = .{ .focus_pane = .{ .pane = pane } },
+        }) catch return;
 
         var buf: [128]u8 = undefined;
         const resp = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"ok\":true,\"result\":{{}}}}\n", .{request_id}) catch return;

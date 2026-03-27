@@ -1227,8 +1227,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     @IBAction func newTab(_ sender: Any?) {
         guard let surface = focusedSurface?.surface else { return }
-        // Create a new pane in the grid (to the right of the focused pane)
-        ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_RIGHT)
+        ghostty.newTab(surface: surface)
     }
 
 

@@ -259,6 +259,17 @@ final class Trm {
         return results
     }
 
+    /// Drain all pending focus_pane actions. Returns pane IDs to focus.
+    func drainFocusPaneIds() -> [Int] {
+        guard let h = handle else { return [] }
+        var results: [Int] = []
+        var paneId: UInt32 = 0
+        while termania_drain_focus_pane(h, &paneId) != 0 {
+            results.append(Int(paneId))
+        }
+        return results
+    }
+
     /// Poll the C API for a pending notification. Returns (title, body, paneId) or nil.
     /// paneId is the source pane that generated the notification, or -1 if unknown.
     func pollNotification() -> (title: String, body: String, paneId: Int)? {
@@ -372,6 +383,14 @@ final class Trm {
                         "arg2": browserAction.arg2,
                         "paneId": browserAction.paneId,
                     ]
+                )
+            }
+            // Drain focus_pane actions and post for BaseTerminalController.
+            for paneId in self.drainFocusPaneIds() {
+                NotificationCenter.default.post(
+                    name: .trmFocusPane,
+                    object: nil,
+                    userInfo: ["paneId": paneId]
                 )
             }
             // Drain cmux queries and post them for BaseTerminalController.

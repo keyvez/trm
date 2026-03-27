@@ -112,6 +112,10 @@ const CApp = struct {
     send_queue_lens: [8]u32 = .{0} ** 8,
     send_queue_count: u32 = 0,
 
+    // Pending focus_pane actions from text tap, to be drained by Swift.
+    focus_queue_panes: [8]u32 = .{0} ** 8,
+    focus_queue_count: u32 = 0,
+
     // cmux query buffer: pending queries from text tap for Swift to drain.
     cmux_query_methods: [8]u8 = .{0} ** 8,
     cmux_query_req_ids: [8][64]u8 = undefined,
@@ -387,6 +391,12 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
                         app.context_last_update_time = std.time.timestamp();
                         app.has_context_usage = true;
                     },
+                    .focus_pane => |fp| {
+                        if (app.focus_queue_count < app.focus_queue_panes.len) {
+                            app.focus_queue_panes[app.focus_queue_count] = @intCast(fp.pane);
+                            app.focus_queue_count += 1;
+                        }
+                    },
                     else => {},
                 }
             },
@@ -444,6 +454,29 @@ export fn termania_drain_send(
             app.send_queue_panes[i] = app.send_queue_panes[i + 1];
             app.send_queue_texts[i] = app.send_queue_texts[i + 1];
             app.send_queue_lens[i] = app.send_queue_lens[i + 1];
+        }
+    }
+
+    return 1;
+}
+
+/// Drain one pending focus_pane action. Returns 1 if one was available and
+/// writes the target pane ID to pane_id_out. Returns 0 if queue is empty.
+export fn termania_drain_focus_pane(
+    handle: ?*anyopaque,
+    pane_id_out: ?*u32,
+) u8 {
+    const app = getApp(handle) orelse return 0;
+    if (app.focus_queue_count == 0) return 0;
+
+    const out = pane_id_out orelse return 0;
+    out.* = app.focus_queue_panes[0];
+
+    app.focus_queue_count -= 1;
+    const remaining = app.focus_queue_count;
+    if (remaining > 0) {
+        for (0..remaining) |i| {
+            app.focus_queue_panes[i] = app.focus_queue_panes[i + 1];
         }
     }
 
