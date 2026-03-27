@@ -2383,8 +2383,16 @@ class BaseTerminalController: NSWindowController,
 
     @objc private func handleFocusPane(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
-              let paneId = userInfo["paneId"] as? Int else { return }
-        guard let surface = gridSurfaces.first(where: { ($0.paneId ?? -1) == paneId }) else { return }
+              let paneId = userInfo["paneId"] as? Int else {
+            Ghostty.logger.warning("handleFocusPane: missing or wrong-type paneId in userInfo=\(String(describing: notification.userInfo))")
+            return
+        }
+        let knownIds = gridSurfaces.map { $0.paneId ?? -1 }
+        guard let surface = gridSurfaces.first(where: { ($0.paneId ?? -1) == paneId }) else {
+            Ghostty.logger.warning("handleFocusPane: no surface with paneId=\(paneId), known=\(knownIds)")
+            return
+        }
+        Ghostty.logger.debug("handleFocusPane: focusing paneId=\(paneId)")
         focusSurface(surface)
     }
 

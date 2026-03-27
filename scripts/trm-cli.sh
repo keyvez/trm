@@ -30,6 +30,7 @@
 #   capabilities                 List cmux methods
 #   send-key --key K             Send a named key (cmux protocol)
 #   send-text --text T           Send text (cmux protocol)
+#   focus-surface --surface S    Focus a surface by ID
 
 set -e
 
@@ -146,6 +147,7 @@ cmux-compatible commands:
   capabilities                      List supported cmux methods
   send-key --key K [--surface S]    Send a named key (Enter, Tab, Up, etc.)
   send-text --text T [--surface S]  Send text via cmux protocol
+  focus-surface --surface S         Focus a surface by ID (e.g. surface-2)
 
 Environment:
   TRM_SOCKET_PATH   Override socket path (default: /tmp/trm.sock)
@@ -417,6 +419,23 @@ HELP
         else
             send_to_socket "{\"id\":\"cli-sk\",\"method\":\"surface.send_key\",\"params\":{\"key\":\"$KEY_ESC\"}}"
         fi
+        ;;
+
+    focus-surface)
+        shift
+        SURFACE=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --surface) SURFACE="$2"; shift 2 ;;
+                *) echo "Unknown option: $1" >&2; exit 1 ;;
+            esac
+        done
+        if [ -z "$SURFACE" ]; then
+            echo "Error: --surface is required (e.g. --surface surface-2)" >&2
+            exit 1
+        fi
+        SURFACE_ESC=$(json_escape "$SURFACE")
+        send_to_socket "{\"id\":\"cli-fs\",\"method\":\"surface.focus\",\"params\":{\"surface_id\":\"$SURFACE_ESC\"}}"
         ;;
 
     send-text)
