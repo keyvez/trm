@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Watermark hover shine**: Moving the mouse into or out of a pane triggers a single watermark flash — the same highlight animation used when a pane gains focus. Works for both regular and stacked sub-panes.
+- **`surface.list` pid field**: Each surface entry now includes a `"pid"` field with the child process ID of the pane.
 - **Startup session dialog**: trm now shows a dialog at launch whenever there is an auto-saved session to restore. The dialog shows the pane count, process list, and save timestamp. When `--config` was also passed, a third button lets you open that file instead. Previously the dialog only appeared when both an autosave and `--config` were present.
 - **`start-claude` script**: `scripts/start-claude.sh` launches trm with a multi-pane layout and automatically starts Claude Code in the last pane, then focuses it after a configurable delay (default 3 s). Options: `--panes N`, `--delay S`, `--session PATH`, `--no-focus`.
 - **Claude session**: `sessions/claude.toml` — a 2×2 grid session where the bottom-right pane auto-starts `claude`.

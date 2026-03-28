@@ -598,6 +598,10 @@ final class Trm {
     /// The userInfo key "paneId" contains the Int pane ID to highlight.
     static let highlightPane = Notification.Name("TrmHighlightPane")
 
+    /// Notification posted when the mouse enters or exits a pane.
+    /// userInfo keys: "paneId" (Int), "hovering" (Bool — true=enter, false=exit).
+    static let hoverPane = Notification.Name("TrmHoverPane")
+
     /// Set the watermark text for a pane.
     func setWatermark(forPaneId paneId: UInt32, text: String) {
         guard let h = handle else { return }

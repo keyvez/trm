@@ -328,6 +328,13 @@ struct TrmGridView: View {
                 alignment: .bottom
             )
         }
+        .onHover { hovering in
+            NotificationCenter.default.post(
+                name: Trm.hoverPane,
+                object: nil,
+                userInfo: ["paneId": paneId, "hovering": hovering]
+            )
+        }
     }
 
     /// A webview pane with navigation controls, URL bar, and action buttons.
@@ -485,6 +492,13 @@ struct TrmGridView: View {
             .overlay(watermarkOverlay(forPaneId: paneId))
             .overlay(servicePluginOverlays(forPaneId: paneId))
             .overlay(liveSummaryOverlay(forPaneId: paneId), alignment: .bottom)
+            .onHover { hovering in
+                NotificationCenter.default.post(
+                    name: Trm.hoverPane,
+                    object: nil,
+                    userInfo: ["paneId": paneId, "hovering": hovering]
+                )
+            }
             )
         case .webview(let webviewPane):
             return AnyView(webviewPaneView(webviewPane))

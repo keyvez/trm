@@ -2453,11 +2453,13 @@ class BaseTerminalController: NSWindowController,
             let escapedTitle = title
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
+            let childPid = Trm.shared.paneChildPid(paneId: UInt32(paneId))
             entries.append(
                 "{\"surface_id\":\"surface-\(paneId)\"," +
                 "\"pane_id\":\"\(paneId)\"," +
                 "\"title\":\"\(escapedTitle)\"," +
                 "\"focused\":\(isFocused)," +
+                "\"pid\":\(childPid)," +
                 "\"workspace_id\":\"workspace-0\"," +
                 "\"window_id\":\"window-0\"}"
             )

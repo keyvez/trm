@@ -31,6 +31,11 @@ struct WatermarkView: View {
                           pid == paneId else { return }
                     flashHighlight()
                 }
+                .onReceive(NotificationCenter.default.publisher(for: Trm.hoverPane)) { notification in
+                    guard let pid = notification.userInfo?["paneId"] as? Int,
+                          pid == paneId else { return }
+                    flashHighlight()
+                }
                 .onAppear {
                     opacity = Self.baselineOpacity
                 }
