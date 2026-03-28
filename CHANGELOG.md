@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Startup session dialog**: trm now shows a dialog at launch whenever there is an auto-saved session to restore. The dialog shows the pane count, process list, and save timestamp. When `--config` was also passed, a third button lets you open that file instead. Previously the dialog only appeared when both an autosave and `--config` were present.
+- **`start-claude` script**: `scripts/start-claude.sh` launches trm with a multi-pane layout and automatically starts Claude Code in the last pane, then focuses it after a configurable delay (default 3 s). Options: `--panes N`, `--delay S`, `--session PATH`, `--no-focus`.
+- **Claude session**: `sessions/claude.toml` — a 2×2 grid session where the bottom-right pane auto-starts `claude`.
+
+### Fixed
+
+- **`surface.focus` RPC**: The `surface.focus` cmux RPC now correctly focuses the target pane. Three bugs fixed: (1) pane ID lookup in `handleFocusPane` fell back to grid index when `paneId` is nil (matching the same logic as `surface.list`), (2) `focusSurface` now always calls `NSApp.activate` so the trm window comes to front even when another app is focused, (3) `TerminalWindowRestoration` skips macOS native window restoration when `TRM_CONFIG` is set, preventing stale surfaces from a prior session from interfering with a freshly-requested config.
+- **`surface.list` duplicate responses**: When multiple windows exist and none is the main window (e.g. trm is in the background), only the first (oldest) controller now responds to cmux queries. Previously both controllers responded, producing duplicate surface entries.
+
 ## 0.2.4 (2026-03-12)
 
 ### Added

@@ -103,6 +103,13 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
             return
         }
 
+        // If a specific session file was requested via TRM_CONFIG, skip macOS
+        // window restoration so the requested session opens cleanly.
+        if ProcessInfo.processInfo.environment["TRM_CONFIG"] != nil {
+            completionHandler(nil, nil)
+            return
+        }
+
         // Decode the state. If we can't decode the state, then we can't restore.
         guard let state = TerminalRestorableState(coder: state) else {
             completionHandler(nil, TerminalRestoreError.stateDecodeFailed)

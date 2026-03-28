@@ -1857,9 +1857,7 @@ class BaseTerminalController: NSWindowController,
         DispatchQueue.main.async {
             Ghostty.moveFocus(to: view)
             view.window?.makeKeyAndOrderFront(nil)
-            if !NSApp.isActive {
-                NSApp.activate(ignoringOtherApps: true)
-            }
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
@@ -2387,8 +2385,13 @@ class BaseTerminalController: NSWindowController,
             Ghostty.logger.warning("handleFocusPane: missing or wrong-type paneId in userInfo=\(String(describing: notification.userInfo))")
             return
         }
-        let knownIds = gridSurfaces.map { $0.paneId ?? -1 }
-        guard let surface = gridSurfaces.first(where: { ($0.paneId ?? -1) == paneId }) else {
+        // Match by paneId if set, otherwise fall back to grid index — same
+        // mapping used in buildCmuxSurfaceListResponse (paneId ?? index).
+        let surfaces = gridSurfaces
+        let knownIds = surfaces.enumerated().map { idx, s in s.paneId ?? idx }
+        guard let surface = surfaces.enumerated().first(where: { idx, s in
+            (s.paneId ?? idx) == paneId
+        })?.element else {
             Ghostty.logger.warning("handleFocusPane: no surface with paneId=\(paneId), known=\(knownIds)")
             return
         }
@@ -2403,16 +2406,18 @@ class BaseTerminalController: NSWindowController,
               let clientIdx = userInfo["clientIdx"] as? UInt32 else { return }
 
         // Only one controller should respond to avoid duplicate responses.
-        // Prefer the main window; if no window is main (e.g., trm is in the
-        // background), fall back to any controller that has a window.
-        if let w = window {
-            if !w.isMainWindow {
-                // Check if another controller owns the main window.
-                let mainExists = NSApp.windows.contains { $0.isMainWindow && $0.windowController is BaseTerminalController && $0 !== w }
-                if mainExists { return }
+        // Prefer the main window; otherwise use the first (oldest) controller.
+        guard window != nil else { return }
+        let allControllers = TerminalController.all
+        if allControllers.count > 1 {
+            // If this window is main, respond. If another is main, defer to it.
+            // If none is main, only the first controller in the list responds.
+            let mainController = allControllers.first { $0.window?.isMainWindow == true }
+            if let main = mainController {
+                if self !== main { return }
+            } else {
+                if self !== allControllers.first { return }
             }
-        } else {
-            return
         }
 
         let json: String
@@ -3832,9 +3837,17 @@ class BaseTerminalController: NSWindowController,
         contextUsageManager.start()
 
         // Setup initial panes from termania.toml config — but skip if we
-        // were created with an existing surface tree (e.g., a popped-out pane).
+        // were created with an existing surface tree (e.g., a popped-out pane or
+        // macOS window restoration). In the external-tree case, assign pane IDs
+        // to any surfaces that don't already have one so the focus RPC works.
         if hasExternalSurfaceTree {
             hasExternalSurfaceTree = false
+            // Assign pane IDs to surfaces that don't have one (e.g. macOS-restored
+            // surfaces created without going through allocPaneId). This lets the
+            // focus RPC match surfaces by pane ID.
+            for surface in gridSurfaces where surface.paneId == nil {
+                surface.paneId = Trm.shared.allocPaneId()
+            }
         } else {
             setupInitialPanes()
         }

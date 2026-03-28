@@ -386,7 +386,12 @@ final class Trm {
                 )
             }
             // Drain focus_pane actions and post for BaseTerminalController.
-            for paneId in self.drainFocusPaneIds() {
+            let focusPaneIds = self.drainFocusPaneIds()
+            if !focusPaneIds.isEmpty {
+                Ghostty.logger.debug("poll: drainFocusPaneIds returned \(focusPaneIds)")
+            }
+            for paneId in focusPaneIds {
+                Ghostty.logger.debug("poll: posting trmFocusPane paneId=\(paneId)")
                 NotificationCenter.default.post(
                     name: .trmFocusPane,
                     object: nil,

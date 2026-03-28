@@ -1,0 +1,16 @@
+title = "Focus RPC Test"
+session_persistence = false
+
+[grid]
+rows = 1
+cols = 3
+
+[[panes]]
+command = "/bin/zsh"
+
+[[panes]]
+command = "/bin/zsh"
+
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]

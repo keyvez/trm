@@ -212,6 +212,86 @@ enum SessionManager {
     /// at startup (each terminal pane spawns a PTY + Ghostty surface).
     private static let maxAutoRestorePanes = 20
 
+    /// Snapshot of a single saved window, used for the startup dialog.
+    struct SavedWindowInfo {
+        let paneCount: Int
+        /// Short description of each pane (command or process, cwd, type).
+        let paneDescriptions: [String]
+        /// Path to the session TOML file.
+        let filePath: String
+    }
+
+    /// Information collected before restoring, for display in the startup dialog.
+    struct SessionStartupInfo {
+        /// Saved windows found in the auto-save (may be multiple).
+        let savedWindows: [SavedWindowInfo]
+        /// Timestamp string from the manifest.
+        let savedAt: String
+    }
+
+    /// Read the auto-save manifest and configs without restoring anything.
+    /// Returns nil if no valid auto-save exists.
+    static func peekAutoSave() -> SessionStartupInfo? {
+        let dir = sessionsDirectory
+        let manifestURL = dir.appendingPathComponent("_autosave_manifest.json")
+
+        if let data = try? Data(contentsOf: manifestURL),
+           let manifest = try? JSONDecoder().decode(AutoSaveManifest.self, from: data) {
+            var windows: [SavedWindowInfo] = []
+            for entry in manifest.entries {
+                let fileURL = dir.appendingPathComponent(entry.filename)
+                guard FileManager.default.fileExists(atPath: fileURL.path),
+                      let config = Trm.gridConfig(fromConfigPath: fileURL.path),
+                      isSafeForAutoRestore(config) else { continue }
+                windows.append(savedWindowInfo(from: config, filePath: fileURL.path))
+            }
+            if !windows.isEmpty {
+                return SessionStartupInfo(savedWindows: windows, savedAt: manifest.savedAt)
+            }
+        }
+
+        // Fallback: single-window auto-save
+        let lastURL = dir.appendingPathComponent("_autosave_last.toml")
+        guard FileManager.default.fileExists(atPath: lastURL.path),
+              let config = Trm.gridConfig(fromConfigPath: lastURL.path),
+              isSafeForAutoRestore(config) else { return nil }
+        return SessionStartupInfo(
+            savedWindows: [savedWindowInfo(from: config, filePath: lastURL.path)],
+            savedAt: ""
+        )
+    }
+
+    /// Build a SavedWindowInfo from a TrmGridConfig.
+    private static func savedWindowInfo(from config: Trm.TrmGridConfig, filePath: String) -> SavedWindowInfo {
+        let panes = config.panes.isEmpty
+            ? (0..<max(1, config.rows * config.cols)).map { _ in Trm.TrmPaneConfig(
+                paneType: "terminal", command: nil, cwd: nil, watermark: nil,
+                title: nil, url: nil, file: nil, content: nil, target: nil,
+                targetTitle: nil, path: nil, refreshMs: nil, repo: nil,
+                initialCommands: [], patterns: [], stackGroup: nil, scrollbackFile: nil
+            ) }
+            : config.panes
+        let descriptions = panes.map { pane -> String in
+            switch pane.paneType {
+            case "webview":
+                return "Browser: \(pane.url ?? pane.title ?? "untitled")"
+            case "terminal":
+                if let cmd = pane.command, !cmd.isEmpty {
+                    return cmd
+                }
+                if let cwd = pane.cwd, !cwd.isEmpty {
+                    // Show last 2 path components for brevity
+                    let parts = cwd.split(separator: "/").suffix(2)
+                    return parts.isEmpty ? cwd : parts.joined(separator: "/")
+                }
+                return "shell"
+            default:
+                return pane.paneType
+            }
+        }
+        return SavedWindowInfo(paneCount: panes.count, paneDescriptions: descriptions, filePath: filePath)
+    }
+
     /// Check whether a config is safe to auto-restore.
     private static func isSafeForAutoRestore(_ config: Trm.TrmGridConfig) -> Bool {
         let paneCount = config.panes.isEmpty

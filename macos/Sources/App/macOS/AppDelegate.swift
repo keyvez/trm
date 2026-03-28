@@ -337,23 +337,110 @@ class AppDelegate: NSObject,
             //   - if we're restoring from persisted state
             if TerminalController.all.isEmpty && derivedConfig.initialWindow {
                 undoManager.disableUndoRegistration()
-                // When session persistence is on, prefer auto-save restore because
-                // it contains daemon_session_id values for reconnecting to the daemon.
-                // The explicit --config path is only used as a fallback.
-                if ghostty.sessionPersistence,
-                   ghostty.config.windowSaveState != "never",
-                   SessionManager.restoreLastSession(ghostty: ghostty) {
-                    // Restored from auto-save with daemon session IDs.
-                } else if let configPath = launchConfigPath {
-                    // --config was passed: open a window with that session config.
-                    openNewWindow(cwd: FileManager.default.currentDirectoryPath, configPath: configPath)
-                } else if ghostty.config.windowSaveState != "never",
-                          SessionManager.restoreLastSession(ghostty: ghostty) {
-                    // Restored from auto-save — no need to open a blank window.
-                } else {
-                    _ = TerminalController.newWindow(ghostty)
-                }
+                MainActor.assumeIsolated { openInitialWindow() }
                 undoManager.enableUndoRegistration()
+            }
+        }
+    }
+
+    /// Decide what to open on first launch.
+    /// Always asks the user when there is an auto-saved session to restore.
+    @MainActor private func openInitialWindow() {
+        let canRestore = ghostty.config.windowSaveState != "never"
+        let savedInfo: SessionManager.SessionStartupInfo? = canRestore ? SessionManager.peekAutoSave() : nil
+        let configPath = launchConfigPath
+
+        // Auto-save exists: always ask the user what to do.
+        if let saved = savedInfo {
+            showStartupDialog(saved: saved, configPath: configPath)
+            return
+        }
+
+        // No auto-save. If a --config path was passed, open it directly.
+        if let cfgPath = configPath {
+            openNewWindow(cwd: FileManager.default.currentDirectoryPath, configPath: cfgPath)
+            return
+        }
+
+        // Nothing: open a blank window.
+        _ = TerminalController.newWindow(ghostty)
+    }
+
+    /// Show the startup dialog whenever there is an auto-saved session.
+    /// Offers: restore session, open config file (if --config was passed), or new window.
+    @MainActor private func showStartupDialog(saved: SessionManager.SessionStartupInfo, configPath: String?) {
+        // Build the saved-session description
+        let savedDesc: String = {
+            var lines: [String] = []
+            for (i, win) in saved.savedWindows.enumerated() {
+                let prefix = saved.savedWindows.count > 1 ? "Window \(i + 1): " : ""
+                let paneWord = win.paneCount == 1 ? "pane" : "panes"
+                let desc = win.paneDescriptions.prefix(4).joined(separator: ", ")
+                let tail = win.paneCount > 4 ? ", …" : ""
+                lines.append("\(prefix)\(win.paneCount) \(paneWord): \(desc)\(tail)")
+            }
+            if !saved.savedAt.isEmpty {
+                let isoFormatter = ISO8601DateFormatter()
+                isoFormatter.formatOptions = [.withInternetDateTime]
+                if let date = isoFormatter.date(from: saved.savedAt) {
+                    let df = DateFormatter()
+                    df.dateStyle = .short
+                    df.timeStyle = .short
+                    lines.append("Saved \(df.string(from: date))")
+                }
+            }
+            return lines.joined(separator: "\n")
+        }()
+
+        let alert = NSAlert()
+        alert.messageText = "Restore previous session?"
+        alert.alertStyle = .informational
+
+        if let cfgPath = configPath {
+            // Build the --config description
+            let configDesc: String = {
+                var lines: [String] = [(cfgPath as NSString).lastPathComponent]
+                if let config = Trm.gridConfig(fromConfigPath: cfgPath) {
+                    let paneCount = config.panes.isEmpty
+                        ? max(1, config.rows * config.cols)
+                        : config.panes.count
+                    let paneWord = paneCount == 1 ? "pane" : "panes"
+                    let descs = config.panes.prefix(4).map { pane -> String in
+                        if let cmd = pane.command, !cmd.isEmpty { return cmd }
+                        if pane.paneType != "terminal" { return pane.paneType }
+                        return "shell"
+                    }
+                    let tail = paneCount > 4 ? ", …" : ""
+                    let paneList = descs.isEmpty ? "" : ": \(descs.joined(separator: ", "))\(tail)"
+                    lines.append("\(paneCount) \(paneWord)\(paneList)")
+                }
+                return lines.joined(separator: "\n")
+            }()
+
+            alert.informativeText = "Previous session:\n\(savedDesc)\n\nConfig file:\n\(configDesc)"
+            alert.addButton(withTitle: "Restore Session")
+            alert.addButton(withTitle: "Open Config File")
+            alert.addButton(withTitle: "New Window")
+
+            let response = alert.runModal()
+            switch response {
+            case .alertFirstButtonReturn:
+                SessionManager.restoreLastSession(ghostty: ghostty)
+            case .alertSecondButtonReturn:
+                openNewWindow(cwd: FileManager.default.currentDirectoryPath, configPath: cfgPath)
+            default:
+                _ = TerminalController.newWindow(ghostty)
+            }
+        } else {
+            alert.informativeText = "Previous session:\n\(savedDesc)"
+            alert.addButton(withTitle: "Restore Session")
+            alert.addButton(withTitle: "New Window")
+
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                SessionManager.restoreLastSession(ghostty: ghostty)
+            } else {
+                _ = TerminalController.newWindow(ghostty)
             }
         }
     }

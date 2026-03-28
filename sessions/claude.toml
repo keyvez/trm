@@ -1,0 +1,22 @@
+title = "Claude Code"
+
+[grid]
+rows = 2
+cols = 2
+
+# Pane 1 — top-left shell
+[[panes]]
+command = "/bin/zsh"
+
+# Pane 2 — top-right shell
+[[panes]]
+command = "/bin/zsh"
+
+# Pane 3 — bottom-left shell
+[[panes]]
+command = "/bin/zsh"
+
+# Pane 4 — bottom-right: starts Claude Code
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]
