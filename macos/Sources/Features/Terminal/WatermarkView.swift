@@ -33,7 +33,8 @@ struct WatermarkView: View {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: Trm.hoverPane)) { notification in
                     guard let pid = notification.userInfo?["paneId"] as? Int,
-                          pid == paneId else { return }
+                          pid == paneId,
+                          notification.userInfo?["hovering"] as? Bool == true else { return }
                     flashHighlight()
                 }
                 .onAppear {

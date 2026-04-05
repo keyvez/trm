@@ -1107,6 +1107,20 @@ extension Ghostty {
         }
 
         override func keyDown(with event: NSEvent) {
+            // Escape → Dismiss peek overlay if a sub-pane is currently peeked.
+            // Intercept before any Zig core processing so the escape sequence
+            // is not sent to the terminal.
+            if event.keyCode == 0x35,
+               !event.modifierFlags.contains(.command),
+               !event.modifierFlags.contains(.control),
+               !event.modifierFlags.contains(.option) {
+                if let controller = self.window?.windowController as? BaseTerminalController,
+                   controller.peekedPane != nil {
+                    controller.dismissPeek()
+                    return
+                }
+            }
+
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
                 return

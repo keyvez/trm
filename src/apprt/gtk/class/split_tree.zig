@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = @import("../../../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const adw = @import("adw");
+const gdk = @import("gdk");
 const gio = @import("gio");
 const glib = @import("glib");
 const gobject = @import("gobject");
@@ -166,6 +167,10 @@ pub const SplitTree = extern struct {
         /// close dialog.
         pending_close: ?Surface.Tree.Node.Handle,
 
+        /// The "put-back" action whose enabled state tracks whether
+        /// the tree is zoomed.
+        put_back_action: ?*gio.SimpleAction = null,
+
         pub var offset: c_int = 0;
     };
 
@@ -192,7 +197,21 @@ pub const SplitTree = extern struct {
             .init("zoom", actionZoom, null),
         };
 
-        _ = ext.actions.addAsGroup(Self, self, "split-tree", &actions);
+        const group = ext.actions.addAsGroup(Self, self, "split-tree", &actions);
+
+        // Create the "put-back" action separately so we can manage its
+        // enabled state (disabled when not zoomed).
+        const put_back = gio.SimpleAction.new("put-back", null);
+        put_back.setEnabled(0);
+        _ = gio.SimpleAction.signals.activate.connect(
+            put_back,
+            *Self,
+            actionPutBack,
+            self,
+            .{},
+        );
+        group.as(gio.ActionMap).addAction(put_back.as(gio.Action));
+        self.private().put_back_action = put_back;
     }
 
     /// Create a new split in the given direction from the currently
@@ -367,6 +386,7 @@ pub const SplitTree = extern struct {
             const object = self.as(gobject.Object);
             object.notifyByPspec(properties.tree.impl.param_spec);
             object.notifyByPspec(properties.@"is-zoomed".impl.param_spec);
+            self.updatePutBackEnabled();
         }
 
         return true;
@@ -500,6 +520,15 @@ pub const SplitTree = extern struct {
     pub fn getIsZoomed(self: *Self) bool {
         const tree: *const Surface.Tree = self.private().tree orelse &.empty;
         return tree.zoomed != null;
+    }
+
+    /// Update the enabled state of the "put-back" action to reflect
+    /// the current zoom state.
+    fn updatePutBackEnabled(self: *Self) void {
+        const priv = self.private();
+        if (priv.put_back_action) |action| {
+            action.setEnabled(@intFromBool(self.getIsZoomed()));
+        }
     }
 
     /// Get the tree data model that we're showing in this widget. This
@@ -676,6 +705,39 @@ pub const SplitTree = extern struct {
         self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
     }
 
+    /// Action handler for "put-back": unzooms the currently zoomed split.
+    /// This action is only enabled when the tree is zoomed.
+    pub fn actionPutBack(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const tree = self.getTree() orelse return;
+        if (tree.zoomed == null) return;
+        tree.zoomed = null;
+        self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
+    }
+
+    /// Key press handler for the SplitTree. Captures the Escape key
+    /// in the capture phase to unzoom when the tree is zoomed.
+    fn ecKeyPressed(
+        _: *gtk.EventControllerKey,
+        keyval: c_uint,
+        _: c_uint,
+        _: gdk.ModifierType,
+        self: *Self,
+    ) callconv(.c) c_int {
+        if (keyval == gdk.KEY_Escape) {
+            const tree = self.getTree() orelse return 0;
+            if (tree.zoomed != null) {
+                tree.zoomed = null;
+                self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
+                return 1;
+            }
+        }
+        return 0;
+    }
+
     fn surfaceCloseRequest(
         surface: *Surface,
         self: *Self,
@@ -848,6 +910,7 @@ pub const SplitTree = extern struct {
         // Dependent properties
         self.as(gobject.Object).notifyByPspec(properties.@"has-surfaces".impl.param_spec);
         self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
+        self.updatePutBackEnabled();
     }
 
     fn onRebuild(ud: ?*anyopaque) callconv(.c) c_int {
@@ -948,6 +1011,7 @@ pub const SplitTree = extern struct {
 
             // Template Callbacks
             class.bindTemplateCallback("notify_tree", &propTree);
+            class.bindTemplateCallback("key_pressed", &ecKeyPressed);
 
             // Signals
             signals.changed.impl.register(.{});

@@ -166,7 +166,14 @@ class SurfaceScrollView: NSView {
     
     override func layout() {
         super.layout()
-        
+
+        // If the surface view lost its parent (e.g. a peek overlay that
+        // created a competing SurfaceScrollView has been dismissed and
+        // deallocated), reclaim it into our document view.
+        if surfaceView.superview == nil {
+            documentView.addSubview(surfaceView)
+        }
+
         // Fill entire bounds with scroll view
         scrollView.frame = bounds
         surfaceView.frame.size = scrollView.bounds.size

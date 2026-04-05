@@ -217,6 +217,14 @@ struct TrmGridView: View {
                     .allowsHitTesting(false)
             )
             .contextMenu {
+                if let onPeekPane {
+                    Button {
+                        onPeekPane(pane)
+                    } label: {
+                        Label("Peek Pane", systemImage: "rectangle.expand.vertical")
+                    }
+                    Divider()
+                }
                 paneMoveMenu(pane: pane, row: row, col: col)
                 if let pid = paneIdForPane(pane) {
                     Divider()
@@ -300,33 +308,38 @@ struct TrmGridView: View {
     /// - `paneId`: the stable Zig pane ID (monotonic u32, survives pane close/reorder)
     @ViewBuilder
     private func terminalPaneView(_ surface: Ghostty.SurfaceView, index: Int, paneId: Int) -> some View {
+        let isPeeked = peekedPane == ObjectIdentifier(surface)
         VStack(spacing: 0) {
-            // Drag bar above the terminal surface — uses an AppKit NSView
-            // to initiate drags, since SwiftUI .draggable gets swallowed
-            // by the GPU-rendered terminal surface below.
-            if panes.count > 1 {
-                PaneDragBar(surface: surface)
-                    .frame(height: 6)
-            }
+            // No drag bar for non-stacked panes — peek via context menu
+            // "Peek Pane", dismiss by clicking the scrim or pressing Escape.
 
-            Ghostty.InspectableSurface(
-                surfaceView: surface,
-                isSplit: panes.count > 1
-            )
-            .overlay(
-                paneControls(for: .terminal(surface)),
-                alignment: .topTrailing
-            )
-            .overlay(
-                watermarkOverlay(forPaneId: paneId)
-            )
-            .overlay(
-                servicePluginOverlays(forPaneId: paneId)
-            )
-            .overlay(
-                liveSummaryOverlay(forPaneId: paneId),
-                alignment: .bottom
-            )
+            if isPeeked {
+                // Placeholder while this pane is shown in the peek overlay.
+                // An NSView can only have one superview, so we must not
+                // render InspectableSurface here AND in the peek overlay.
+                Color.black.opacity(0.6)
+                    .overlay(watermarkOverlay(forPaneId: paneId))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Ghostty.InspectableSurface(
+                    surfaceView: surface,
+                    isSplit: panes.count > 1
+                )
+                .overlay(
+                    paneControls(for: .terminal(surface)),
+                    alignment: .topTrailing
+                )
+                .overlay(
+                    watermarkOverlay(forPaneId: paneId)
+                )
+                .overlay(
+                    servicePluginOverlays(forPaneId: paneId)
+                )
+                .overlay(
+                    liveSummaryOverlay(forPaneId: paneId),
+                    alignment: .bottom
+                )
+            }
         }
         .onHover { hovering in
             NotificationCenter.default.post(
@@ -422,28 +435,18 @@ struct TrmGridView: View {
         VStack(spacing: 1) {
             ForEach(Array(children.enumerated()), id: \.element.id) { idx, child in
                 VStack(spacing: 0) {
-                    // Drag bar at the top of each sub-pane — only this is draggable
-                    if case .terminal(let surface) = child {
-                        StackDragBar(
-                            onPeek: {
+                    // Only the first sub-pane gets a drag bar.
+                    // Uses AppKit PaneDragBar which handles both drag
+                    // and double-click (peek) reliably.
+                    if idx == 0, case .terminal(let surface) = child {
+                        PaneDragBar(surface: surface, onPeek: {
+                            if peekedPane == child.id {
+                                onDismissPeek?()
+                            } else {
                                 onPeekPane?(child)
                             }
-                        )
-                        .draggable(surface) {
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color(nsColor: .windowBackgroundColor))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1.5)
-                                )
-                                .frame(width: 120, height: 80)
-                        }
-                    } else {
-                        StackDragBar(
-                            onPeek: {
-                                onPeekPane?(child)
-                            }
-                        )
+                        })
+                            .frame(height: 6)
                     }
 
                     // The actual pane content
@@ -481,7 +484,22 @@ struct TrmGridView: View {
     ///
     /// Returns `AnyView` to break the recursive type expansion that otherwise
     /// causes the Swift type checker to hang during release-mode compilation.
+    ///
+    /// When a pane is being peeked (shown in the overlay), we render a
+    /// placeholder here instead of the live surface. An NSView can only have
+    /// one superview, so rendering the same `SurfaceView` in both the stack
+    /// cell and the peek overlay would cause the peek to steal the view, and
+    /// dismissing the peek would leave the stack cell empty.
     private func stackChildContent(_ pane: GridPane) -> AnyView {
+        // If this pane is currently being peeked, show a placeholder so the
+        // live NSView is only rendered in the peek overlay.
+        if peekedPane == pane.id {
+            return AnyView(
+                Color.black.opacity(0.6)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            )
+        }
+
         switch pane {
         case .terminal(let surface):
             let paneId = surface.paneId ?? 0
@@ -532,6 +550,14 @@ struct TrmGridView: View {
                         surfaceView: surface,
                         isSplit: false
                     )
+                    .overlay(watermarkOverlay(forPaneId: surface.paneId ?? 0))
+                    .contextMenu {
+                        Button {
+                            onDismissPeek?()
+                        } label: {
+                            Label("Put Back", systemImage: "arrow.uturn.backward")
+                        }
+                    }
                     .frame(width: geo.size.width * 0.5, height: geo.size.height)
                     .cornerRadius(TrmBorder.radius)
                     .overlay(
@@ -843,9 +869,6 @@ private struct StackDragBar: View {
         .onHover { hovering in
             isHovering = hovering
         }
-        .onTapGesture(count: 2) {
-            onPeek()
-        }
         .help("Double-click to peek")
     }
 }
@@ -858,25 +881,31 @@ private struct StackDragBar: View {
 /// swallowed by the NSView-backed surface).
 private struct PaneDragBar: NSViewRepresentable {
     let surface: Ghostty.SurfaceView
+    var onPeek: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> DragBarNSView {
         let view = DragBarNSView()
         view.surface = surface
+        view.onPeek = onPeek
         return view
     }
 
     func updateNSView(_ nsView: DragBarNSView, context: Context) {
         nsView.surface = surface
+        nsView.onPeek = onPeek
     }
 }
 
 /// AppKit view that renders grip dots and initiates an NSDraggingSession on drag.
 private final class DragBarNSView: NSView, NSDraggingSource {
     var surface: Ghostty.SurfaceView?
+    var onPeek: (() -> Void)?
     private var isHovering = false
     private var dragStart: NSPoint?
 
     override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var acceptsFirstResponder: Bool { true }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -898,10 +927,6 @@ private final class DragBarNSView: NSView, NSDraggingSource {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let bgAlpha: CGFloat = isHovering ? 0.8 : 0.6
-        NSColor.windowBackgroundColor.withAlphaComponent(bgAlpha).setFill()
-        dirtyRect.fill()
-
         let dotAlpha: CGFloat = isHovering ? 0.6 : 0.3
         let dotColor = NSColor.secondaryLabelColor.withAlphaComponent(dotAlpha)
         let dotSize: CGFloat = 3
@@ -935,6 +960,11 @@ private final class DragBarNSView: NSView, NSDraggingSource {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            dragStart = nil
+            onPeek?()
+            return
+        }
         dragStart = convert(event.locationInWindow, from: nil)
     }
 

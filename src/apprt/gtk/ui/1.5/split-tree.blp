@@ -5,6 +5,11 @@ template $GhosttySplitTree: Box {
   notify::tree => $notify_tree();
   orientation: vertical;
 
+  EventControllerKey {
+    propagation-phase: capture;
+    key-pressed => $key_pressed();
+  }
+
   Adw.Bin tree_bin {
     visible: bind template.has-surfaces;
     hexpand: true;
