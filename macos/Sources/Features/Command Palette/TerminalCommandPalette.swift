@@ -441,7 +441,7 @@ struct TerminalCommandPaletteView: View {
                 label: "trm.add_pane <type>",
                 insertion: "trm.add_pane ",
                 subtitle: "Add a new pane to the grid",
-                description: "Dynamically insert a new pane into the current grid. Types: terminal, webview, notes, git_status, file_browser, log_viewer, process_monitor, markdown_preview, system_info, screen_capture."
+                description: "Dynamically insert a new pane into the current grid. Types: terminal, webview, notes, git_status, file_browser, log_viewer, process_monitor, markdown_preview, system_info."
             ),
             CommandAutocompleteOption(
                 label: "trm.add_pane terminal",

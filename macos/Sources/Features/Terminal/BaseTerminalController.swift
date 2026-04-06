@@ -3264,7 +3264,7 @@ class BaseTerminalController: NSWindowController,
         guard let kind = PluginPaneKind.fromPaneType(rawType) else {
             presentInternalCommandError(
                 title: "Unknown Pane Type",
-                message: "'\(rawType)' is not a recognized pane type.\n\nAvailable types: terminal, webview, notes, git_status, file_browser, log_viewer, process_monitor, markdown_preview, system_info, screen_capture"
+                message: "'\(rawType)' is not a recognized pane type.\n\nAvailable types: terminal, webview, notes, git_status, file_browser, log_viewer, process_monitor, markdown_preview, system_info"
             )
             return
         }
@@ -4141,7 +4141,7 @@ class BaseTerminalController: NSWindowController,
             return "terminal"
         case "browser", "webview":
             return "webview"
-        case "notes", "screen_capture", "file_browser", "process_monitor",
+        case "notes", "file_browser", "process_monitor",
              "log_viewer", "markdown_preview", "system_info", "git_status":
             return rawType.lowercased()
         default:

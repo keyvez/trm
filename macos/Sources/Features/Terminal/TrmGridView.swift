@@ -1175,25 +1175,6 @@ private struct PluginPaneContainerView: View {
                         .padding(12)
                 }
             }
-        case .screenCapture:
-            if let screenshot = pane.screenshot {
-                GeometryReader { proxy in
-                    VStack {
-                        Image(nsImage: screenshot)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: proxy.size.width, maxHeight: proxy.size.height)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            } else {
-                ScrollView {
-                    Text(pane.bodyText)
-                        .font(.system(size: 12, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                }
-            }
         default:
             ScrollView {
                 Text(pane.bodyText)

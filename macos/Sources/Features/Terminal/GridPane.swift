@@ -1,12 +1,10 @@
 import SwiftUI
 import AppKit
 import Foundation
-import CoreGraphics
 import GhosttyKit
 
 enum PluginPaneKind: String {
     case notes
-    case screenCapture = "screen_capture"
     case fileBrowser = "file_browser"
     case processMonitor = "process_monitor"
     case logViewer = "log_viewer"
@@ -21,7 +19,6 @@ enum PluginPaneKind: String {
     var title: String {
         switch self {
         case .notes: return "Notes"
-        case .screenCapture: return "Screen Capture"
         case .fileBrowser: return "File Browser"
         case .processMonitor: return "Process Monitor"
         case .logViewer: return "Log Viewer"
@@ -36,7 +33,6 @@ enum PluginPaneKind: String {
 final class PluginPane: ObservableObject, Identifiable {
     private struct Snapshot {
         let text: String
-        let image: NSImage?
     }
 
     let id = UUID()
@@ -53,7 +49,6 @@ final class PluginPane: ObservableObject, Identifiable {
 
     @Published var notesText: String
     @Published var bodyText: String = ""
-    @Published var screenshot: NSImage? = nil
     @Published var lastUpdated: Date? = nil
 
     private var timer: Timer? = nil
@@ -100,7 +95,6 @@ final class PluginPane: ObservableObject, Identifiable {
                 let snapshot = self.buildSnapshot()
                 DispatchQueue.main.async {
                     self.bodyText = snapshot.text
-                    self.screenshot = snapshot.image
                     self.lastUpdated = Date()
                 }
             }
@@ -118,7 +112,6 @@ final class PluginPane: ObservableObject, Identifiable {
 
     private var defaultRefreshMs: UInt64? {
         switch kind {
-        case .screenCapture: return 2000
         case .processMonitor: return 3000
         case .logViewer: return 2000
         case .systemInfo: return 5000
@@ -130,21 +123,19 @@ final class PluginPane: ObservableObject, Identifiable {
     private func buildSnapshot() -> Snapshot {
         switch kind {
         case .fileBrowser:
-            return Snapshot(text: fileBrowserText(), image: nil)
+            return Snapshot(text: fileBrowserText())
         case .processMonitor:
-            return Snapshot(text: runShellCommand("ps -axo pid,ppid,%cpu,%mem,comm | head -n 25", cwd: resolvedDirectory()), image: nil)
+            return Snapshot(text: runShellCommand("ps -axo pid,ppid,%cpu,%mem,comm | head -n 25", cwd: resolvedDirectory()))
         case .logViewer:
-            return Snapshot(text: logViewerText(), image: nil)
+            return Snapshot(text: logViewerText())
         case .markdownPreview:
-            return Snapshot(text: markdownSourceText(), image: nil)
+            return Snapshot(text: markdownSourceText())
         case .systemInfo:
-            return Snapshot(text: systemInfoText(), image: nil)
+            return Snapshot(text: systemInfoText())
         case .gitStatus:
-            return Snapshot(text: gitStatusText(), image: nil)
-        case .screenCapture:
-            return screenCaptureSnapshot()
+            return Snapshot(text: gitStatusText())
         case .notes:
-            return Snapshot(text: notesText, image: nil)
+            return Snapshot(text: notesText)
         }
     }
 
@@ -226,13 +217,6 @@ final class PluginPane: ObservableObject, Identifiable {
         return "Repository: \(directory)\n\n\(status)"
     }
 
-    private func screenCaptureSnapshot() -> Snapshot {
-        guard let cgImage = CGDisplayCreateImage(CGMainDisplayID()) else {
-            return Snapshot(text: "Screen capture failed. Check Screen Recording permission in macOS Settings.", image: nil)
-        }
-        let image = NSImage(cgImage: cgImage, size: .zero)
-        return Snapshot(text: "", image: image)
-    }
 
     private func runShellCommand(_ command: String, cwd: String?) -> String {
         let process = Process()

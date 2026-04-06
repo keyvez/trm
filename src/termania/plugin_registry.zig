@@ -16,12 +16,11 @@ pub const PluginEntry = struct {
     pane_type: PaneType,
 };
 
-/// All 10 built-in plugin types, registered at comptime.
+/// All 9 built-in plugin types, registered at comptime.
 pub const builtins = [_]PluginEntry{
     .{ .name = "terminal", .display_name = "Terminal", .pane_type = .terminal_pane },
     .{ .name = "webview", .display_name = "Web View", .pane_type = .webview },
     .{ .name = "notes", .display_name = "Notes", .pane_type = .notes },
-    .{ .name = "screen_capture", .display_name = "Screen Capture", .pane_type = .screen_capture },
     .{ .name = "file_browser", .display_name = "File Browser", .pane_type = .file_browser },
     .{ .name = "process_monitor", .display_name = "Process Monitor", .pane_type = .process_monitor },
     .{ .name = "log_viewer", .display_name = "Log Viewer", .pane_type = .log_viewer },
