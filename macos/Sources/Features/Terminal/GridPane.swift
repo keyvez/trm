@@ -220,8 +220,8 @@ final class PluginPane: ObservableObject, Identifiable {
 
     private func runShellCommand(_ command: String, cwd: String?) -> String {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", command]
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
         if let cwd {
             process.currentDirectoryURL = URL(fileURLWithPath: cwd)
         }
