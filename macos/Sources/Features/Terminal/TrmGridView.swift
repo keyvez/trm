@@ -101,6 +101,15 @@ struct TrmGridView: View {
     /// `row`/`col` identify the left column; `fraction` is the new width fraction for that column.
     var onResizeCol: ((Int, Int, CGFloat) -> Void)? = nil
 
+    /// Per-stack sub-pane height fractions, keyed by the stack pane's ObjectIdentifier.
+    /// Each value is an array (length == number of children) summing to 1.0.
+    var stackHeightFractions: [ObjectIdentifier: [CGFloat]] = [:]
+
+    /// Called when the user drags a divider between sub-panes in a stack.
+    /// `stackID` identifies the stack cell; `subIdx` is the upper sub-pane index;
+    /// `fraction` is the new height fraction for that sub-pane.
+    var onResizeStack: ((ObjectIdentifier, Int, CGFloat) -> Void)? = nil
+
     @FocusedValue(\.ghosttySurfaceView) private var focusedSurface
 
     /// Bumped when a watermark changes to force the overlay to re-evaluate.
@@ -194,6 +203,10 @@ struct TrmGridView: View {
                     let availH = geo.size.height - padding * 2 - gap * CGFloat(nRows - 1)
                     let availW = geo.size.width - padding * 2
 
+                    // Pre-compute row Y prefix sums (O(n)) so ForEach closures don't each do O(n) reduce.
+                    let rowHeights: [CGFloat] = heightFracs.map { availH * $0 }
+                    let rowYOffsets: [CGFloat] = prefixSums(rowHeights, spacing: gap)
+
                     ZStack(alignment: .topLeading) {
                         // Pane cells
                         ForEach(Array(rows.enumerated()), id: \.offset) { rowIdx, row in
@@ -202,14 +215,18 @@ struct TrmGridView: View {
                             let colFracs: [CGFloat] = (rawCF.count == nCols && rawCF.allSatisfy { $0 > 0 })
                                 ? rawCF
                                 : Array(repeating: 1.0 / CGFloat(nCols), count: nCols)
-                            let rowH = availH * heightFracs[rowIdx]
-                            let rowY = padding + (0..<rowIdx).reduce(0.0) { $0 + availH * heightFracs[$1] + gap }
+                            let rowH = rowHeights[rowIdx]
+                            let rowY = padding + rowYOffsets[rowIdx]
                             let rowAvailW = availW - gap * CGFloat(nCols - 1)
+
+                            // Pre-compute column X prefix sums for this row.
+                            let colWidths: [CGFloat] = colFracs.map { rowAvailW * $0 }
+                            let colXOffsets: [CGFloat] = prefixSums(colWidths, spacing: gap)
 
                             ForEach(Array(row.enumerated()), id: \.element.id) { colIdx, pane in
                                 let flatIndex = flatIndexFor(row: rowIdx, col: colIdx)
-                                let colW = rowAvailW * colFracs[colIdx]
-                                let colX = padding + (0..<colIdx).reduce(0.0) { $0 + rowAvailW * colFracs[$1] + gap }
+                                let colW = colWidths[colIdx]
+                                let colX = padding + colXOffsets[colIdx]
 
                                 paneCellView(pane, flatIndex: flatIndex, row: rowIdx, col: colIdx)
                                     .frame(width: colW, height: rowH)
@@ -220,12 +237,11 @@ struct TrmGridView: View {
                         // Horizontal dividers (between rows)
                         if onResizeRow != nil {
                             ForEach(0..<(nRows - 1), id: \.self) { rowIdx in
-                                let rowY = padding + (0..<(rowIdx + 1)).reduce(0.0) { $0 + availH * heightFracs[$1] + gap }
-                                let divH: CGFloat = max(gap, 8)
+                                let rowY = padding + rowYOffsets[rowIdx + 1]
+                                let divH: CGFloat = max(gap, 12)
                                 let hitY = rowY - gap / 2 - (divH - gap) / 2
-                                // Current fraction = top pane height / combined height of the two panes + gap
-                                let topH = availH * heightFracs[rowIdx]
-                                let botH = availH * heightFracs[rowIdx + 1]
+                                let topH = rowHeights[rowIdx]
+                                let botH = rowHeights[rowIdx + 1]
                                 let combinedH = topH + gap + botH
                                 let curFrac = combinedH > 0 ? topH / combinedH : 0.5
 
@@ -252,15 +268,19 @@ struct TrmGridView: View {
                                     ? rawCF
                                     : Array(repeating: 1.0 / CGFloat(nCols), count: nCols)
                                 let rowAvailW = availW - gap * CGFloat(nCols - 1)
-                                let rowH = availH * heightFracs[rowIdx]
-                                let rowY = padding + (0..<rowIdx).reduce(0.0) { $0 + availH * heightFracs[$1] + gap }
+                                let rowH = rowHeights[rowIdx]
+                                let rowY = padding + rowYOffsets[rowIdx]
+
+                                // Pre-compute column X prefix sums for divider placement.
+                                let colWidths: [CGFloat] = colFracs.map { rowAvailW * $0 }
+                                let colXOffsets: [CGFloat] = prefixSums(colWidths, spacing: gap)
 
                                 ForEach(0..<(nCols - 1), id: \.self) { colIdx in
-                                    let colX = padding + (0..<(colIdx + 1)).reduce(0.0) { $0 + rowAvailW * colFracs[$1] + gap }
-                                    let divW: CGFloat = max(gap, 8)
+                                    let colX = padding + colXOffsets[colIdx + 1]
+                                    let divW: CGFloat = max(gap, 12)
                                     let hitX = colX - gap / 2 - (divW - gap) / 2
-                                    let leftW = rowAvailW * colFracs[colIdx]
-                                    let rightW = rowAvailW * colFracs[colIdx + 1]
+                                    let leftW = colWidths[colIdx]
+                                    let rightW = colWidths[colIdx + 1]
                                     let combinedW = leftW + gap + rightW
                                     let curFrac = combinedW > 0 ? leftW / combinedW : 0.5
 
@@ -401,7 +421,7 @@ struct TrmGridView: View {
         case .plugin(let pluginPane):
             return AnyView(pluginPaneView(pluginPane))
         case .stack(let children):
-            return AnyView(stackedPaneView(children))
+            return AnyView(stackedPaneView(children, stackID: pane.id))
         }
     }
 
@@ -533,50 +553,76 @@ struct TrmGridView: View {
 
     /// Render a vertical stack of sub-panes sharing one grid cell.
     @ViewBuilder
-    private func stackedPaneView(_ children: [GridPane]) -> some View {
-        VStack(spacing: 1) {
-            ForEach(Array(children.enumerated()), id: \.element.id) { idx, child in
-                VStack(spacing: 0) {
-                    // Only the first sub-pane gets a drag bar.
-                    // Uses AppKit PaneDragBar which handles both drag
-                    // and double-click (peek) reliably.
-                    if idx == 0, case .terminal(let surface) = child {
-                        PaneDragBar(surface: surface, onPeek: {
-                            if peekedPane == child.id {
-                                onDismissPeek?()
-                            } else {
-                                onPeekPane?(child)
-                            }
-                        })
-                            .frame(height: 6)
-                    }
+    private func stackedPaneView(_ children: [GridPane], stackID: ObjectIdentifier) -> some View {
+        let n = children.count
+        let subGap: CGFloat = 1
+        let rawFracs = stackHeightFractions[stackID] ?? []
+        let fracs: [CGFloat] = (rawFracs.count == n && rawFracs.allSatisfy { $0 > 0 })
+            ? rawFracs
+            : Array(repeating: 1.0 / CGFloat(n), count: n)
 
-                    // The actual pane content
-                    stackChildContent(child)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                .overlay(
-                    // Bottom separator between sub-panes
-                    VStack {
-                        Spacer()
-                        if idx < children.count - 1 {
-                            Rectangle()
-                                .fill(TrmBorder.color)
-                                .frame(height: 1)
+        GeometryReader { geo in
+            let availH = geo.size.height - subGap * CGFloat(n - 1)
+            let subHeights: [CGFloat] = fracs.map { availH * $0 }
+            let subYOffsets: [CGFloat] = prefixSums(subHeights, spacing: subGap)
+
+            ZStack(alignment: .topLeading) {
+                // Sub-pane cells
+                ForEach(Array(children.enumerated()), id: \.element.id) { idx, child in
+                    let subH = subHeights[idx]
+                    let subY = subYOffsets[idx]
+
+                    VStack(spacing: 0) {
+                        // Only the first sub-pane gets a drag bar.
+                        if idx == 0, case .terminal(let surface) = child {
+                            PaneDragBar(surface: surface, onPeek: {
+                                if peekedPane == child.id {
+                                    onDismissPeek?()
+                                } else {
+                                    onPeekPane?(child)
+                                }
+                            })
+                            .frame(height: 6)
+                        }
+
+                        stackChildContent(child)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .contextMenu {
+                        Button {
+                            onUnstackPane?(child)
+                        } label: {
+                            Label("Restore Pane", systemImage: "arrow.up.left.and.arrow.down.right")
+                        }
+                        if let pid = paneIdForPane(child) {
+                            SwiftUI.Divider()
+                            pluginsMenu(forPaneId: pid)
                         }
                     }
-                    .allowsHitTesting(false)
-                )
-                .contextMenu {
-                    Button {
-                        onUnstackPane?(child)
-                    } label: {
-                        Label("Restore Pane", systemImage: "arrow.up.left.and.arrow.down.right")
-                    }
-                    if let pid = paneIdForPane(child) {
-                        Divider()
-                        pluginsMenu(forPaneId: pid)
-                    }
+                    .frame(width: geo.size.width, height: subH)
+                    .position(x: geo.size.width / 2, y: subY + subH / 2)
+                }
+
+                // Horizontal dividers between sub-panes
+                ForEach(0..<(n - 1), id: \.self) { idx in
+                    let divH: CGFloat = max(subGap, 12)
+                    let divY = subYOffsets[idx + 1] - subGap / 2 - (divH - subGap) / 2
+                    let topH = subHeights[idx]
+                    let botH = subHeights[idx + 1]
+                    let combinedH = topH + subGap + botH
+                    let curFrac = combinedH > 0 ? topH / combinedH : 0.5
+
+                    PaneDivider(
+                        axis: .horizontal,
+                        currentFraction: curFrac,
+                        combinedLength: combinedH,
+                        onDrag: { fraction in
+                            onResizeStack?(stackID, idx, fraction)
+                        }
+                    )
+                    .frame(width: geo.size.width, height: divH)
+                    .position(x: geo.size.width / 2, y: divY + divH / 2)
+                    .allowsHitTesting(onResizeStack != nil)
                 }
             }
         }
@@ -1528,4 +1574,16 @@ private struct ServerURLDropdownRow: View {
         }
         .help("Click to open. Shift-click to copy.")
     }
+}
+
+// MARK: - Layout Helpers
+
+/// Returns a prefix-sum array of offsets for `sizes` separated by `spacing`.
+/// prefixSums([a, b, c], spacing: g) → [0, a+g, a+g+b+g]
+private func prefixSums(_ sizes: [CGFloat], spacing: CGFloat) -> [CGFloat] {
+    var offsets = [CGFloat](repeating: 0, count: sizes.count)
+    for i in 1..<sizes.count {
+        offsets[i] = offsets[i - 1] + sizes[i - 1] + spacing
+    }
+    return offsets
 }

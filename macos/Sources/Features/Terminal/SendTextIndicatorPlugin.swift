@@ -52,6 +52,10 @@ final class SendTextIndicatorPlugin: ObservableObject, ServicePlugin, Observable
     /// Incremented each poll cycle to trigger SwiftUI re-evaluation.
     @Published var pollGeneration: UInt = 0
 
+    /// Last-seen client count and active-pane bitset, used to skip no-op publishes.
+    private var lastClientCount: Int = -1
+    private var lastActivePanes: UInt64 = 0
+
     // MARK: - ServicePluginOverlayProvider
 
     var overlayAlignment: Alignment { .bottomLeading }
@@ -75,9 +79,14 @@ final class SendTextIndicatorPlugin: ObservableObject, ServicePlugin, Observable
 
     // MARK: - Text Tap Polling
 
-    /// Trigger a SwiftUI refresh so `overlayView(forPaneId:)` re-evaluates.
+    /// Trigger a SwiftUI refresh so `overlayView(forPaneId:)` re-evaluates,
+    /// but only when the Text Tap connection state has actually changed.
     private func refreshActivePanes() {
         let clientCount = Trm.shared.textTapClientCount()
+        let activePanes = Trm.shared.textTapActivePaneBitset()
+        guard clientCount != lastClientCount || activePanes != lastActivePanes else { return }
+        lastClientCount = clientCount
+        lastActivePanes = activePanes
         if clientCount > 0 {
             Self.log.info("refreshActivePanes: \(clientCount) client(s) connected, gen=\(self.pollGeneration)")
         }

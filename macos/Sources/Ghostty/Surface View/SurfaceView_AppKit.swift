@@ -224,6 +224,11 @@ extension Ghostty {
         private var markedText: NSMutableAttributedString
         private(set) var focused: Bool = true
         private var prevPressureStage: Int = 0
+
+        // When a click is used to focus this pane (rather than interact with it),
+        // we suppress the paired mouseDown/mouseUp so the terminal doesn't see a
+        // spurious button press that would start a text selection.
+        private var suppressNextMouseButton: Bool = false
         private var appearanceObserver: NSKeyValueObservation? = nil
 
         // This is set to non-null during keyDown to accumulate insertText contents
@@ -906,6 +911,12 @@ extension Ghostty {
             // clicking a pane should always restore it.
             if !focused, let window = self.window {
                 window.makeFirstResponder(self)
+                // The click was a focus-transfer gesture, not a terminal interaction.
+                // Suppress both this press and the paired mouseUp so the terminal
+                // doesn't see a button press with no release (which would start a
+                // spurious drag-selection).
+                suppressNextMouseButton = true
+                return
             }
 
             guard let surface = self.surface else { return }
@@ -916,6 +927,12 @@ extension Ghostty {
         override func mouseUp(with event: NSEvent) {
             // Always reset our pressure when the mouse goes up
             prevPressureStage = 0
+
+            // Consume the mouseUp that pairs with a focus-transfer click.
+            if suppressNextMouseButton {
+                suppressNextMouseButton = false
+                return
+            }
 
             // If we have an active surface, report the event
             guard let surface = self.surface else { return }

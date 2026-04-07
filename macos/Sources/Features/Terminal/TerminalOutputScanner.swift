@@ -13,7 +13,7 @@ final class TerminalOutputScanner {
     var paneContentProvider: (() -> [(paneId: Int, visibleText: String)])?
 
     /// How often to poll (seconds).
-    var pollInterval: TimeInterval = 2.0
+    var pollInterval: TimeInterval = 3.0
 
     /// Optional filter: returns `true` if a plugin (by ID) is disabled for a pane.
     /// Set by `ServicePluginRegistry` so the scanner can skip notifications for

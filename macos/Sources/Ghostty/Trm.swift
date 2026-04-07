@@ -546,6 +546,13 @@ final class Trm {
         return termania_text_tap_active_panes(h)
     }
 
+    /// Returns the bitmask of panes currently targeted by a Text Tap client.
+    /// Bit N is set if pane N is active. Used for change-detection in SendTextIndicatorPlugin.
+    func textTapActivePaneBitset() -> UInt64 {
+        guard let h = handle else { return 0 }
+        return termania_text_tap_active_panes(h)
+    }
+
     /// Check if a specific pane is targeted by a Text Tap client (stable pane ID).
     func isTextTapActive(paneId: Int) -> Bool {
         guard let h = handle, paneId >= 0 else { return false }

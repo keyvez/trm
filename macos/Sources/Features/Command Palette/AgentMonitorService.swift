@@ -66,23 +66,30 @@ final class AgentMonitorService: ObservableObject, TerminalOutputSubscriber {
         return nil
     }
 
+    // MARK: - Static pre-compiled regexes (avoids per-call NSRegularExpression allocation)
+
+    private static let readingRegex = try! NSRegularExpression(pattern: #"(?:Reading|Read)\s+(.+)"#, options: .caseInsensitive)
+    private static let writingRegex = try! NSRegularExpression(pattern: #"(?:Writing|Wrote|Write)\s+(.+)"#, options: .caseInsensitive)
+    private static let editingRegex = try! NSRegularExpression(pattern: #"(?:Editing|Edit)\s+(.+)"#, options: .caseInsensitive)
+    private static let creatingRegex = try! NSRegularExpression(pattern: #"(?:Creating|Create)\s+(.+)"#, options: .caseInsensitive)
+
+    private static let filePatterns: [(regex: NSRegularExpression, verb: String)] = [
+        (readingRegex, "Reading"),
+        (writingRegex, "Writing"),
+        (editingRegex, "Editing"),
+        (creatingRegex, "Creating"),
+    ]
+
     /// Regex-based pattern detection for common agent activities.
     private func detectPattern(in line: String) -> String? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
 
         // File operations: "Reading src/main.swift", "Editing config.zig"
-        let filePatterns: [(pattern: String, verb: String)] = [
-            (#"(?:Reading|Read)\s+(.+)"#, "Reading"),
-            (#"(?:Writing|Wrote|Write)\s+(.+)"#, "Writing"),
-            (#"(?:Editing|Edit)\s+(.+)"#, "Editing"),
-            (#"(?:Creating|Create)\s+(.+)"#, "Creating"),
-        ]
-
-        for (pattern, verb) in filePatterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
-               let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
-               let range = Range(match.range(at: 1), in: trimmed) {
-                let path = String(trimmed[range]).trimmingCharacters(in: .whitespaces)
+        for (regex, verb) in Self.filePatterns {
+            let range = NSRange(trimmed.startIndex..., in: trimmed)
+            if let match = regex.firstMatch(in: trimmed, range: range),
+               let captureRange = Range(match.range(at: 1), in: trimmed) {
+                let path = String(trimmed[captureRange]).trimmingCharacters(in: .whitespaces)
                 let filename = (path as NSString).lastPathComponent
                 return "\(verb) \(filename)"
             }

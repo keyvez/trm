@@ -66,6 +66,9 @@ protocol TerminalViewModel: ObservableObject {
     /// Maps a host pane ID to the ordered list of stacked pane IDs.
     var paneStacks: [ObjectIdentifier: [ObjectIdentifier]] { get }
 
+    /// Per-stack sub-pane height fractions, keyed by the stack cell's ObjectIdentifier.
+    var stackSubPaneHeightFractions: [ObjectIdentifier: [CGFloat]] { get }
+
     /// The currently peeked sub-pane (expanded overlay), or nil.
     var peekedPane: ObjectIdentifier? { get }
 
@@ -186,6 +189,10 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         },
                         onResizeCol: { row, col, fraction in
                             (self.delegate as? BaseTerminalController)?.resizeGridCol(row, col: col, toFraction: fraction)
+                        },
+                        stackHeightFractions: viewModel.stackSubPaneHeightFractions,
+                        onResizeStack: { stackID, subIdx, fraction in
+                            (self.delegate as? BaseTerminalController)?.resizeStack(stackID, subIdx: subIdx, toFraction: fraction)
                         }
                     )
                     .environmentObject(ghostty)

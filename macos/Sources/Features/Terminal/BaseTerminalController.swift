@@ -150,6 +150,10 @@ class BaseTerminalController: NSWindowController,
     /// The currently peeked sub-pane (expanded overlay), or `nil` if no peek.
     @Published var peekedPane: ObjectIdentifier? = nil
 
+    /// Per-stack sub-pane height fractions, keyed by the stack cell's ObjectIdentifier.
+    /// Each value is an array (length == number of children) that sums to 1.0.
+    @Published var stackSubPaneHeightFractions: [ObjectIdentifier: [CGFloat]] = [:]
+
     /// All panes for the grid, in display order.
     /// Panes that are stacked inside another cell are filtered out, and the
     /// host cell is replaced with a `.stack([...])` containing the children.
@@ -1175,6 +1179,10 @@ class BaseTerminalController: NSWindowController,
         // If the stack is down to 1 pane, dissolve it.
         if let remaining = paneStacks[hostID], remaining.count <= 1 {
             paneStacks.removeValue(forKey: hostID)
+            stackSubPaneHeightFractions.removeValue(forKey: hostID)
+        } else {
+            // Stack shrunk — reset fractions to equal so they re-normalize.
+            stackSubPaneHeightFractions.removeValue(forKey: hostID)
         }
 
         // Add the pane back to the grid as its own cell.
@@ -1221,6 +1229,26 @@ class BaseTerminalController: NSWindowController,
         while all.count <= row { all.append([]) }
         all[row] = rowFracs
         gridColWidthFractions = all
+    }
+
+    /// Resize sub-pane `subIdx` in stack `stackID` so it takes `fraction` of the
+    /// combined height of sub-panes `subIdx` and `subIdx+1`. The adjacent sub-pane absorbs
+    /// the remainder.
+    func resizeStack(_ stackID: ObjectIdentifier, subIdx: Int, toFraction fraction: CGFloat) {
+        guard let children = paneStacks[stackID] else { return }
+        let n = children.count
+        guard subIdx >= 0, subIdx < n - 1 else { return }
+        var fracs: [CGFloat]
+        if let existing = stackSubPaneHeightFractions[stackID], existing.count == n {
+            fracs = existing
+        } else {
+            fracs = Array(repeating: 1.0 / CGFloat(n), count: n)
+        }
+        let combined = fracs[subIdx] + fracs[subIdx + 1]
+        let newThis = min(max(fraction * combined, 0.05 * combined), 0.95 * combined)
+        fracs[subIdx] = newThis
+        fracs[subIdx + 1] = combined - newThis
+        stackSubPaneHeightFractions[stackID] = fracs
     }
 
     /// Returns the current row height fractions, resetting to equal if stale.

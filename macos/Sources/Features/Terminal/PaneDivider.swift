@@ -64,7 +64,9 @@ final class DividerNSView: NSView {
     private var dragStartPoint: CGFloat = 0
     private var dragStartFraction: CGFloat = 0
 
-    override var isFlipped: Bool { true }
+    // NSView default is Y=0 at bottom (unflipped). locationInWindow is also
+    // Y=0 at bottom, so convert(locationInWindow, from: nil) needs no flip.
+    override var isFlipped: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override init(frame: NSRect) {
@@ -80,7 +82,7 @@ final class DividerNSView: NSView {
     private func setupTracking() {
         let area = NSTrackingArea(
             rect: .zero,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect, .mouseMoved],
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect, .cursorUpdate],
             owner: self
         )
         addTrackingArea(area)
@@ -92,37 +94,46 @@ final class DividerNSView: NSView {
         axis == .horizontal ? NSCursor.resizeUpDown : NSCursor.resizeLeftRight
     }
 
+    // cursorUpdate is called by AppKit whenever the cursor needs to be set
+    // within this view's tracking area — more reliable than mouseEntered/mouseMoved
+    // because it survives cursor resets from GPU-rendered terminal surfaces underneath.
+    override func cursorUpdate(with event: NSEvent) {
+        resizeCursor.set()
+    }
+
     override func mouseEntered(with event: NSEvent) {
         isHovering = true
-        resizeCursor.set()
+        resizeCursor.push()
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovering = false
         if !isDragging {
-            NSCursor.arrow.set()
+            NSCursor.pop()
         }
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        if isHovering { resizeCursor.set() }
     }
 
     // MARK: - Drag
 
     override func mouseDown(with event: NSEvent) {
         let loc = convert(event.locationInWindow, from: nil)
+        // Y=0 at bottom: dragging the horizontal divider DOWN decreases loc.y,
+        // which means the top pane shrinks — so we negate the horizontal delta.
         dragStartPoint = axis == .horizontal ? loc.y : loc.x
         dragStartFraction = currentFraction
         isDragging = true
-        resizeCursor.set()
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard isDragging, combinedLength > 0 else { return }
         let loc = convert(event.locationInWindow, from: nil)
         let current = axis == .horizontal ? loc.y : loc.x
-        let delta = current - dragStartPoint
+        // Horizontal (row) divider: Y=0 at bottom, so dragging DOWN decreases Y.
+        // Decreasing Y means the divider moved down → top pane grows → fraction should increase.
+        // But delta = current - start is NEGATIVE when dragging down in unflipped coords.
+        // We need to negate for horizontal so the drag direction feels natural.
+        let rawDelta = current - dragStartPoint
+        let delta = axis == .horizontal ? -rawDelta : rawDelta
         let proposed = dragStartFraction + delta / combinedLength
         let clamped = min(0.95, max(0.05, proposed))
         onDrag?(clamped)
@@ -130,16 +141,14 @@ final class DividerNSView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         isDragging = false
-        if isHovering {
-            resizeCursor.set()
-        } else {
-            NSCursor.arrow.set()
+        if !isHovering {
+            NSCursor.pop()
         }
     }
 
     // MARK: - Drawing (invisible hit area)
 
     override func draw(_ dirtyRect: NSRect) {
-        // Fully transparent — the gap is between pane borders.
+        // Fully transparent — the gap between pane borders provides the visual.
     }
 }
