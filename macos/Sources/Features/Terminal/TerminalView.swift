@@ -42,6 +42,12 @@ protocol TerminalViewModel: ObservableObject {
     /// Number of columns in each row of the grid layout.
     var gridRowCols: [Int] { get }
 
+    /// Fractional heights for each row (sums to 1.0).
+    var gridRowHeightFractions: [CGFloat] { get }
+
+    /// Fractional column widths per row (each inner array sums to 1.0).
+    var gridColWidthFractions: [[CGFloat]] { get }
+
     /// Gap between panes.
     var gridGap: CGFloat { get }
 
@@ -172,6 +178,14 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         },
                         onDismissPeek: {
                             (self.delegate as? BaseTerminalController)?.dismissPeek()
+                        },
+                        rowHeightFractions: viewModel.gridRowHeightFractions,
+                        colWidthFractions: viewModel.gridColWidthFractions,
+                        onResizeRow: { row, fraction in
+                            (self.delegate as? BaseTerminalController)?.resizeGridRow(row, toFraction: fraction)
+                        },
+                        onResizeCol: { row, col, fraction in
+                            (self.delegate as? BaseTerminalController)?.resizeGridCol(row, col: col, toFraction: fraction)
                         }
                     )
                     .environmentObject(ghostty)

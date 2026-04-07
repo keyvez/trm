@@ -87,6 +87,20 @@ struct TrmGridView: View {
     /// Callback to dismiss the peek overlay.
     var onDismissPeek: (() -> Void)? = nil
 
+    /// Fractional heights for each row (parallel to rowCols, sums to 1.0).
+    var rowHeightFractions: [CGFloat] = []
+
+    /// Fractional column widths per row (parallel to rowCols, each inner array sums to 1.0).
+    var colWidthFractions: [[CGFloat]] = []
+
+    /// Called when the user drags a horizontal divider between rows.
+    /// `row` is the index of the upper row; `fraction` is the new height fraction for that row.
+    var onResizeRow: ((Int, CGFloat) -> Void)? = nil
+
+    /// Called when the user drags a vertical divider between columns in a row.
+    /// `row`/`col` identify the left column; `fraction` is the new width fraction for that column.
+    var onResizeCol: ((Int, Int, CGFloat) -> Void)? = nil
+
     @FocusedValue(\.ghosttySurfaceView) private var focusedSurface
 
     /// Bumped when a watermark changes to force the overlay to re-evaluate.
@@ -168,17 +182,105 @@ struct TrmGridView: View {
                 }
         } else {
             ZStack {
-                VStack(spacing: gap) {
-                    ForEach(Array(rowLayout.enumerated()), id: \.offset) { rowIdx, row in
-                        HStack(spacing: gap) {
+                GeometryReader { geo in
+                    let rows = rowLayout
+                    let nRows = rows.count
+                    // Normalize height fractions (fall back to equal if not set or wrong length)
+                    let rawHF = rowHeightFractions
+                    let heightFracs: [CGFloat] = (rawHF.count == nRows && rawHF.allSatisfy { $0 > 0 })
+                        ? rawHF
+                        : Array(repeating: 1.0 / CGFloat(nRows), count: nRows)
+
+                    let availH = geo.size.height - padding * 2 - gap * CGFloat(nRows - 1)
+                    let availW = geo.size.width - padding * 2
+
+                    ZStack(alignment: .topLeading) {
+                        // Pane cells
+                        ForEach(Array(rows.enumerated()), id: \.offset) { rowIdx, row in
+                            let nCols = row.count
+                            let rawCF = colWidthFractions.indices.contains(rowIdx) ? colWidthFractions[rowIdx] : []
+                            let colFracs: [CGFloat] = (rawCF.count == nCols && rawCF.allSatisfy { $0 > 0 })
+                                ? rawCF
+                                : Array(repeating: 1.0 / CGFloat(nCols), count: nCols)
+                            let rowH = availH * heightFracs[rowIdx]
+                            let rowY = padding + (0..<rowIdx).reduce(0.0) { $0 + availH * heightFracs[$1] + gap }
+                            let rowAvailW = availW - gap * CGFloat(nCols - 1)
+
                             ForEach(Array(row.enumerated()), id: \.element.id) { colIdx, pane in
                                 let flatIndex = flatIndexFor(row: rowIdx, col: colIdx)
+                                let colW = rowAvailW * colFracs[colIdx]
+                                let colX = padding + (0..<colIdx).reduce(0.0) { $0 + rowAvailW * colFracs[$1] + gap }
+
                                 paneCellView(pane, flatIndex: flatIndex, row: rowIdx, col: colIdx)
+                                    .frame(width: colW, height: rowH)
+                                    .position(x: colX + colW / 2, y: rowY + rowH / 2)
+                            }
+                        }
+
+                        // Horizontal dividers (between rows)
+                        if onResizeRow != nil {
+                            ForEach(0..<(nRows - 1), id: \.self) { rowIdx in
+                                let rowY = padding + (0..<(rowIdx + 1)).reduce(0.0) { $0 + availH * heightFracs[$1] + gap }
+                                let divH: CGFloat = max(gap, 8)
+                                let hitY = rowY - gap / 2 - (divH - gap) / 2
+                                // Current fraction = top pane height / combined height of the two panes + gap
+                                let topH = availH * heightFracs[rowIdx]
+                                let botH = availH * heightFracs[rowIdx + 1]
+                                let combinedH = topH + gap + botH
+                                let curFrac = combinedH > 0 ? topH / combinedH : 0.5
+
+                                PaneDivider(
+                                    axis: .horizontal,
+                                    currentFraction: curFrac,
+                                    combinedLength: combinedH,
+                                    onDrag: { fraction in
+                                        onResizeRow?(rowIdx, fraction)
+                                    }
+                                )
+                                .frame(width: availW, height: divH)
+                                .position(x: padding + availW / 2, y: hitY + divH / 2)
+                                .allowsHitTesting(onResizeRow != nil)
+                            }
+                        }
+
+                        // Vertical dividers (between columns within each row)
+                        if onResizeCol != nil {
+                            ForEach(Array(rows.enumerated()), id: \.offset) { rowIdx, row in
+                                let nCols = row.count
+                                let rawCF = colWidthFractions.indices.contains(rowIdx) ? colWidthFractions[rowIdx] : []
+                                let colFracs: [CGFloat] = (rawCF.count == nCols && rawCF.allSatisfy { $0 > 0 })
+                                    ? rawCF
+                                    : Array(repeating: 1.0 / CGFloat(nCols), count: nCols)
+                                let rowAvailW = availW - gap * CGFloat(nCols - 1)
+                                let rowH = availH * heightFracs[rowIdx]
+                                let rowY = padding + (0..<rowIdx).reduce(0.0) { $0 + availH * heightFracs[$1] + gap }
+
+                                ForEach(0..<(nCols - 1), id: \.self) { colIdx in
+                                    let colX = padding + (0..<(colIdx + 1)).reduce(0.0) { $0 + rowAvailW * colFracs[$1] + gap }
+                                    let divW: CGFloat = max(gap, 8)
+                                    let hitX = colX - gap / 2 - (divW - gap) / 2
+                                    let leftW = rowAvailW * colFracs[colIdx]
+                                    let rightW = rowAvailW * colFracs[colIdx + 1]
+                                    let combinedW = leftW + gap + rightW
+                                    let curFrac = combinedW > 0 ? leftW / combinedW : 0.5
+
+                                    PaneDivider(
+                                        axis: .vertical,
+                                        currentFraction: curFrac,
+                                        combinedLength: combinedW,
+                                        onDrag: { fraction in
+                                            onResizeCol?(rowIdx, colIdx, fraction)
+                                        }
+                                    )
+                                    .frame(width: divW, height: rowH)
+                                    .position(x: hitX + divW / 2, y: rowY + rowH / 2)
+                                    .allowsHitTesting(onResizeCol != nil)
+                                }
                             }
                         }
                     }
                 }
-                .padding(padding)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 // Peek overlay
                 if let peekedID = peekedPane {

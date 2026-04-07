@@ -67,6 +67,14 @@ class BaseTerminalController: NSWindowController,
     /// Updated when panes are added/removed.
     @Published var gridRowCols: [Int] = [1]
 
+    /// Fractional heights for each row (sums to 1.0).
+    /// Automatically equalized when rows are added or removed.
+    @Published var gridRowHeightFractions: [CGFloat] = [1.0]
+
+    /// Fractional widths per column within each row (each inner array sums to 1.0).
+    /// Automatically equalized when columns are added or removed.
+    @Published var gridColWidthFractions: [[CGFloat]] = [[1.0]]
+
     /// Optional per-window grid config loaded from a project-local trm.toml.
     private var gridConfigOverride: Trm.TrmGridConfig?
 
@@ -272,6 +280,9 @@ class BaseTerminalController: NSWindowController,
 
     /// The cancellables related to our focused surface.
     private var focusedSurfaceCancellables: Set<AnyCancellable> = []
+
+    /// Cancellable for gridRowCols structural-change observation (used to equalize fractions).
+    private var gridRowColsCancellable: AnyCancellable?
 
     /// An override title for the tab/window set by the user via prompt_tab_title.
     /// When set, this takes precedence over the computed title from the terminal.
@@ -1178,6 +1189,64 @@ class BaseTerminalController: NSWindowController,
     /// Dismiss the peek overlay.
     func dismissPeek() {
         peekedPane = nil
+    }
+
+    // MARK: - Grid Resize
+
+    /// Resize row `row` so it takes `fraction` of the total available height.
+    /// The adjacent row (row+1) absorbs the remainder.
+    func resizeGridRow(_ row: Int, toFraction fraction: CGFloat) {
+        let nRows = gridRowCols.count
+        guard row >= 0, row < nRows - 1 else { return }
+        var fracs = normalizedRowFractions()
+        let combined = fracs[row] + fracs[row + 1]
+        let newThis = min(max(fraction * combined, 0.05 * combined), 0.95 * combined)
+        fracs[row] = newThis
+        fracs[row + 1] = combined - newThis
+        gridRowHeightFractions = fracs
+    }
+
+    /// Resize column `col` in row `row` so it takes `fraction` of that row's available width.
+    /// The adjacent column (col+1) absorbs the remainder.
+    func resizeGridCol(_ row: Int, col: Int, toFraction fraction: CGFloat) {
+        guard row >= 0, row < gridRowCols.count else { return }
+        let nCols = gridRowCols[row]
+        guard col >= 0, col < nCols - 1 else { return }
+        var rowFracs = normalizedColFractions(forRow: row, nCols: nCols)
+        let combined = rowFracs[col] + rowFracs[col + 1]
+        let newThis = min(max(fraction * combined, 0.05 * combined), 0.95 * combined)
+        rowFracs[col] = newThis
+        rowFracs[col + 1] = combined - newThis
+        var all = gridColWidthFractions
+        while all.count <= row { all.append([]) }
+        all[row] = rowFracs
+        gridColWidthFractions = all
+    }
+
+    /// Returns the current row height fractions, resetting to equal if stale.
+    private func normalizedRowFractions() -> [CGFloat] {
+        let n = gridRowCols.count
+        if gridRowHeightFractions.count == n { return gridRowHeightFractions }
+        return Array(repeating: 1.0 / CGFloat(n), count: n)
+    }
+
+    /// Returns the current column width fractions for a row, resetting to equal if stale.
+    private func normalizedColFractions(forRow row: Int, nCols: Int) -> [CGFloat] {
+        if gridColWidthFractions.indices.contains(row),
+           gridColWidthFractions[row].count == nCols {
+            return gridColWidthFractions[row]
+        }
+        return Array(repeating: 1.0 / CGFloat(nCols), count: nCols)
+    }
+
+    /// Equalize all row and column fractions to match the current gridRowCols layout.
+    /// Called whenever gridRowCols changes structurally (pane added/removed).
+    func equalizeGridFractions() {
+        let nRows = gridRowCols.count
+        gridRowHeightFractions = Array(repeating: 1.0 / CGFloat(nRows), count: nRows)
+        gridColWidthFractions = gridRowCols.map { nCols in
+            Array(repeating: 1.0 / CGFloat(max(nCols, 1)), count: max(nCols, 1))
+        }
     }
 
     /// Whether a pane is currently stacked inside another cell (as a non-host child).
@@ -3837,6 +3906,22 @@ class BaseTerminalController: NSWindowController,
 
         // Start context usage tracking
         contextUsageManager.start()
+
+        // Equalize pane size fractions whenever the grid structure changes.
+        // We compare the new layout against the current fractions — if the
+        // counts no longer match we reset to equal splits.
+        gridRowColsCancellable = $gridRowCols
+            .removeDuplicates()
+            .sink { [weak self] newRowCols in
+                guard let self else { return }
+                let nRows = newRowCols.count
+                let colFracsStale = self.gridColWidthFractions.count != nRows
+                    || zip(newRowCols, self.gridColWidthFractions).contains { (cols, fracs) in fracs.count != cols }
+                let fractionsStale = self.gridRowHeightFractions.count != nRows || colFracsStale
+                if fractionsStale {
+                    self.equalizeGridFractions()
+                }
+            }
 
         // Setup initial panes from termania.toml config — but skip if we
         // were created with an existing surface tree (e.g., a popped-out pane or
