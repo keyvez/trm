@@ -555,7 +555,7 @@ struct TrmGridView: View {
     @ViewBuilder
     private func stackedPaneView(_ children: [GridPane], stackID: ObjectIdentifier) -> some View {
         let n = children.count
-        let subGap: CGFloat = 1
+        let subGap: CGFloat = 4
         let rawFracs = stackHeightFractions[stackID] ?? []
         let fracs: [CGFloat] = (rawFracs.count == n && rawFracs.allSatisfy { $0 > 0 })
             ? rawFracs
@@ -611,6 +611,13 @@ struct TrmGridView: View {
                     let botH = subHeights[idx + 1]
                     let combinedH = topH + subGap + botH
                     let curFrac = combinedH > 0 ? topH / combinedH : 0.5
+
+                    // Visible separator line at the gap between sub-panes.
+                    Rectangle()
+                        .fill(TrmBorder.color)
+                        .frame(width: geo.size.width, height: subGap)
+                        .position(x: geo.size.width / 2, y: subYOffsets[idx + 1] - subGap / 2)
+                        .allowsHitTesting(false)
 
                     PaneDivider(
                         axis: .horizontal,
