@@ -68,26 +68,60 @@ enum SessionManager {
         let autosaves = files.filter { $0.hasPrefix("_autosave_") && $0.hasSuffix(".toml") }
         guard !autosaves.isEmpty else { return false }
 
-        var terminalPanes = 0
-        var zmxNames: [String] = []
         for file in autosaves {
             let url = sessionsDirectory.appendingPathComponent(file)
-            guard let content = try? String(contentsOf: url, encoding: .utf8) else { return false }
-            for rawLine in content.components(separatedBy: .newlines) {
-                let line = rawLine.trimmingCharacters(in: .whitespaces)
-                if line.hasPrefix("pane_type") && line.contains("\"terminal\"") {
-                    terminalPanes += 1
-                } else if line.hasPrefix("zmx_session") {
-                    if let eq = line.firstIndex(of: "=") {
-                        var v = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
-                        v = v.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                        if !v.isEmpty { zmxNames.append(v) }
-                    }
-                }
+            if !tomlFullyBackedByLiveSessions(url) { return false }
+        }
+        return true
+    }
+
+    /// Whether one session TOML describes a window fully backed by live zmx
+    /// daemons: it has terminal panes, every one names a `zmx_session`, and
+    /// every named session is running. Used to skip the startup dialog —
+    /// attaching to running state should not ask questions.
+    static func tomlFullyBackedByLiveSessions(_ url: URL) -> Bool {
+        guard ZmxSessionManager.isAvailable else { return false }
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return false }
+
+        // A default pane_type of "terminal" is implied when the key is absent,
+        // so count [[panes]] blocks that are terminals (explicitly or by
+        // default) and the zmx_session lines within them.
+        var terminalPanes = 0
+        var zmxNames: [String] = []
+        var inPane = false
+        var paneIsTerminal = true
+        var paneZmx: String? = nil
+
+        func flushPane() {
+            guard inPane else { return }
+            if paneIsTerminal {
+                terminalPanes += 1
+                if let z = paneZmx { zmxNames.append(z) }
             }
         }
 
-        // Every terminal pane must be server-backed, and every daemon alive.
+        for rawLine in content.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line == "[[panes]]" {
+                flushPane()
+                inPane = true
+                paneIsTerminal = true
+                paneZmx = nil
+                continue
+            }
+            guard inPane else { continue }
+            if line.hasPrefix("pane_type") {
+                paneIsTerminal = line.contains("\"terminal\"")
+            } else if line.hasPrefix("zmx_session") {
+                if let eq = line.firstIndex(of: "=") {
+                    var v = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+                    v = v.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                    if !v.isEmpty { paneZmx = v }
+                }
+            }
+        }
+        flushPane()
+
         guard terminalPanes > 0, zmxNames.count == terminalPanes else { return false }
         return zmxNames.allSatisfy { ZmxSessionManager.sessionExists($0) }
     }

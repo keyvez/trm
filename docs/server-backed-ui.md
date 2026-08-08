@@ -29,20 +29,35 @@ a pane, wait ~35 s for a checkpoint, `kill -9 <trm pid>`, relaunch trm —
 the window returns without a dialog and the loop never stopped
 (`trm sessions` lists the daemons at any point).
 
-## Phase 2 — window server (planned)
+## Phase 2 — multi-UI attach (shipped)
 
-A single `trm-server` daemon owning the *window* abstraction: layout,
-pane registry, watermarks, stacks, overview panes — today reconstructed
-from TOML by each UI instance. The UI becomes a pure client: subscribe to
-layout state, attach pane surfaces via zmx, publish input/layout edits.
-Multiple UIs can then show the same window live (local + remote), and
-layout changes propagate between them. Candidate transport: extend the
-Text Tap / cmux socket protocol (already speaks JSON, already has
-surface.list, focus, spawn).
+- **Instant attach for explicit configs**: a `TRM_CONFIG` launch whose
+  panes are all backed by live daemons opens directly — attaching to
+  running state never asks questions.
+- **`trm mirror`**: opens a second trm UI attached to the current
+  window's sessions. zmx multi-client does the PTY mirroring — typing and
+  output appear in every attached UI. Verified end-to-end: two UIs, both
+  `clients=2` on the daemons, input injected server-side rendered in both;
+  either UI can be `kill -9`ed with zero process impact.
+- The mirror UI's Text Tap server is disabled (it must not steal the
+  primary's socket); layout in a mirror is a snapshot, not yet live-synced.
 
-## Phase 3 — remote UI (planned)
+Still open in phase 2: **live layout sync** — layout edits in one UI
+propagating to others. Requires window identity + an ownership/broadcast
+protocol; candidate transport is the Text Tap / cmux socket (already
+JSON, already has surface.list/focus/spawn). Until then, a mirror
+re-opened via `trm mirror` picks up the latest checkpoint.
 
-Same client protocol over SSH forwarding: a remote trm renders locally
-(its own Metal surfaces) while PTY bytes stream through forwarded zmx
-sockets and layout state through the trm-server socket. tmux semantics,
-GPU-rendered.
+## Phase 3 — remote UI (shipped, first cut)
+
+**`trm attach-remote <ssh-host>`**: fetches the remote machine's latest
+window checkpoint, rewrites each server-backed pane to
+`ssh -t <host> zmx attach <session>` (`scripts/mirror-session.py`), and
+opens a local trm on it — the remote window's layout, GPU-rendered
+locally, PTYs streaming over SSH. Uses the same remote-attach mechanics
+as the shipped `ssh -t host …/zmx attach <name>` flow; requires key-based
+SSH to the host and trm installed on both ends. Overview/webview panes
+pass through as layout (their data sources are machine-local).
+
+Still open in phase 3: full remote parity — remote agent-overview data,
+live layout sync over the same channel, reconnect-on-drop for SSH panes.

@@ -157,6 +157,10 @@ Persistent sessions (session_persistence = true in trm.toml):
   attach <name>                     Attach to a session in this terminal
                                     (detach: ctrl+\\ — the session keeps running)
   kill-session <name>               Kill a session and its process
+  mirror                            Open another trm UI attached to the
+                                    current window's sessions (multi-client)
+  attach-remote <ssh-host>          Open a trm UI showing a remote machine's
+                                    window; panes attach over SSH
   Remote attach: ssh -t host /Applications/trm.app/Contents/MacOS/zmx attach <name>
 
 Other:
@@ -533,7 +537,7 @@ HELP
         esac
         ;;
 
-    sessions|attach|kill-session)
+    sessions|attach|kill-session|mirror|attach-remote)
         # Session-persistence commands, backed by the zmx binary bundled
         # inside trm.app (built from vendor/zmx by zig build).
         ZMX=""
@@ -574,6 +578,50 @@ HELP
                     exit 1
                 fi
                 exec "$ZMX" kill "$NAME"
+                ;;
+            mirror|attach-remote)
+                # Server-backed UI attach: open another trm UI on the current
+                # window state — locally (mirror) or from a remote machine's
+                # state (attach-remote). Panes attach to the session daemons;
+                # the extra UI is disposable.
+                MIRROR_PY="$(dirname "$0")/mirror-session.py"
+                [ -f "$MIRROR_PY" ] || MIRROR_PY="/Applications/trm.app/Contents/Resources/mirror-session.py"
+                if [ ! -f "$MIRROR_PY" ]; then
+                    echo "Error: mirror-session.py not found" >&2
+                    exit 1
+                fi
+                APP_BIN=""
+                for candidate in \
+                    "/Applications/trm.app/Contents/MacOS/trm" \
+                    "$HOME/Applications/trm.app/Contents/MacOS/trm"; do
+                    [ -x "$candidate" ] && APP_BIN="$candidate" && break
+                done
+                if [ -z "$APP_BIN" ]; then
+                    echo "Error: trm.app not found" >&2
+                    exit 1
+                fi
+                OUT="$(mktemp -t trm-mirror).toml"
+                if [ "$COMMAND" = "mirror" ]; then
+                    SRC="$(python3 "$MIRROR_PY" --latest-autosave)" || exit 1
+                    python3 "$MIRROR_PY" --local < "$SRC" > "$OUT" || exit 1
+                    echo "Mirroring $SRC"
+                else
+                    HOST="${2:-}"
+                    if [ -z "$HOST" ]; then
+                        echo "Usage: trm attach-remote <ssh-host>" >&2
+                        exit 1
+                    fi
+                    REMOTE_TOML="$(ssh "$HOST" 'ls -t "$HOME/Library/Application Support/trm/sessions/"_autosave_*.toml 2>/dev/null | head -1 | xargs cat' 2>/dev/null)"
+                    if [ -z "$REMOTE_TOML" ]; then
+                        echo "Error: no auto-saved trm session found on $HOST" >&2
+                        exit 1
+                    fi
+                    printf '%s\n' "$REMOTE_TOML" | python3 "$MIRROR_PY" --remote "$HOST" > "$OUT" || exit 1
+                    echo "Attaching to $HOST's window"
+                fi
+                TRM_CONFIG="$OUT" "$APP_BIN" >/dev/null 2>&1 &
+                disown
+                echo "Launched mirror UI (config: $OUT)"
                 ;;
         esac
         ;;

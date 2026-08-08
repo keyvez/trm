@@ -381,6 +381,13 @@ class AppDelegate: NSObject,
         // tmux-style, no questions. (An explicit --config/TRM_CONFIG launch
         // still gets the choice dialog.)
         if let saved = savedInfo {
+            // An explicit config that only attaches to live daemons is a
+            // mirror/attach launch — open it directly, no dialog.
+            if let cfgPath = configPath, ghostty.sessionPersistence,
+               SessionManager.tomlFullyBackedByLiveSessions(URL(fileURLWithPath: cfgPath)) {
+                openNewWindow(cwd: FileManager.default.currentDirectoryPath, configPath: cfgPath)
+                return
+            }
             if configPath == nil, ghostty.sessionPersistence,
                SessionManager.autoSaveFullyBackedByLiveSessions() {
                 SessionManager.restoreLastSession(ghostty: ghostty)
@@ -389,6 +396,11 @@ class AppDelegate: NSObject,
             showStartupDialog(saved: saved, configPath: configPath)
             return
         }
+
+        // No auto-save, but an explicit fully-backed config still deserves
+        // the instant-attach path (it would otherwise fall through to the
+        // plain config open below, which is the same thing — kept explicit
+        // for clarity of the attach semantics).
 
         // No auto-save, but live zmx sessions nothing references: offer to
         // attach them instead of leaving them stranded in the background.
