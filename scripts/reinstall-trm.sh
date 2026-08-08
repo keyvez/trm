@@ -53,7 +53,7 @@ cp -R "$APP_SRC" "$APP_DEST"
 # rebuild — which invalidates the app's TCC grants (Accessibility, Screen
 # Recording, Notifications) each time it is reinstalled. Signing with a real
 # identity keeps the designated requirement stable so permissions survive.
-SIGN_IDENTITY="${TRM_SIGN_IDENTITY:-Apple Development}"
+SIGN_IDENTITY="${TRM_SIGN_IDENTITY:-Apple Development: Gaurav Misra (AC2TG9TNSG)}"
 if security find-identity -p codesigning -v 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
   if codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DEST" 2>/dev/null; then
     echo "Re-signed with '$SIGN_IDENTITY' (stable TCC identity)."

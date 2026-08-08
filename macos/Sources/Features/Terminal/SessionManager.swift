@@ -53,6 +53,45 @@ enum SessionManager {
 
     // MARK: - Directory
 
+    /// True when the latest auto-save describes a window state that is fully
+    /// backed by live zmx session daemons: every terminal pane names a
+    /// `zmx_session` and every named session is still running.
+    ///
+    /// This is the tmux-style fast path: the UI process is disposable, the
+    /// real state lives in the session daemons, and relaunching should just
+    /// re-attach without asking anything.
+    static func autoSaveFullyBackedByLiveSessions() -> Bool {
+        guard ZmxSessionManager.isAvailable else { return false }
+
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: sessionsDirectory.path) else { return false }
+        let autosaves = files.filter { $0.hasPrefix("_autosave_") && $0.hasSuffix(".toml") }
+        guard !autosaves.isEmpty else { return false }
+
+        var terminalPanes = 0
+        var zmxNames: [String] = []
+        for file in autosaves {
+            let url = sessionsDirectory.appendingPathComponent(file)
+            guard let content = try? String(contentsOf: url, encoding: .utf8) else { return false }
+            for rawLine in content.components(separatedBy: .newlines) {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                if line.hasPrefix("pane_type") && line.contains("\"terminal\"") {
+                    terminalPanes += 1
+                } else if line.hasPrefix("zmx_session") {
+                    if let eq = line.firstIndex(of: "=") {
+                        var v = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+                        v = v.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                        if !v.isEmpty { zmxNames.append(v) }
+                    }
+                }
+            }
+        }
+
+        // Every terminal pane must be server-backed, and every daemon alive.
+        guard terminalPanes > 0, zmxNames.count == terminalPanes else { return false }
+        return zmxNames.allSatisfy { ZmxSessionManager.sessionExists($0) }
+    }
+
     static var sessionsDirectory: URL {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,

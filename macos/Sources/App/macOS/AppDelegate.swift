@@ -136,7 +136,13 @@ class AppDelegate: NSObject,
     private var appearanceObserver: NSKeyValueObservation?
 
     /// App-lifetime keyboard shortcut monitor (see applicationDidFinishLaunching).
-    private var keyDownMonitor: Any? = nil
+    private var keyDownMonitor: Any?
+
+    /// Periodic window-layout checkpoint. With server-backed panes (session
+    /// persistence), the UI process is disposable: a killed or crashed UI can
+    /// relaunch and re-attach to everything — but only if the layout was
+    /// saved while it ran, not just at graceful quit.
+    private var autoSaveTimer: Timer? = nil
 
     /// Signals
     private var signals: [DispatchSourceSignal] = []
@@ -275,6 +281,16 @@ class AppDelegate: NSObject,
         // Start polling for Text Tap notifications (e.g. from Claude Code hooks)
         Trm.shared.startNotificationPolling()
 
+        // Checkpoint layouts continuously (lightweight TOML writes) so a
+        // non-graceful UI exit still leaves an attachable auto-save.
+        autoSaveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+            Task { @MainActor in
+                guard let self = NSApp.delegate as? AppDelegate,
+                      self.ghostty.config.windowSaveState != "never" else { return }
+                SessionManager.autoSaveAllWindows()
+            }
+        }
+
         // Observe our appearance so we can report the correct value to libghostty.
         self.appearanceObserver = NSApplication.shared.observe(
             \.effectiveAppearance,
@@ -359,8 +375,17 @@ class AppDelegate: NSObject,
         let savedInfo: SessionManager.SessionStartupInfo? = canRestore ? SessionManager.peekAutoSave() : nil
         let configPath = launchConfigPath
 
-        // Auto-save exists: always ask the user what to do.
+        // Auto-save exists. Server-backed fast path first: when every pane in
+        // the auto-save is still running under a live zmx session daemon, the
+        // UI is merely re-attaching to running state — restore immediately,
+        // tmux-style, no questions. (An explicit --config/TRM_CONFIG launch
+        // still gets the choice dialog.)
         if let saved = savedInfo {
+            if configPath == nil, ghostty.sessionPersistence,
+               SessionManager.autoSaveFullyBackedByLiveSessions() {
+                SessionManager.restoreLastSession(ghostty: ghostty)
+                return
+            }
             showStartupDialog(saved: saved, configPath: configPath)
             return
         }

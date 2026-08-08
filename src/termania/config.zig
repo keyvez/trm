@@ -126,7 +126,11 @@ pub const Config = struct {
     text_tap: TextTapConfig = .{},
     llm: LlmConfig = .{},
     panes: []const PaneConfig = &.{},
-    session_persistence: bool = false,
+    // Panes are server-backed by default: each runs under a zmx session
+    // daemon, so the trm UI is disposable — quitting or killing it leaves
+    // shells and processes running, and a relaunched (or remote) trm
+    // reattaches, tmux-style. Set false to run panes in-process.
+    session_persistence: bool = true,
 
     /// Get effective window title, preferring session override.
     pub fn effectiveTitle(self: *const Config, session: ?*const SessionConfig) []const u8 {
