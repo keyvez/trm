@@ -1295,6 +1295,7 @@ uint32_t termania_config_pane_pattern(trm_app_t, uint32_t, uint32_t, char*, uint
 uint8_t  termania_context_usage(trm_app_t, uint64_t*, uint64_t*, uint8_t*, uint8_t*);
 uint32_t termania_context_session_id(trm_app_t, char*, uint32_t);
 int64_t  termania_context_last_update(trm_app_t);
+uint32_t termania_context_pane_id(trm_app_t);
 
 // Process info
 uint32_t termania_pane_child_pid(trm_app_t, uint32_t);

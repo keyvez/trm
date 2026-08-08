@@ -541,6 +541,10 @@ final class Trm {
         let isPreCompact: Bool
         let sessionId: String
         let lastUpdate: Date
+        /// Pane the agent reporting this reading runs in, or nil when the
+        /// sender didn't identify one. Windows use it to show the context
+        /// pill only for their own panes.
+        var paneId: Int? = nil
 
         var warningLevel: ContextWarningLevel {
             ContextWarningLevel(percentage: percentage)
@@ -589,13 +593,17 @@ final class Trm {
         let timestamp = termania_context_last_update(h)
         let lastUpdate = Date(timeIntervalSince1970: TimeInterval(timestamp))
 
+        let rawPaneId = termania_context_pane_id(h)
+        let paneId = rawPaneId == 0xFFFFFFFF ? nil : Int(rawPaneId)
+
         return ContextUsageData(
             usedTokens: used,
             totalTokens: total,
             percentage: pct,
             isPreCompact: preCompact != 0,
             sessionId: sessionId,
-            lastUpdate: lastUpdate
+            lastUpdate: lastUpdate,
+            paneId: paneId
         )
     }
 

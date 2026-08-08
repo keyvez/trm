@@ -46,7 +46,15 @@ TOTAL=200000  # All current Claude models use 200k context
 PCT=$(( INPUT * 100 / TOTAL ))
 [ "$PCT" -gt 100 ] && PCT=100
 
-# Build and send context_update
-printf '{"type":"context_update","payload":{"context_window":{"used":%d,"total":%d,"used_percentage":%d},"session_id":"%s","hook_type":"%s"}}\n' \
-  "$INPUT" "$TOTAL" "$PCT" "$SESSION_ID" "$HOOK_TYPE" \
+# Build and send context_update. TRM_PANE_ID (injected into every pane's
+# environment) attributes the reading to this pane, so only the window
+# containing this agent shows the context pill. Older trm builds ignore the
+# extra field; without it the reading is unattributed and shows everywhere.
+PANE_FIELD=""
+if [ -n "${TRM_PANE_ID:-}" ]; then
+  PANE_FIELD=",\"pane\":$TRM_PANE_ID"
+fi
+
+printf '{"type":"context_update","payload":{"context_window":{"used":%d,"total":%d,"used_percentage":%d},"session_id":"%s","hook_type":"%s"%s}}\n' \
+  "$INPUT" "$TOTAL" "$PCT" "$SESSION_ID" "$HOOK_TYPE" "$PANE_FIELD" \
   | nc -U "$SOCKET" 2>/dev/null || true

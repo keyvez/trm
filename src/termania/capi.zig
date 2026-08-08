@@ -72,6 +72,9 @@ const CApp = struct {
     context_is_pre_compact: bool = false,
     context_last_update_time: i64 = 0,
     has_context_usage: bool = false,
+    /// Pane the context reading belongs to (0xFFFFFFFF = unattributed).
+    /// Lets the UI show the pill only in the window owning that pane.
+    context_pane_id: u32 = 0xFFFFFFFF,
 
     // Notification queue (from text tap notify actions)
     notification_title_buf: [256]u8 = undefined,
@@ -432,6 +435,10 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
 
                         app.context_last_update_time = std.time.timestamp();
                         app.has_context_usage = true;
+                        app.context_pane_id = if (cu.pane) |p|
+                            (if (p <= std.math.maxInt(u32)) @intCast(p) else 0xFFFFFFFF)
+                        else
+                            0xFFFFFFFF;
                     },
                     .focus_pane => |fp| {
                         if (app.focus_queue_count < app.focus_queue_panes.len) {
@@ -1570,6 +1577,15 @@ export fn termania_context_session_id(handle: ?*anyopaque, buf: ?[*]u8, max: u32
 export fn termania_context_last_update(handle: ?*anyopaque) i64 {
     const app = getApp(handle) orelse return 0;
     return app.context_last_update_time;
+}
+
+/// Get the pane ID the current context usage reading belongs to.
+/// Returns 0xFFFFFFFF when the sender didn't identify a pane, in which case
+/// the reading is unattributed and callers should treat it as global.
+export fn termania_context_pane_id(handle: ?*anyopaque) u32 {
+    const app = getApp(handle) orelse return 0xFFFFFFFF;
+    if (!app.has_context_usage) return 0xFFFFFFFF;
+    return app.context_pane_id;
 }
 
 /// Get the child PID of a pane (the shell process) by stable pane ID. Returns 0 if unavailable.

@@ -5,9 +5,16 @@ import Foundation
 /// tracks per-session history, and persists daily/weekly aggregates.
 @MainActor
 final class ContextUsageManager: ObservableObject {
+    /// The reading this window should display, or nil when the reading
+    /// belongs to another window's pane (or has gone stale).
     @Published var currentUsage: Trm.ContextUsageData?
     @Published var dailyTokensUsed: UInt64 = 0
     @Published var weeklyTokensUsed: UInt64 = 0
+
+    /// Last reading seen from the C API, regardless of whether this window
+    /// displays it. Drives change detection so a filtered-out reading is
+    /// still recorded in the aggregates exactly once.
+    private var lastPolled: Trm.ContextUsageData?
 
     /// Per-session peak usage for aggregate tracking.
     private var sessionPeaks: [String: UInt64] = [:]
@@ -39,6 +46,28 @@ final class ContextUsageManager: ObservableObject {
     /// How often to poll for updates (seconds).
     var pollInterval: TimeInterval = 1.0
 
+    /// Returns the stable pane IDs owned by this manager's window. The
+    /// context reading is process-wide (one agent hook writes it for the
+    /// whole app), so without this every window would show every agent's
+    /// pill. Left nil, the manager keeps the old global behavior.
+    var ownedPaneIds: (() -> Set<Int>)?
+
+    /// How long a reading stays displayable after its last update. An agent
+    /// that goes idle or ends its session stops sending hooks; without this
+    /// the pill would linger forever showing a stale number.
+    static let stalenessInterval: TimeInterval = 30 * 60
+
+    /// True when a reading belongs to this window and is recent enough to
+    /// show. Unattributed readings (no pane in the hook payload) fall back
+    /// to showing everywhere, preserving behavior for older hook scripts.
+    func shouldDisplay(_ usage: Trm.ContextUsageData, now: Date = Date()) -> Bool {
+        if now.timeIntervalSince(usage.lastUpdate) > Self.stalenessInterval {
+            return false
+        }
+        guard let paneId = usage.paneId, let owned = ownedPaneIds else { return true }
+        return owned().contains(paneId)
+    }
+
     private static let historyFileName = "context_usage_history.json"
     private static let retentionDays = 7
 
@@ -64,12 +93,24 @@ final class ContextUsageManager: ObservableObject {
         // Fast path: if nothing changed since the last poll, skip all work.
         // Poll runs at 1Hz and `computeAggregates` iterates all snapshots,
         // which gets expensive over long sessions and can cause typing lag.
-        let changed = currentUsage?.usedTokens != usage.usedTokens
-            || currentUsage?.sessionId != usage.sessionId
-            || currentUsage?.lastUpdate != usage.lastUpdate
-        guard changed else { return }
+        let changed = lastPolled?.usedTokens != usage.usedTokens
+            || lastPolled?.sessionId != usage.sessionId
+            || lastPolled?.lastUpdate != usage.lastUpdate
+        // Even when the reading itself is unchanged, the pill may need to
+        // expire (staleness) — re-evaluate visibility before bailing out.
+        let displayable = shouldDisplay(usage)
+        if !changed {
+            if (currentUsage != nil) != displayable {
+                currentUsage = displayable ? usage : nil
+            }
+            return
+        }
+        lastPolled = usage
 
-        currentUsage = usage
+        // The pill is per-window: only the window owning the agent's pane
+        // shows it. Aggregates below still track every reading, since
+        // daily/weekly totals are process-wide by design.
+        currentUsage = displayable ? usage : nil
 
         // Track per-session peak
         if !usage.sessionId.isEmpty {

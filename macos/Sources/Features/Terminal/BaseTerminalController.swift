@@ -5018,7 +5018,13 @@ class BaseTerminalController: NSWindowController,
         // Set our update overlay state
         updateOverlayIsVisible = defaultUpdateOverlayVisibility()
 
-        // Start context usage tracking
+        // Start context usage tracking. The reading is process-wide, so the
+        // manager filters it to this window's panes — otherwise every window
+        // shows a pill for an agent running in some other window.
+        contextUsageManager.ownedPaneIds = { [weak self] in
+            guard let self else { return [] }
+            return Set(self.gridSurfaces.compactMap(\.paneId))
+        }
         contextUsageManager.start()
 
         // Equalize pane size fractions whenever the grid structure changes.

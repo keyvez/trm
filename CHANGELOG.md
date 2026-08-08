@@ -50,6 +50,7 @@ retroactively.
 
 ### Fixed
 
+- **Context usage pill appeared in every window**: The Claude Code context reading is stored process-wide, but each window polled it and rendered the pill unconditionally — so a fresh window with no agent in it showed the context usage of an agent running in a *different* window, and the pill never disappeared once set. Context readings are now attributed to a pane: `context_update` accepts a `"pane"` field (`scripts/claude-context-trm.sh` passes `$TRM_PANE_ID`, falling back to the sender's `mark_connected` pane), exposed via the new `termania_context_pane_id` export, and a window only shows the pill for panes it owns. Readings also expire after 30 minutes, so an agent that goes idle stops leaving a stale number on screen. Readings with no pane attribution (older hook scripts) still show everywhere, as before.
 - **Invisible stack sub-pane dividers and typing lag**: Stack sub-pane dividers rendered invisibly, and per-keystroke work in hot paths caused typing lag; both fixed.
 - **Phantom selection on pane focus**: Focusing a pane no longer creates a phantom text selection.
 - **Pane drag bar**: Dragging by the grab bar now uses an AppKit `NSDraggingSource` (the SwiftUI `.draggable` implementation dropped drags); grip-bar drags are reliable.

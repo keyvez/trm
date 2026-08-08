@@ -59,6 +59,9 @@ pub const TermaniaAction = union(enum) {
         percentage: u8,
         session_id: []const u8,
         is_pre_compact: bool,
+        /// Pane the agent runs in, so only that pane's window shows the
+        /// context pill. null when the sender didn't identify itself.
+        pane: ?usize = null,
     },
 };
 

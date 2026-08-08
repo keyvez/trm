@@ -730,6 +730,22 @@ pub const TextTapServer = struct {
             return;
         };
 
+        // Attribute the reading to a pane: an explicit "pane" field (hook
+        // scripts pass $TRM_PANE_ID) wins, else the pane this client marked
+        // itself connected to. Without either, the reading is unattributed
+        // and every window falls back to showing it.
+        // This handler has the payload parsed as real JSON, so read the pane
+        // from it rather than the naive substring extractor used elsewhere.
+        const pane: ?usize = blk: {
+            if (payload.get("pane")) |v| {
+                if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) {
+                    break :blk @intCast(v.integer);
+                }
+            }
+            if (self.clients.items[idx].connected_pane) |cp| break :blk @as(usize, cp);
+            break :blk null;
+        };
+
         self.pending_commands.append(.{
             .action = .{ .context_usage = .{
                 .used_tokens = used,
@@ -737,6 +753,7 @@ pub const TextTapServer = struct {
                 .percentage = percentage,
                 .session_id = sid,
                 .is_pre_compact = is_pre_compact,
+                .pane = pane,
             } },
         }) catch {
             self.allocator.free(sid);
@@ -2172,6 +2189,127 @@ test "writeToClient preserves order behind pending bytes" {
     const n = posix.read(client_fd, &buf) catch 0;
     try testing.expect(n > 0);
     try testing.expect(std.mem.indexOf(u8, buf[0..n], "first\nsecond\n") != null);
+
+    server.stop();
+}
+
+test "context_update attributes reading to an explicit pane" {
+    const path = "/tmp/test_termania_ctx_pane.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll();
+
+    _ = try posix.write(client_fd,
+        "{\"type\":\"context_update\",\"payload\":{\"context_window\":" ++
+        "{\"used\":1000,\"total\":200000,\"used_percentage\":1}," ++
+        "\"session_id\":\"s1\",\"hook_type\":\"Stop\",\"pane\":7}}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    const cmds = server.drainCommands();
+    defer {
+        for (cmds) |cmd| {
+            switch (cmd) {
+                .send => |s| testing.allocator.free(s.input),
+                .action => |a| llm.freeAction(testing.allocator, a),
+            }
+        }
+        testing.allocator.free(cmds);
+    }
+    try testing.expectEqual(@as(usize, 1), cmds.len);
+    try testing.expect(cmds[0].action == .context_usage);
+    try testing.expectEqual(@as(?usize, 7), cmds[0].action.context_usage.pane);
+    try testing.expectEqual(@as(u64, 1000), cmds[0].action.context_usage.used_tokens);
+
+    server.stop();
+}
+
+test "context_update falls back to the client's connected pane" {
+    const path = "/tmp/test_termania_ctx_fallback.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll();
+
+    // Mark this client as connected to pane 3, then send a reading with no
+    // explicit pane field.
+    _ = try posix.write(client_fd, "{\"type\":\"mark_connected\",\"pane\":3}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    _ = try posix.write(client_fd,
+        "{\"type\":\"context_update\",\"payload\":{\"context_window\":" ++
+        "{\"used\":50,\"total\":200000,\"used_percentage\":0}," ++
+        "\"session_id\":\"s2\",\"hook_type\":\"Stop\"}}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    const cmds = server.drainCommands();
+    defer {
+        for (cmds) |cmd| {
+            switch (cmd) {
+                .send => |s| testing.allocator.free(s.input),
+                .action => |a| llm.freeAction(testing.allocator, a),
+            }
+        }
+        testing.allocator.free(cmds);
+    }
+    try testing.expectEqual(@as(usize, 1), cmds.len);
+    try testing.expect(cmds[0].action == .context_usage);
+    try testing.expectEqual(@as(?usize, 3), cmds[0].action.context_usage.pane);
+
+    server.stop();
+}
+
+test "context_update without pane or connection is unattributed" {
+    const path = "/tmp/test_termania_ctx_none.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll();
+
+    _ = try posix.write(client_fd,
+        "{\"type\":\"context_update\",\"payload\":{\"context_window\":" ++
+        "{\"used\":10,\"total\":200000,\"used_percentage\":0}," ++
+        "\"session_id\":\"s3\",\"hook_type\":\"Stop\"}}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    const cmds = server.drainCommands();
+    defer {
+        for (cmds) |cmd| {
+            switch (cmd) {
+                .send => |s| testing.allocator.free(s.input),
+                .action => |a| llm.freeAction(testing.allocator, a),
+            }
+        }
+        testing.allocator.free(cmds);
+    }
+    try testing.expectEqual(@as(usize, 1), cmds.len);
+    try testing.expect(cmds[0].action == .context_usage);
+    try testing.expectEqual(@as(?usize, null), cmds[0].action.context_usage.pane);
 
     server.stop();
 }
