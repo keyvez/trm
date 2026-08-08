@@ -164,6 +164,12 @@
                                     <action selector="newRow:" target="-1" id="trm-NR-002"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Quick Terminal Here" keyEquivalent="d" id="trm-QH-001">
+                                <modifierMask key="keyEquivalentModifierMask" command="YES"/>
+                                <connections>
+                                    <action selector="toggleQuickTerminalInCurrentFolder:" target="-1" id="trm-QH-002"/>
+                                </connections>
+                            </menuItem>
                             <menuItem isSeparatorItem="YES" id="sjq-M1-UGS"/>
                             <menuItem title="Close" id="DVo-aG-piG">
                                 <modifierMask key="keyEquivalentModifierMask"/>

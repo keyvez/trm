@@ -1,0 +1,20 @@
+Upstream: https://github.com/neurosnap/zmx
+Commit:   6fabec06141d9e4bcda22c982df34166cfe506ee (2026-06-28, v0.6.0 era)
+License:  MIT (see LICENSE)
+
+Vendored files: src/*.zig, LICENSE. The upstream build files are kept as
+build.zig.upstream / build.zig.zon.upstream for reference only — trm builds
+zmx via src/build/GhosttyZmx.zig against the in-tree ghostty-vt module
+(src/lib_vt.zig) instead of fetching the upstream ghostty package.
+
+Local patches (record every deviation from upstream here):
+- trm's in-tree ghostty-vt Stream.nextSlice returns an error union (the
+  upstream-pinned ghostty version did not), so every call site is patched:
+  - src/main.zig daemon read loop (~2595): `catch` + warn (must not kill
+    the daemon on a state-tracking failure)
+  - src/main.zig Daemon.handleOutput (~1165): `try`
+  - src/util.zig test helpers/tests (13 sites): `try`
+
+To update: clone upstream at a new commit, copy src/*.zig + LICENSE over,
+re-apply the patches listed above, update this file, and run
+`zig build test` + a manual attach/detach smoke test.

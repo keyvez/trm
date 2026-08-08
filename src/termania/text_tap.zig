@@ -76,6 +76,9 @@ pub const ClientConnection = struct {
     subscribed: bool = false,
     read_buf: [4096]u8 = undefined,
     read_pos: usize = 0,
+    /// True while discarding the tail of a line that overflowed read_buf.
+    /// Cleared when the line's terminating newline is consumed.
+    discarding_line: bool = false,
     /// Optional app name provided with the subscribe command (heap-allocated).
     app_name: ?[]const u8 = null,
     /// The pane this client marked as connected (via mark_connected), or null.
@@ -88,6 +91,9 @@ pub const TextTapServer = struct {
     socket_path: []const u8,
     pane_count: usize = 0,
     running: bool = false,
+
+    /// Millisecond timestamp of the last poll(), used by pollThrottled().
+    last_poll_ms: i64 = 0,
     /// Listener socket file descriptor.
     listener_fd: ?posix.socket_t = null,
     /// Connected clients.
@@ -121,6 +127,13 @@ pub const TextTapServer = struct {
         for (self.cmux_responses.items) |r| self.allocator.free(r.data);
         self.cmux_responses.deinit();
         self.cmux_pending.deinit();
+        // Commands queued after the last drain still own their strings.
+        for (self.pending_commands.items) |cmd| {
+            switch (cmd) {
+                .send => |s| self.allocator.free(s.input),
+                .action => |a| llm.freeAction(self.allocator, a),
+            }
+        }
         self.pending_commands.deinit();
         self.clients.deinit();
         self.active_pane_ids.deinit();
@@ -194,10 +207,24 @@ pub const TextTapServer = struct {
         self.running = false;
     }
 
+    /// Throttled poll for the C-API accessor functions (is_active, app_name,
+    /// client_count, ...). The Swift UI calls those per pane per render pass,
+    /// and each unthrottled poll costs accept/read syscalls per client. The
+    /// main event loop's termania_poll still calls poll() directly each tick,
+    /// so this only bounds the extra accessor-driven polls.
+    pub fn pollThrottled(self: *TextTapServer) void {
+        const now = std.time.milliTimestamp();
+        if (now - self.last_poll_ms < poll_throttle_ms) return;
+        self.poll();
+    }
+
+    const poll_throttle_ms: i64 = 100;
+
     /// Non-blocking poll: accept new connections and read from existing clients.
     /// Should be called from the main event loop each tick.
     pub fn poll(self: *TextTapServer) void {
         if (!self.running) return;
+        self.last_poll_ms = std.time.milliTimestamp();
 
         // Accept new connections (non-blocking).
         self.acceptNewClients();
@@ -271,8 +298,13 @@ pub const TextTapServer = struct {
         const client = &self.clients.items[idx];
         const remaining = client.read_buf[client.read_pos..];
         if (remaining.len == 0) {
-            // Buffer is full with no newline — discard and reset.
+            // Buffer is full with no newline — the line is too large for the
+            // protocol. Discard what's buffered and keep discarding until the
+            // line's terminating newline, so the NEXT message re-aligns
+            // instead of the tail being parsed as a fresh (corrupt) message.
             client.read_pos = 0;
+            client.discarding_line = true;
+            self.respond(idx, "{\"error\": \"message too large\"}\n");
             return true;
         }
 
@@ -297,6 +329,19 @@ pub const TextTapServer = struct {
     fn processClientBuffer(self: *TextTapServer, idx: usize) void {
         const client = &self.clients.items[idx];
         var offset: usize = 0;
+
+        // Skip the remainder of an oversized line that is being discarded.
+        if (client.discarding_line) {
+            const buffered = client.read_buf[0..client.read_pos];
+            if (std.mem.indexOf(u8, buffered, "\n")) |nl| {
+                client.discarding_line = false;
+                offset = nl + 1;
+            } else {
+                // Terminator not seen yet; drop everything and keep waiting.
+                client.read_pos = 0;
+                return;
+            }
+        }
 
         while (offset < client.read_pos) {
             // Find the next newline.
@@ -470,8 +515,14 @@ pub const TextTapServer = struct {
                 self.allocator.free(title);
                 return;
             };
+            // An explicit "pane" wins; otherwise fall back to the pane this
+            // client marked itself connected to. One-shot clients (hook
+            // scripts piping through `nc`) never mark_connected, so without
+            // an explicit pane the notification can't be attributed here.
+            const pane: ?usize = extractNumberAfter(msg, "pane") orelse
+                if (self.clients.items[idx].connected_pane) |cp| @as(usize, cp) else null;
             self.pending_commands.append(.{
-                .action = .{ .notify = .{ .title = title, .body = body } },
+                .action = .{ .notify = .{ .title = title, .body = body, .pane = pane } },
             }) catch {
                 self.allocator.free(title);
                 self.allocator.free(body);
@@ -1339,6 +1390,97 @@ test "server send command queued" {
     server.stop();
 }
 
+/// Send one notify action over a fresh client and return the parsed pane.
+/// `pre` is an optional message sent before the notify (e.g. mark_connected).
+fn testNotifyPane(path: []const u8, pre: ?[]const u8, notify_msg: []const u8) !?usize {
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll(); // Accept.
+
+    if (pre) |p| {
+        _ = try posix.write(client_fd, p);
+        std.Thread.sleep(1_000_000);
+        server.poll();
+    }
+
+    _ = try posix.write(client_fd, notify_msg);
+    std.Thread.sleep(1_000_000);
+    server.poll(); // Read + process.
+
+    const cmds = server.drainCommands();
+    defer {
+        for (cmds) |cmd| {
+            switch (cmd) {
+                .action => |a| llm.freeAction(testing.allocator, a),
+                .send => |s| testing.allocator.free(s.input),
+            }
+        }
+        testing.allocator.free(cmds);
+    }
+
+    server.stop();
+
+    try testing.expectEqual(@as(usize, 1), cmds.len);
+    switch (cmds[0]) {
+        .action => |a| switch (a) {
+            .notify => |n| {
+                try testing.expectEqualSlices(u8, "Claude Code", n.title);
+                return n.pane;
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "notify uses explicit pane field" {
+    // Hook scripts pass $TRM_PANE_ID so the right pane is credited even when
+    // several one-shot clients are connected.
+    const pane = try testNotifyPane(
+        "/tmp/test_termania_notify_explicit.sock",
+        null,
+        "{\"type\":\"action\",\"action\":\"notify\",\"title\":\"Claude Code\",\"body\":\"done\",\"pane\":7}\n",
+    );
+    try testing.expectEqual(@as(?usize, 7), pane);
+}
+
+test "notify falls back to the client's connected pane" {
+    const pane = try testNotifyPane(
+        "/tmp/test_termania_notify_connected.sock",
+        "{\"type\":\"mark_connected\",\"pane\":4}\n",
+        "{\"type\":\"action\",\"action\":\"notify\",\"title\":\"Claude Code\",\"body\":\"done\"}\n",
+    );
+    try testing.expectEqual(@as(?usize, 4), pane);
+}
+
+test "notify without pane or connection is unattributed" {
+    // A one-shot `nc` client never marks itself connected, so there is nothing
+    // to attribute here — the pane must stay null rather than guessing.
+    const pane = try testNotifyPane(
+        "/tmp/test_termania_notify_none.sock",
+        null,
+        "{\"type\":\"action\",\"action\":\"notify\",\"title\":\"Claude Code\",\"body\":\"done\"}\n",
+    );
+    try testing.expectEqual(@as(?usize, null), pane);
+}
+
+test "notify explicit pane wins over connected pane" {
+    const pane = try testNotifyPane(
+        "/tmp/test_termania_notify_both.sock",
+        "{\"type\":\"mark_connected\",\"pane\":4}\n",
+        "{\"type\":\"action\",\"action\":\"notify\",\"title\":\"Claude Code\",\"body\":\"done\",\"pane\":9}\n",
+    );
+    try testing.expectEqual(@as(?usize, 9), pane);
+}
+
 test "server unsubscribe" {
     const path = "/tmp/test_termania_unsub.sock";
     var server = TextTapServer.init(testing.allocator, path);
@@ -1416,9 +1558,13 @@ test "server broadcast to subscribed clients" {
     try testing.expect(std.mem.indexOf(u8, buf1[0..n1], "\"test\"") != null);
 
     // Client 2 (not subscribed) should have nothing.
-    // Set c2 to non-blocking to check.
+    // Set c2 to non-blocking to check. Must use the O_NONBLOCK file-status
+    // flag (0x0004 on macOS, same as start() uses) — SOCK.NONBLOCK is a
+    // socket-type flag whose value means something else to F_SETFL, so the
+    // old code left the fd blocking and this read hung the test run forever.
+    const O_NONBLOCK: usize = 0x0004;
     const flags = posix.fcntl(c2_fd, posix.F.GETFL, 0) catch 0;
-    _ = posix.fcntl(c2_fd, posix.F.SETFL, flags | @as(usize, @bitCast(@as(isize, posix.SOCK.NONBLOCK)))) catch {};
+    _ = posix.fcntl(c2_fd, posix.F.SETFL, flags | O_NONBLOCK) catch {};
     var buf2: [256]u8 = undefined;
     const n2 = posix.read(c2_fd, &buf2) catch |err| blk: {
         if (err == error.WouldBlock) break :blk @as(usize, 0);

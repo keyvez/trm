@@ -123,6 +123,17 @@ extension Ghostty {
             // Don't call super - the drag will be initiated in mouseDragged.
         }
 
+        override func mouseUp(with event: NSEvent) {
+            // A click on the grab handle that never turned into a drag is a
+            // "tap" — expand (peek) the pane so the user can see more of its
+            // contents. If a drag began, isTracking is true and we skip this.
+            guard !isTracking, let surfaceView else { return }
+            NotificationCenter.default.post(
+                name: Trm.peekPaneRequest,
+                object: surfaceView
+            )
+        }
+
         override func updateTrackingAreas() {
             super.updateTrackingAreas()
 

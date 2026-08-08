@@ -202,6 +202,9 @@ class AppDelegate: NSObject,
         // Register our service provider. This must happen after everything is initialized.
         NSApp.servicesProvider = ServiceProvider()
 
+        // Watch for `trm ext create` CLI requests (LLM extension builder).
+        ExtensionBuilder.shared.startWatchingRequests()
+
         // This registers the Ghostty => Services menu to exist.
         NSApp.servicesMenu = menuServices
 
@@ -271,7 +274,8 @@ class AppDelegate: NSObject,
         self.appearanceObserver = NSApplication.shared.observe(
             \.effectiveAppearance,
              options: [.new, .initial]
-        ) { _, change in
+        ) { [weak self] _, change in
+            guard let self else { return }
             guard let appearance = change.newValue else { return }
             guard let app = self.ghostty.app else { return }
             let scheme: ghostty_color_scheme_e
@@ -356,6 +360,16 @@ class AppDelegate: NSObject,
             return
         }
 
+        // No auto-save, but live zmx sessions nothing references: offer to
+        // attach them instead of leaving them stranded in the background.
+        if ghostty.sessionPersistence {
+            let orphans = ZmxSessionManager.orphanSessions()
+            if !orphans.isEmpty {
+                showOrphanSessionDialog(orphans)
+                return
+            }
+        }
+
         // No auto-save. If a --config path was passed, open it directly.
         if let cfgPath = configPath {
             openNewWindow(cwd: FileManager.default.currentDirectoryPath, configPath: cfgPath)
@@ -364,6 +378,43 @@ class AppDelegate: NSObject,
 
         // Nothing: open a blank window.
         _ = TerminalController.newWindow(ghostty)
+    }
+
+    /// Offer to attach zmx sessions that are still running but not part of
+    /// any saved window layout.
+    @MainActor private func showOrphanSessionDialog(_ orphans: [String]) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Attach running sessions?"
+        let listed = orphans.prefix(6).joined(separator: "\n")
+        let tail = orphans.count > 6 ? "\n…" : ""
+        alert.informativeText = """
+        \(orphans.count) terminal session\(orphans.count == 1 ? " is" : "s are") \
+        still running in the background:
+        \(listed)\(tail)
+        """
+        alert.addButton(withTitle: "Attach Sessions")
+        alert.addButton(withTitle: "New Window")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            let panes = orphans.map { name in
+                Trm.TrmPaneConfig(
+                    paneType: "terminal", command: nil, cwd: nil, watermark: nil,
+                    title: nil, url: nil, file: nil, content: nil, target: nil,
+                    targetTitle: nil, path: nil, refreshMs: nil, repo: nil,
+                    initialCommands: [], patterns: [], zmxSession: name
+                )
+            }
+            let cols = min(panes.count, 3)
+            let rows = (panes.count + cols - 1) / cols
+            let config = Trm.TrmGridConfig(
+                rows: rows, cols: cols, gap: 4, padding: 4,
+                panes: panes, rowCols: []
+            )
+            _ = TerminalController.newWindow(ghostty, withGridConfig: config)
+        } else {
+            _ = TerminalController.newWindow(ghostty)
+        }
     }
 
     /// Show the startup dialog whenever there is an auto-saved session.
@@ -530,16 +581,10 @@ class AppDelegate: NSObject,
         }
     }
 
-    /// Kill the daemon server so all background sessions are terminated.
+    /// Kill every trm-owned zmx session so nothing keeps running in the
+    /// background, and clear auto-saves so the dead sessions aren't restored.
     @MainActor private func terminateDaemonSessions() {
-        let pidPath = Ghostty.App.daemonPidPath
-        guard let pidStr = try? String(contentsOfFile: pidPath, encoding: .utf8),
-              let pid = pid_t(pidStr.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
-        kill(pid, SIGTERM)
-        // Clean up PID and socket files
-        try? FileManager.default.removeItem(atPath: pidPath)
-        try? FileManager.default.removeItem(atPath: Ghostty.App.daemonSocketPath)
-        // Clear auto-save so terminated sessions aren't restored
+        ZmxSessionManager.killAllTrmSessions()
         SessionManager.clearAutoSaves()
     }
 
@@ -1106,17 +1151,29 @@ class AppDelegate: NSObject,
     }
 
     @objc private func ghosttyNewTab(_ notification: Notification) {
-        guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
-        guard let window = surfaceView.window else { return }
+        TrmDiagnostics.log("[newtab-trace] AppDelegate.ghosttyNewTab received notification")
+        guard let surfaceView = notification.object as? Ghostty.SurfaceView else {
+            TrmDiagnostics.log("[newtab-trace] AppDelegate.ghosttyNewTab: object is not a SurfaceView")
+            return
+        }
+        guard let window = surfaceView.window else {
+            TrmDiagnostics.log("[newtab-trace] AppDelegate.ghosttyNewTab: surfaceView has no window")
+            return
+        }
 
         // We only want to listen to new tabs if the focused parent is
         // a regular terminal controller.
-        guard window.windowController is TerminalController else { return }
+        guard window.windowController is TerminalController else {
+            TrmDiagnostics.log("[newtab-trace] AppDelegate.ghosttyNewTab: windowController is not a TerminalController")
+            return
+        }
 
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
 
+        TrmDiagnostics.log("[newtab-trace] AppDelegate.ghosttyNewTab: calling TerminalController.newTab")
         _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
+        TrmDiagnostics.log("[newtab-trace] AppDelegate.ghosttyNewTab: TerminalController.newTab returned")
     }
 
     private func setDockBadge(_ label: String? = "•") {
@@ -1442,6 +1499,17 @@ class AppDelegate: NSObject,
 
     @IBAction func toggleQuickTerminal(_ sender: Any) {
         quickController.toggle()
+    }
+
+    /// Toggle the quick terminal, starting a fresh shell in the focused
+    /// trm pane's current working directory (if any).
+    @IBAction func toggleQuickTerminalInCurrentFolder(_ sender: Any) {
+        let cwd: String? = {
+            guard let controller = NSApp.keyWindow?.windowController as? BaseTerminalController,
+                  !(controller is QuickTerminalController) else { return nil }
+            return controller.focusedSurface?.pwd
+        }()
+        quickController.toggle(startingIn: cwd)
     }
 
     /// Toggles visibility of all Ghosty Terminal windows. When hidden, activates Ghostty as the frontmost application

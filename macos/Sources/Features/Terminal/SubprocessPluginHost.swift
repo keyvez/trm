@@ -10,6 +10,12 @@ import Combine
 /// If the subprocess crashes, the host clears overlay state (so the
 /// UI stays clean) and restarts with exponential backoff. After 3
 /// consecutive failures the plugin is left dead — trm keeps running.
+///
+/// Containment: extensions run out-of-process, so the worst a buggy or
+/// leaky extension can do is get itself killed. A memory watchdog SIGKILLs
+/// the process over its cap (manifest `memory_limit_mb`, default 256), a
+/// `ulimit -t` shim caps CPU seconds, and plugin-requested actions are
+/// gated by manifest capabilities — repeated denials kill the plugin.
 @MainActor
 final class SubprocessPluginHost: ObservableObject, ServicePlugin, ObservableServicePlugin, TerminalOutputSubscriber, ServicePluginOverlayProvider {
 
@@ -33,6 +39,41 @@ final class SubprocessPluginHost: ObservableObject, ServicePlugin, ObservableSer
 
     /// Optional configuration payload forwarded to the plugin on launch.
     var configPayload: HostConfigPayload
+
+    /// Capabilities granted to this instance (from its manifest). Actions
+    /// requiring an ungranted capability are dropped.
+    let capabilities: Set<PluginCapability>
+
+    /// Memory cap; the watchdog SIGKILLs the process above this.
+    let memoryLimitMB: Int
+
+    /// CPU-seconds cap applied via `ulimit -t` in the launch shim.
+    let cpuLimitSeconds: Int
+
+    /// Executes capability-approved TrmActions. Set at registration.
+    var actionExecutor: (([TrmAction]) -> Void)?
+
+    /// Publisher of context usage updates, forwarded to the plugin as
+    /// `context_usage` events. Set at registration.
+    var contextUsagePublisher: AnyPublisher<Trm.ContextUsageData?, Never>? {
+        didSet {
+            contextCancellable = contextUsagePublisher?.sink { [weak self] usage in
+                guard let usage else { return }
+                self?.sendMessage(.contextUsage(
+                    usedTokens: usage.usedTokens,
+                    totalTokens: usage.totalTokens,
+                    percentage: Int(usage.percentage),
+                    sessionId: usage.sessionId
+                ))
+            }
+        }
+    }
+    private var contextCancellable: AnyCancellable?
+
+    /// Capability-denial counter; the plugin is killed for good once this
+    /// crosses `maxViolations` (a misbehaving extension, not a buggy one).
+    private var violationCount = 0
+    private static let maxViolations = 20
 
     // MARK: - Published State
 
@@ -69,11 +110,25 @@ final class SubprocessPluginHost: ObservableObject, ServicePlugin, ObservableSer
     ///   - name: Human-readable display name.
     ///   - executablePath: Absolute path to the plugin executable.
     ///   - config: Optional configuration forwarded to the plugin.
-    init(id: String, name: String, executablePath: String, config: HostConfigPayload = HostConfigPayload()) {
+    ///   - capabilities: Manifest-granted capabilities (action gating).
+    ///   - memoryLimitMB: Memory cap for the watchdog (default 256 MB).
+    ///   - cpuLimitSeconds: CPU-seconds cap via ulimit (default 300).
+    init(
+        id: String,
+        name: String,
+        executablePath: String,
+        config: HostConfigPayload = HostConfigPayload(),
+        capabilities: Set<PluginCapability> = [.terminalOutputRead],
+        memoryLimitMB: Int = 256,
+        cpuLimitSeconds: Int = 300
+    ) {
         self.pluginId = id
         self.displayName = name
         self.executablePath = executablePath
         self.configPayload = config
+        self.capabilities = capabilities
+        self.memoryLimitMB = max(16, memoryLimitMB)
+        self.cpuLimitSeconds = max(10, cpuLimitSeconds)
     }
 
     // MARK: - Lifecycle
@@ -102,6 +157,10 @@ final class SubprocessPluginHost: ObservableObject, ServicePlugin, ObservableSer
         sendMessage(.paneClosed(pane: paneId))
     }
 
+    func terminalCommandDidFinish(paneId: Int) {
+        sendMessage(.commandFinished(pane: paneId))
+    }
+
     // MARK: - ServicePluginOverlayProvider
 
     var overlayAlignment: Alignment {
@@ -122,7 +181,15 @@ final class SubprocessPluginHost: ObservableObject, ServicePlugin, ObservableSer
         }
 
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: executablePath)
+        // Launch through a sh shim so we can apply a hard CPU-seconds cap
+        // (ulimit -t delivers SIGXCPU/SIGKILL to runaway spins). Memory is
+        // handled by the watchdog below — ulimit -v is a no-op on macOS.
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+        proc.arguments = [
+            "-c",
+            "ulimit -t \(cpuLimitSeconds) 2>/dev/null; exec \"$0\"",
+            executablePath,
+        ]
 
         let stdin = Pipe()
         let stdout = Pipe()
@@ -166,9 +233,48 @@ final class SubprocessPluginHost: ObservableObject, ServicePlugin, ObservableSer
 
         // Schedule stability timer — reset restart count after 60s of stable running
         scheduleStabilityReset()
+
+        // Memory watchdog
+        startMemoryWatchdog(pid: proc.processIdentifier)
+    }
+
+    // MARK: - Memory Watchdog
+
+    private var memoryWatchdog: Timer?
+
+    /// Poll the process's physical footprint every 5s; SIGKILL it over the
+    /// cap. The existing exit handler then restarts with backoff, so a
+    /// leaking extension degrades to periodic restarts instead of eating
+    /// the machine.
+    private func startMemoryWatchdog(pid: pid_t) {
+        memoryWatchdog?.invalidate()
+        let capBytes = UInt64(memoryLimitMB) * 1024 * 1024
+        memoryWatchdog = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
+            var info = rusage_info_current()
+            let result = withUnsafeMutablePointer(to: &info) { ptr -> Int32 in
+                ptr.withMemoryRebound(to: (rusage_info_t?.self), capacity: 1) { reboundPtr in
+                    proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, reboundPtr)
+                }
+            }
+            guard result == 0 else {
+                // Process is gone; exit handling owns cleanup.
+                timer.invalidate()
+                return
+            }
+            if info.ri_phys_footprint > capBytes {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    NSLog("[SubprocessPluginHost] \(self.pluginId): over memory cap (\(info.ri_phys_footprint / 1_048_576)MB > \(self.memoryLimitMB)MB), killing")
+                    kill(pid, SIGKILL)
+                }
+                timer.invalidate()
+            }
+        }
     }
 
     private func terminateProcess() {
+        memoryWatchdog?.invalidate()
+        memoryWatchdog = nil
         if let proc = process, proc.isRunning {
             proc.terminate()
         }
@@ -302,6 +408,96 @@ final class SubprocessPluginHost: ObservableObject, ServicePlugin, ObservableSer
 
         case .error:
             NSLog("[SubprocessPluginHost] \(pluginId): plugin error: \(message.message ?? "unknown")")
+
+        case .action:
+            handleActionRequest(message.actions ?? [])
+        }
+    }
+
+    // MARK: - Action Channel (capability-gated)
+
+    /// The capability an action needs before the host will execute it.
+    private static func requiredCapability(forActionType type: String) -> PluginCapability? {
+        switch type {
+        case "send_command", "send_to_all":
+            return .sendInput
+        case "spawn_pane", "close_pane", "focus_pane", "open_url":
+            return .paneControl
+        case "set_watermark", "set_title", "clear_watermark":
+            return .paneDecorate
+        case "notify":
+            return .userNotifications
+        case "message":
+            return nil // benign: shows text in the palette status area
+        default:
+            return nil
+        }
+    }
+
+    private func handleActionRequest(_ payloads: [PluginActionPayload]) {
+        var approved: [TrmAction] = []
+        for payload in payloads {
+            if let needed = Self.requiredCapability(forActionType: payload.type),
+               !capabilities.contains(needed) {
+                violationCount += 1
+                NSLog("[SubprocessPluginHost] \(pluginId): DENIED action '\(payload.type)' (missing capability, violation \(violationCount)/\(Self.maxViolations))")
+                if violationCount >= Self.maxViolations {
+                    NSLog("[SubprocessPluginHost] \(pluginId): too many capability violations, stopping plugin")
+                    stop()
+                    return
+                }
+                continue
+            }
+
+            switch payload.type {
+            case "send_command":
+                if let pane = payload.pane, let cmd = payload.command {
+                    approved.append(.sendCommand(pane: pane, command: cmd))
+                }
+            case "send_to_all":
+                if let cmd = payload.command {
+                    approved.append(.sendToAll(command: cmd))
+                }
+            case "set_title":
+                if let pane = payload.pane, let title = payload.title {
+                    approved.append(.setTitle(pane: pane, title: title))
+                }
+            case "set_watermark":
+                if let pane = payload.pane, let wm = payload.watermark {
+                    approved.append(.setWatermark(pane: pane, watermark: wm))
+                }
+            case "clear_watermark":
+                if let pane = payload.pane {
+                    approved.append(.clearWatermark(pane: pane))
+                }
+            case "spawn_pane":
+                approved.append(.spawnPane)
+            case "close_pane":
+                if let pane = payload.pane {
+                    approved.append(.closePane(pane: pane))
+                }
+            case "focus_pane":
+                if let pane = payload.pane {
+                    approved.append(.focusPane(pane: pane))
+                }
+            case "message":
+                if let text = payload.text {
+                    approved.append(.message(text: text))
+                }
+            case "notify":
+                Trm.shared.showNotification(
+                    title: payload.title ?? displayName,
+                    body: payload.body ?? "")
+            case "open_url":
+                if let raw = payload.url, let url = URL(string: raw) {
+                    NSWorkspace.shared.open(url)
+                }
+            default:
+                NSLog("[SubprocessPluginHost] \(pluginId): unknown action type '\(payload.type)'")
+            }
+        }
+        if !approved.isEmpty {
+            actionExecutor?(approved)
         }
     }
 }

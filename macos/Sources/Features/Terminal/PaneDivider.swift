@@ -116,22 +116,22 @@ final class DividerNSView: NSView {
     // MARK: - Drag
 
     override func mouseDown(with event: NSEvent) {
-        let loc = convert(event.locationInWindow, from: nil)
-        // Y=0 at bottom: dragging the horizontal divider DOWN decreases loc.y,
-        // which means the top pane shrinks — so we negate the horizontal delta.
-        dragStartPoint = axis == .horizontal ? loc.y : loc.x
+        // Use window coordinates (not local view coordinates) so that when the divider
+        // view repositions in response to a drag update, the next event's delta is still
+        // computed relative to the same fixed point in the window — preventing jitter.
+        let winLoc = event.locationInWindow
+        dragStartPoint = axis == .horizontal ? winLoc.y : winLoc.x
         dragStartFraction = currentFraction
         isDragging = true
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard isDragging, combinedLength > 0 else { return }
-        let loc = convert(event.locationInWindow, from: nil)
-        let current = axis == .horizontal ? loc.y : loc.x
-        // Horizontal (row) divider: Y=0 at bottom, so dragging DOWN decreases Y.
-        // Decreasing Y means the divider moved down → top pane grows → fraction should increase.
-        // But delta = current - start is NEGATIVE when dragging down in unflipped coords.
-        // We need to negate for horizontal so the drag direction feels natural.
+        let winLoc = event.locationInWindow
+        let current = axis == .horizontal ? winLoc.y : winLoc.x
+        // Horizontal (row) divider: Y=0 at bottom in window coords, so dragging DOWN
+        // decreases Y. Decreasing Y means the divider moved down → top pane grows →
+        // fraction should increase. Negate so drag direction feels natural.
         let rawDelta = current - dragStartPoint
         let delta = axis == .horizontal ? -rawDelta : rawDelta
         let proposed = dragStartFraction + delta / combinedLength

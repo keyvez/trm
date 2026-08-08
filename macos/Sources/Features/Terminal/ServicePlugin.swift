@@ -16,6 +16,28 @@ enum PluginCapability: Hashable, Sendable {
     case clipboardWrite
     /// Post user-facing notifications.
     case userNotifications
+    /// Send input/commands into pane PTYs (send_command, send_to_all).
+    case sendInput
+    /// Spawn/close/focus panes and open URLs.
+    case paneControl
+    /// Set watermarks and titles on panes.
+    case paneDecorate
+
+    /// Parse a manifest capability string. Unknown strings return nil so
+    /// typos deny rather than silently grant.
+    static func parse(_ raw: String) -> PluginCapability? {
+        switch raw {
+        case "terminal_output_read": return .terminalOutputRead
+        case "network_access": return .networkAccess
+        case "file_system_read": return .fileSystemRead
+        case "clipboard_write": return .clipboardWrite
+        case "notifications", "user_notifications": return .userNotifications
+        case "send_input": return .sendInput
+        case "pane_control": return .paneControl
+        case "pane_decorate": return .paneDecorate
+        default: return nil
+        }
+    }
 }
 
 // MARK: - ServicePlugin

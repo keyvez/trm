@@ -129,24 +129,31 @@ final class ServerURLDetectorPlugin: ObservableObject, ServicePlugin, Observable
         let nsText = text as NSString
         let fullRange = NSRange(location: 0, length: nsText.length)
 
-        struct PositionedMatch: Hashable {
-            let location: Int
-            let raw: String
-        }
         var seen = Set<String>()
-        var matches: [PositionedMatch] = []
+        var matches: [(range: NSRange, raw: String)] = []
 
         for pattern in allPatterns {
             for result in pattern.matches(in: text, range: fullRange) {
-                let raw = nsText.substring(with: result.range)
+                let range = result.range
+                // Skip a match contained inside an already-accepted one:
+                // the bare host:port pattern re-matches the authority of a
+                // full https:// or ws:// URL, which used to surface a bogus
+                // second http:// URL in the banner.
+                let isSubmatch = matches.contains { accepted in
+                    range.location >= accepted.range.location
+                        && NSMaxRange(range) <= NSMaxRange(accepted.range)
+                }
+                if isSubmatch { continue }
+
+                let raw = nsText.substring(with: range)
                 let normalized = normalizeURL(raw)
                 guard !seen.contains(normalized) else { continue }
                 seen.insert(normalized)
-                matches.append(PositionedMatch(location: result.range.location, raw: raw))
+                matches.append((range: range, raw: raw))
             }
         }
 
-        matches.sort { $0.location < $1.location }
+        matches.sort { $0.range.location < $1.range.location }
 
         return matches.compactMap { m in
             URL(string: normalizeURL(m.raw))

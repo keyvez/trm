@@ -281,6 +281,7 @@ enum GridPane: Identifiable {
     case terminal(Ghostty.SurfaceView)
     case webview(WebViewPane)
     case plugin(PluginPane)
+    case agentOverview(AgentOverviewPane)
     case stack([GridPane])
 
     var id: ObjectIdentifier {
@@ -288,6 +289,7 @@ enum GridPane: Identifiable {
         case .terminal(let surface): return ObjectIdentifier(surface)
         case .webview(let pane): return ObjectIdentifier(pane)
         case .plugin(let pane): return ObjectIdentifier(pane)
+        case .agentOverview(let pane): return ObjectIdentifier(pane)
         case .stack(let children):
             // Use the first child's identity as the stack's identity.
             guard let first = children.first else {
@@ -309,4 +311,22 @@ enum GridPane: Identifiable {
         if case .stack(let children) = self { return children }
         return nil
     }
+
+    /// The first terminal surface in this pane (descending into stacks), if any.
+    var firstTerminalSurface: Ghostty.SurfaceView? {
+        switch self {
+        case .terminal(let surface): return surface
+        case .stack(let children):
+            return children.lazy.compactMap { $0.firstTerminalSurface }.first
+        default: return nil
+        }
+    }
+}
+
+/// Which edge of the target cell a dropped pane lands on when stacking.
+/// Stacks render top-to-bottom, so `.top` inserts the pane as the first
+/// sub-pane and `.bottom` appends it as the last.
+enum StackDropEdge: Equatable {
+    case top
+    case bottom
 }

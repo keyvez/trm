@@ -102,28 +102,41 @@ final class TerminalOutputScanner {
             onPaneClose?(trackedIndex)
         }
 
-        for pane in panes {
-            let hash = sha256(pane.visibleText)
-            if lastContentHashes[pane.paneId] == hash { continue }
-            lastContentHashes[pane.paneId] = hash
+        // Snapshot subscribers and current hashes so we can do hashing off the main thread.
+        let previousHashes = lastContentHashes
+        let disabledFilter = disabledPluginFilter
 
-            for sub in subscribers {
-                // Skip notification if this subscriber's plugin is disabled for this pane.
-                if let filter = disabledPluginFilter,
-                   let plugin = sub.value as? any ServicePlugin,
-                   filter(plugin.pluginId, pane.paneId) {
-                    continue
+        Task.detached(priority: .utility) { [weak self, panes, previousHashes, disabledFilter] in
+            var changed: [(paneId: Int, text: String, hash: String)] = []
+            for pane in panes {
+                let hash = Self.sha256(pane.visibleText)
+                if previousHashes[pane.paneId] == hash { continue }
+                changed.append((paneId: pane.paneId, text: pane.visibleText, hash: hash))
+            }
+            guard !changed.isEmpty else { return }
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                for item in changed {
+                    self.lastContentHashes[item.paneId] = item.hash
+                    for sub in self.subscribers {
+                        if let filter = disabledFilter,
+                           let plugin = sub.value as? any ServicePlugin,
+                           filter(plugin.pluginId, item.paneId) {
+                            continue
+                        }
+                        sub.value?.terminalOutputDidChange(
+                            paneId: item.paneId,
+                            text: item.text,
+                            hash: item.hash
+                        )
+                    }
                 }
-                sub.value?.terminalOutputDidChange(
-                    paneId: pane.paneId,
-                    text: pane.visibleText,
-                    hash: hash
-                )
             }
         }
     }
 
-    private func sha256(_ string: String) -> String {
+    private nonisolated static func sha256(_ string: String) -> String {
         let data = Data(string.utf8)
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()

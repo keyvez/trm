@@ -45,8 +45,14 @@ final class ServicePluginRegistry: ObservableObject {
 
     /// Register a plugin. Capabilities are granted based on the plugin's
     /// declared requirements, except `.networkAccess` which is denied by
-    /// default.
-    func register(_ plugin: any ServicePlugin, disabledByDefault: Bool = false) {
+    /// default. Pass `capabilities` to grant an instance-specific set
+    /// instead of the type-level requirements (used for subprocess
+    /// extensions, whose grants come from their manifest).
+    func register(
+        _ plugin: any ServicePlugin,
+        disabledByDefault: Bool = false,
+        capabilities: Set<PluginCapability>? = nil
+    ) {
         if disabledByDefault {
             globallyDisabledPlugins.insert(plugin.pluginId)
         }
@@ -54,7 +60,7 @@ final class ServicePluginRegistry: ObservableObject {
         plugins[id] = plugin
 
         // Grant all requested capabilities except networkAccess
-        var granted = type(of: plugin).requiredCapabilities
+        var granted = capabilities ?? type(of: plugin).requiredCapabilities
         granted.remove(.networkAccess)
         grantedCapabilities[id] = granted
 

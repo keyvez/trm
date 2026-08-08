@@ -62,6 +62,10 @@ pub fn build(b: *std.Build) !void {
     // Ghostty executable, the actual runnable Ghostty program.
     const exe = try buildpkg.GhosttyExe.init(b, &config, &deps);
 
+    // zmx session-persistence tool (vendor/zmx), bundled into trm.app so
+    // panes can run under detachable per-session daemons.
+    const zmx = try buildpkg.GhosttyZmx.init(b, &config, &mod);
+
     // Ghostty docs
     const docs = try buildpkg.GhosttyDocs.init(b, &deps);
     if (config.emit_docs) {
@@ -127,6 +131,7 @@ pub fn build(b: *std.Build) !void {
             exe.install();
             resources.install();
             if (i18n) |v| v.install();
+            zmx.install();
         }
     } else {
         // Libghostty
@@ -148,6 +153,10 @@ pub fn build(b: *std.Build) !void {
     // macOS only artifacts. These will error if they're initialized for
     // other targets.
     if (config.target.result.os.tag.isDarwin()) {
+        // The Xcode project copies zig-out/bin/zmx into the app bundle
+        // (Copy Files phase), so any Darwin build must produce it.
+        zmx.install();
+
         // Ghostty xcframework
         const xcframework = try buildpkg.GhosttyXCFramework.init(
             b,

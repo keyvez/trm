@@ -10,10 +10,16 @@ enum HostMessage: Encodable {
     case terminalOutput(pane: Int, text: String, hash: String)
     case paneClosed(pane: Int)
     case notification(name: String, pane: Int)
+    case commandFinished(pane: Int)
+    case contextUsage(usedTokens: UInt64, totalTokens: UInt64, percentage: Int, sessionId: String)
     case stop
 
     private enum CodingKeys: String, CodingKey {
         case type, config, pane, text, hash, name
+        case usedTokens = "used_tokens"
+        case totalTokens = "total_tokens"
+        case percentage
+        case sessionId = "session_id"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -36,6 +42,15 @@ enum HostMessage: Encodable {
             try container.encode("notification", forKey: .type)
             try container.encode(name, forKey: .name)
             try container.encode(pane, forKey: .pane)
+        case .commandFinished(let pane):
+            try container.encode("command_finished", forKey: .type)
+            try container.encode(pane, forKey: .pane)
+        case .contextUsage(let used, let total, let pct, let sessionId):
+            try container.encode("context_usage", forKey: .type)
+            try container.encode(used, forKey: .usedTokens)
+            try container.encode(total, forKey: .totalTokens)
+            try container.encode(pct, forKey: .percentage)
+            try container.encode(sessionId, forKey: .sessionId)
         case .stop:
             try container.encode("stop", forKey: .type)
         }
@@ -56,12 +71,30 @@ struct PluginMessage: Decodable {
     let alignment: String?
     let panes: [String: PluginPaneValue]?
     let message: String?
+    /// Action requests (type == .action). Each entry mirrors the TrmAction
+    /// wire schema used by the LLM path: {"type": "send_command", ...}.
+    let actions: [PluginActionPayload]?
 
     enum MessageType: String, Decodable {
         case ready
         case state
         case error
+        case action
     }
+}
+
+/// One action requested by a subprocess plugin. Same wire vocabulary as the
+/// LLM response actions; mapped to `TrmAction` and capability-gated by the
+/// host before execution.
+struct PluginActionPayload: Decodable {
+    let type: String
+    let pane: Int?
+    let command: String?
+    let title: String?
+    let watermark: String?
+    let text: String?
+    let body: String?
+    let url: String?
 }
 
 /// A pane value from the plugin can be a bool, a string, or an array of strings.
@@ -96,6 +129,9 @@ enum OverlayTemplate: String, Codable {
     case serverURLBanner = "server_url_banner"
     case attentionIcon = "attention_icon"
     case processPill = "process_pill"
+    /// Generic label/value pill for metrics (e.g. agent quota). Pane value:
+    /// ["<label>", "<value>", "<color>"] where color is green|yellow|red|gray.
+    case metricPill = "metric_pill"
 }
 
 // MARK: - Alignment Mapping

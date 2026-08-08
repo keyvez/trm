@@ -69,14 +69,27 @@ struct TrmGridView: View {
     /// Callback to close a utility plugin pane.
     var onClosePluginPane: ((PluginPane) -> Void)? = nil
 
+    /// Callback to open the agent overview view for a terminal pane.
+    var onShowAgentOverview: ((GridPane) -> Void)? = nil
+
+    /// Callback to close an agent overview pane.
+    var onCloseAgentOverview: ((AgentOverviewPane) -> Void)? = nil
+
+    /// Whether the given pane already has an agent overview open.
+    var hasAgentOverview: ((GridPane) -> Bool)? = nil
+
     /// Callback to move a pane in a direction (left/right/up/down).
     var onMovePane: ((GridPane, BaseTerminalController.PaneMoveDirection) -> Void)? = nil
 
-    /// Callback to stack a source pane onto a target pane.
-    var onStackPane: ((GridPane, GridPane) -> Void)? = nil
+    /// Callback to stack a source pane onto a target pane at the given edge.
+    var onStackPane: ((GridPane, GridPane, StackDropEdge) -> Void)? = nil
 
     /// Callback to swap two panes' positions in the grid.
     var onSwapPane: ((GridPane, GridPane) -> Void)? = nil
+
+    /// Callback when a pane from another window is dropped onto a pane in
+    /// this window: (surface UUID, target pane, stack mode, edge).
+    var onTransferPane: ((UUID, GridPane, Bool, StackDropEdge) -> Void)? = nil
 
     /// Callback to unstack (restore) a pane from its stack.
     var onUnstackPane: ((GridPane) -> Void)? = nil
@@ -121,6 +134,10 @@ struct TrmGridView: View {
     /// Whether the current drop operation is in "stack" mode (Option key held).
     /// When false, dropping swaps pane positions instead of stacking.
     @State private var dropIsStackMode: Bool = false
+
+    /// Which edge of the target cell the pane will land on when stacking,
+    /// based on whether the cursor is in the top or bottom half of the cell.
+    @State private var dropEdge: StackDropEdge = .bottom
 
     var body: some View {
         content
@@ -171,24 +188,35 @@ struct TrmGridView: View {
             EmptyView()
         } else if panes.count == 1 {
             // Single pane — no grid chrome, just the pane
-            paneView(panes[0], index: 0)
-                .overlay(
-                    dropPlaceholder(isVisible: dropHighlightPaneId == panes[0].id, isStackMode: dropIsStackMode, stackCount: 1)
+            GeometryReader { geo in
+                paneView(panes[0], index: 0)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .overlay(
+                        dropPlaceholder(
+                            isVisible: dropHighlightPaneId == panes[0].id,
+                            isStackMode: dropIsStackMode,
+                            stackCount: panes[0].stackChildren?.count ?? 1,
+                            edge: dropEdge
+                        )
                         .allowsHitTesting(false)
-                )
-                .onDrop(of: [.ghosttySurfaceId], delegate: PaneStackDropDelegate(
-                    targetPane: panes[0],
-                    allPanes: panes,
-                    onStack: onStackPane,
-                    onSwap: onSwapPane,
-                    dropHighlightPaneId: $dropHighlightPaneId,
-                    dropIsStackMode: $dropIsStackMode
-                ))
-                .contextMenu {
-                    if let pid = paneIdForPane(panes[0]) {
-                        pluginsMenu(forPaneId: pid)
+                    )
+                    .onDrop(of: [.ghosttySurfaceId], delegate: PaneStackDropDelegate(
+                        targetPane: panes[0],
+                        allPanes: panes,
+                        targetSize: geo.size,
+                        onStack: onStackPane,
+                        onSwap: onSwapPane,
+                        onTransfer: onTransferPane,
+                        dropHighlightPaneId: $dropHighlightPaneId,
+                        dropIsStackMode: $dropIsStackMode,
+                        dropEdge: $dropEdge
+                    ))
+                    .contextMenu {
+                        if let pid = paneIdForPane(panes[0]) {
+                            pluginsMenu(forPaneId: pid)
+                        }
                     }
-                }
+            }
         } else {
             ZStack {
                 GeometryReader { geo in
@@ -228,7 +256,7 @@ struct TrmGridView: View {
                                 let colW = colWidths[colIdx]
                                 let colX = padding + colXOffsets[colIdx]
 
-                                paneCellView(pane, flatIndex: flatIndex, row: rowIdx, col: colIdx)
+                                paneCellView(pane, flatIndex: flatIndex, row: rowIdx, col: colIdx, cellSize: CGSize(width: colW, height: rowH))
                                     .frame(width: colW, height: rowH)
                                     .position(x: colX + colW / 2, y: rowY + rowH / 2)
                             }
@@ -237,13 +265,13 @@ struct TrmGridView: View {
                         // Horizontal dividers (between rows)
                         if onResizeRow != nil {
                             ForEach(0..<(nRows - 1), id: \.self) { rowIdx in
-                                let rowY = padding + rowYOffsets[rowIdx + 1]
-                                let divH: CGFloat = max(gap, 12)
-                                let hitY = rowY - gap / 2 - (divH - gap) / 2
                                 let topH = rowHeights[rowIdx]
                                 let botH = rowHeights[rowIdx + 1]
                                 let combinedH = topH + gap + botH
                                 let curFrac = combinedH > 0 ? topH / combinedH : 0.5
+                                // Center of the gap between row rowIdx and rowIdx+1.
+                                let gapCenterY = padding + rowYOffsets[rowIdx] + topH + gap / 2
+                                let divH: CGFloat = max(gap, 12)
 
                                 PaneDivider(
                                     axis: .horizontal,
@@ -254,7 +282,7 @@ struct TrmGridView: View {
                                     }
                                 )
                                 .frame(width: availW, height: divH)
-                                .position(x: padding + availW / 2, y: hitY + divH / 2)
+                                .position(x: padding + availW / 2, y: gapCenterY)
                                 .allowsHitTesting(onResizeRow != nil)
                             }
                         }
@@ -312,7 +340,7 @@ struct TrmGridView: View {
 
     /// Wraps a single pane cell with border, context menu, drag source, and drop target.
     @ViewBuilder
-    private func paneCellView(_ pane: GridPane, flatIndex: Int, row: Int, col: Int) -> some View {
+    private func paneCellView(_ pane: GridPane, flatIndex: Int, row: Int, col: Int, cellSize: CGSize) -> some View {
         let isDropTarget = dropHighlightPaneId == pane.id
         // How many children the cell will have after the drop.
         let existingCount = pane.stackChildren?.count ?? 1
@@ -335,7 +363,7 @@ struct TrmGridView: View {
             )
             .overlay(
                 // BonSplit-style drop placeholder — shows where the pane will land
-                dropPlaceholder(isVisible: isDropTarget, isStackMode: dropIsStackMode, stackCount: existingCount)
+                dropPlaceholder(isVisible: isDropTarget, isStackMode: dropIsStackMode, stackCount: existingCount, edge: dropEdge)
                     .allowsHitTesting(false)
             )
             .contextMenu {
@@ -347,6 +375,7 @@ struct TrmGridView: View {
                     }
                     Divider()
                 }
+                agentOverviewMenuItem(for: pane)
                 paneMoveMenu(pane: pane, row: row, col: col)
                 if let pid = paneIdForPane(pane) {
                     Divider()
@@ -356,18 +385,37 @@ struct TrmGridView: View {
             .onDrop(of: [.ghosttySurfaceId], delegate: PaneStackDropDelegate(
                 targetPane: pane,
                 allPanes: panes,
+                targetSize: cellSize,
                 onStack: onStackPane,
                 onSwap: onSwapPane,
+                onTransfer: onTransferPane,
                 dropHighlightPaneId: $dropHighlightPaneId,
-                dropIsStackMode: $dropIsStackMode
+                dropIsStackMode: $dropIsStackMode,
+                dropEdge: $dropEdge
             ))
     }
 
-    /// Animated drop placeholder.
-    /// - Stack mode (Option held): shrinks to the bottom slot where the pane will land after stacking.
-    /// - Swap mode (default): full-cell highlight indicating a position swap.
+    /// "Show Agent Overview" menu item, offered only for terminal panes that
+    /// don't already have one open.
     @ViewBuilder
-    private func dropPlaceholder(isVisible: Bool, isStackMode: Bool, stackCount: Int) -> some View {
+    private func agentOverviewMenuItem(for pane: GridPane) -> some View {
+        if let onShowAgentOverview, case .terminal = pane,
+           !(hasAgentOverview?(pane) ?? false) {
+            Button {
+                onShowAgentOverview(pane)
+            } label: {
+                Label("Show Agent Overview", systemImage: "sparkle.magnifyingglass")
+            }
+            SwiftUI.Divider()
+        }
+    }
+
+    /// Animated drop placeholder.
+    /// - Stack mode (default): shrinks to the top or bottom slot — whichever
+    ///   half of the cell the cursor is in — where the pane will land after stacking.
+    /// - Swap mode (Option held): full-cell highlight indicating a position swap.
+    @ViewBuilder
+    private func dropPlaceholder(isVisible: Bool, isStackMode: Bool, stackCount: Int, edge: StackDropEdge) -> some View {
         GeometryReader { geo in
             let inset: CGFloat = 4
             let fullW = geo.size.width - inset * 2
@@ -376,13 +424,15 @@ struct TrmGridView: View {
             let totalAfterDrop = CGFloat(stackCount + 1)
             let slotH = geo.size.height / totalAfterDrop - inset
 
-            // Stack mode: animate to bottom slot. Swap mode: full cell highlight.
+            // Stack mode: animate to the hovered edge's slot. Swap mode: full cell highlight.
             let targetW = fullW
             let targetH = isVisible
                 ? (isStackMode ? slotH : fullH)
                 : fullH
             let targetY = isVisible && isStackMode
-                ? geo.size.height - (slotH / 2) - inset
+                ? (edge == .top
+                    ? (slotH / 2) + inset
+                    : geo.size.height - (slotH / 2) - inset)
                 : geo.size.height / 2
 
             let fillColor = isStackMode
@@ -403,6 +453,7 @@ struct TrmGridView: View {
                 .opacity(isVisible ? 1 : 0)
                 .animation(.spring(duration: 0.35, bounce: 0.12), value: isVisible)
                 .animation(.spring(duration: 0.35, bounce: 0.12), value: isStackMode)
+                .animation(.spring(duration: 0.35, bounce: 0.12), value: edge)
         }
     }
 
@@ -420,6 +471,8 @@ struct TrmGridView: View {
             return AnyView(webviewPaneView(webviewPane))
         case .plugin(let pluginPane):
             return AnyView(pluginPaneView(pluginPane))
+        case .agentOverview(let agentPane):
+            return AnyView(AgentOverviewView(pane: agentPane, onClose: onCloseAgentOverview))
         case .stack(let children):
             return AnyView(stackedPaneView(children, stackID: pane.id))
         }
@@ -432,8 +485,9 @@ struct TrmGridView: View {
     private func terminalPaneView(_ surface: Ghostty.SurfaceView, index: Int, paneId: Int) -> some View {
         let isPeeked = peekedPane == ObjectIdentifier(surface)
         VStack(spacing: 0) {
-            // No drag bar for non-stacked panes — peek via context menu
-            // "Peek Pane", dismiss by clicking the scrim or pressing Escape.
+            // No drag bar for non-stacked panes — they use the surface's own
+            // hover-revealed grab handle (SurfaceGrabHandle); peek is wired
+            // into that handle.
 
             if isPeeked {
                 // Placeholder while this pane is shown in the peek overlay.
@@ -605,18 +659,19 @@ struct TrmGridView: View {
 
                 // Horizontal dividers between sub-panes
                 ForEach(0..<(n - 1), id: \.self) { idx in
-                    let divH: CGFloat = max(subGap, 12)
-                    let divY = subYOffsets[idx + 1] - subGap / 2 - (divH - subGap) / 2
                     let topH = subHeights[idx]
                     let botH = subHeights[idx + 1]
                     let combinedH = topH + subGap + botH
                     let curFrac = combinedH > 0 ? topH / combinedH : 0.5
+                    // Center of the gap between sub-pane idx and idx+1.
+                    let gapCenterY = subYOffsets[idx] + topH + subGap / 2
+                    let divH: CGFloat = max(subGap, 12)
 
                     // Visible separator line at the gap between sub-panes.
                     Rectangle()
                         .fill(TrmBorder.color)
                         .frame(width: geo.size.width, height: subGap)
-                        .position(x: geo.size.width / 2, y: subYOffsets[idx + 1] - subGap / 2)
+                        .position(x: geo.size.width / 2, y: gapCenterY)
                         .allowsHitTesting(false)
 
                     PaneDivider(
@@ -628,7 +683,7 @@ struct TrmGridView: View {
                         }
                     )
                     .frame(width: geo.size.width, height: divH)
-                    .position(x: geo.size.width / 2, y: divY + divH / 2)
+                    .position(x: geo.size.width / 2, y: gapCenterY)
                     .allowsHitTesting(onResizeStack != nil)
                 }
             }
@@ -677,6 +732,8 @@ struct TrmGridView: View {
             return AnyView(webviewPaneView(webviewPane))
         case .plugin(let pluginPane):
             return AnyView(pluginPaneView(pluginPane))
+        case .agentOverview(let agentPane):
+            return AnyView(AgentOverviewView(pane: agentPane, onClose: onCloseAgentOverview))
         case .stack:
             // Nested stacks not supported — flatten would have happened at model level
             return AnyView(EmptyView())
@@ -924,7 +981,7 @@ struct TrmGridView: View {
                 }
             }
             return TrmBorder.color
-        case .webview, .plugin:
+        case .webview, .plugin, .agentOverview:
             return TrmBorder.color
         }
     }
@@ -942,7 +999,7 @@ struct TrmGridView: View {
                 if paneNeedsAttention(child) { return true }
             }
             return false
-        case .webview, .plugin:
+        case .webview, .plugin, .agentOverview:
             return false
         }
     }
@@ -1120,8 +1177,13 @@ private final class DragBarNSView: NSView, NSDraggingSource {
             onPeek?()
             return
         }
+        didDrag = false
         dragStart = convert(event.locationInWindow, from: nil)
     }
+
+    /// True once a drag has actually begun, so the click-to-peek in `mouseUp`
+    /// fires only on a tap (mouse down + up with no drag past the threshold).
+    private var didDrag = false
 
     override func mouseDragged(with event: NSEvent) {
         guard let surface, let start = dragStart else { return }
@@ -1131,6 +1193,7 @@ private final class DragBarNSView: NSView, NSDraggingSource {
         guard dx * dx + dy * dy > 9 else { return } // 3pt threshold
 
         dragStart = nil
+        didDrag = true
 
         guard let item = surface.pasteboardItem() else { return }
         let draggingItem = NSDraggingItem(pasteboardWriter: item)
@@ -1151,7 +1214,15 @@ private final class DragBarNSView: NSView, NSDraggingSource {
     }
 
     override func mouseUp(with event: NSEvent) {
+        // A single click that never turned into a drag is a "tap" — expand
+        // (peek) the pane so the user can see more of its contents. A real
+        // drag clears dragStart in mouseDragged and sets didDrag, so this
+        // only fires on a tap. Double-clicks are already handled in mouseDown.
+        if event.clickCount == 1, !didDrag, dragStart != nil {
+            onPeek?()
+        }
         dragStart = nil
+        didDrag = false
     }
 
     // MARK: NSDraggingSource
@@ -1167,19 +1238,30 @@ private final class DragBarNSView: NSView, NSDraggingSource {
 // MARK: - Pane Stack Drop Delegate
 
 /// Drop delegate that handles stacking a dragged terminal pane onto a target cell.
-/// Shows a visual highlight on the target pane during hover.
+/// Shows a visual highlight on the target pane during hover. Panes dragged from
+/// another window are transferred into this window via `onTransfer`.
 struct PaneStackDropDelegate: DropDelegate {
     let targetPane: GridPane
     let allPanes: [GridPane]
-    let onStack: ((GridPane, GridPane) -> Void)?
+    /// The size of the target cell, used to decide top vs. bottom edge.
+    let targetSize: CGSize
+    let onStack: ((GridPane, GridPane, StackDropEdge) -> Void)?
     let onSwap: ((GridPane, GridPane) -> Void)?
+    let onTransfer: ((UUID, GridPane, Bool, StackDropEdge) -> Void)?
     @Binding var dropHighlightPaneId: ObjectIdentifier?
     @Binding var dropIsStackMode: Bool
+    @Binding var dropEdge: StackDropEdge
 
     func validateDrop(info: DropInfo) -> Bool {
-        // Accept if we have either callback.
-        guard onStack != nil || onSwap != nil else { return false }
+        // Accept if we have any callback.
+        guard onStack != nil || onSwap != nil || onTransfer != nil else { return false }
         return info.hasItemsConforming(to: [.ghosttySurfaceId])
+    }
+
+    /// Which half of the target cell the cursor is in.
+    private func edge(for info: DropInfo) -> StackDropEdge {
+        guard targetSize.height > 0 else { return .bottom }
+        return info.location.y < targetSize.height / 2 ? .top : .bottom
     }
 
     func dropEntered(info: DropInfo) {
@@ -1187,6 +1269,7 @@ struct PaneStackDropDelegate: DropDelegate {
             dropHighlightPaneId = targetPane.id
             // Default is stack mode; Option switches to swap.
             dropIsStackMode = !NSEvent.modifierFlags.contains(.option)
+            dropEdge = edge(for: info)
         }
     }
 
@@ -1202,19 +1285,12 @@ struct PaneStackDropDelegate: DropDelegate {
     func performDrop(info: DropInfo) -> Bool {
         // Default: stack the pane (create sub-pane). Option+drop = swap positions.
         let swapMode = NSEvent.modifierFlags.contains(.option)
+        let dropTargetEdge = edge(for: info)
 
         withAnimation(.easeInOut(duration: 0.15)) {
             dropHighlightPaneId = nil
             dropIsStackMode = false
         }
-
-        let callback: ((GridPane, GridPane) -> Void)?
-        if swapMode {
-            callback = onSwap
-        } else {
-            callback = onStack
-        }
-        guard let callback else { return false }
 
         // Load the surface ID from the drop payload.
         let providers = info.itemProviders(for: [.ghosttySurfaceId])
@@ -1227,10 +1303,18 @@ struct PaneStackDropDelegate: DropDelegate {
             }
 
             DispatchQueue.main.async {
-                let sourcePane = self.findPane(byUUID: uuid)
-                guard let sourcePane else { return }
-                guard sourcePane.id != self.targetPane.id else { return }
-                callback(sourcePane, self.targetPane)
+                if let sourcePane = self.findPane(byUUID: uuid) {
+                    guard sourcePane.id != self.targetPane.id else { return }
+                    if swapMode {
+                        self.onSwap?(sourcePane, self.targetPane)
+                    } else {
+                        self.onStack?(sourcePane, self.targetPane, dropTargetEdge)
+                    }
+                } else {
+                    // The dragged surface doesn't live in this window —
+                    // transfer it here from whichever window owns it.
+                    self.onTransfer?(uuid, self.targetPane, !swapMode, dropTargetEdge)
+                }
             }
         }
 
@@ -1240,10 +1324,12 @@ struct PaneStackDropDelegate: DropDelegate {
     func dropUpdated(info: DropInfo) -> DropProposal? {
         // Stack is default; Option switches to swap. Update live as modifier changes.
         let isStack = !NSEvent.modifierFlags.contains(.option)
-        if isStack != dropIsStackMode {
+        let newEdge = edge(for: info)
+        if isStack != dropIsStackMode || newEdge != dropEdge {
             DispatchQueue.main.async {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     dropIsStackMode = isStack
+                    dropEdge = newEdge
                 }
             }
         }

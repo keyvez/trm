@@ -52,7 +52,7 @@ pub const TermaniaAction = union(enum) {
     /// Navigate a browser pane to a URL.
     browser_navigate: struct { url: []const u8, pane: ?usize = null },
     message: struct { text: []const u8 },
-    notify: struct { title: []const u8, body: []const u8 },
+    notify: struct { title: []const u8, body: []const u8, pane: ?usize = null },
     context_usage: struct {
         used_tokens: u64,
         total_tokens: u64,
@@ -109,6 +109,61 @@ pub fn formatActionForDisplay(allocator: Allocator, action: TermaniaAction) ![]u
         .notify => |a| try std.fmt.allocPrint(allocator, "  notify: {s} — {s}", .{ a.title, a.body }),
         .context_usage => |a| try std.fmt.allocPrint(allocator, "  context: {d}/{d} ({d}%)", .{ a.used_tokens, a.total_tokens, a.percentage }),
     };
+}
+
+/// Free all owned string fields of a TermaniaAction.
+///
+/// Use only for actions whose string fields were individually heap-allocated
+/// with `allocator` (e.g. actions drained from the text tap, allocated via
+/// `extractQuotedValue` / `dupe`). Do NOT call this on arena-allocated actions
+/// such as those produced by `parseAction` — the arena reset frees them.
+/// Callers that consume a text-tap action must call this to release its
+/// strings, otherwise every command leaks.
+pub fn freeAction(allocator: Allocator, action: TermaniaAction) void {
+    switch (action) {
+        .send_command => |a| allocator.free(a.command),
+        .send_to_all => |a| allocator.free(a.command),
+        .set_title => |a| allocator.free(a.title),
+        .set_watermark => |a| allocator.free(a.watermark),
+        .clear_watermark => {},
+        .navigate => |a| allocator.free(a.url),
+        .set_content => |a| allocator.free(a.content),
+        .spawn_pane => |a| {
+            allocator.free(a.pane_type);
+            if (a.title) |s| allocator.free(s);
+            if (a.command) |s| allocator.free(s);
+            if (a.cwd) |s| allocator.free(s);
+            if (a.url) |s| allocator.free(s);
+            if (a.content) |s| allocator.free(s);
+            if (a.watermark) |s| allocator.free(s);
+        },
+        .close_pane => {},
+        .replace_pane => |a| {
+            allocator.free(a.pane_type);
+            if (a.title) |s| allocator.free(s);
+            if (a.command) |s| allocator.free(s);
+            if (a.cwd) |s| allocator.free(s);
+            if (a.url) |s| allocator.free(s);
+            if (a.content) |s| allocator.free(s);
+        },
+        .swap_panes => {},
+        .focus_pane => {},
+        .open_browser => |a| allocator.free(a.url),
+        .browser_eval => |a| allocator.free(a.script),
+        .browser_snapshot => {},
+        .browser_click => |a| allocator.free(a.selector),
+        .browser_fill => |a| {
+            allocator.free(a.selector);
+            allocator.free(a.text);
+        },
+        .browser_navigate => |a| allocator.free(a.url),
+        .message => |a| allocator.free(a.text),
+        .notify => |a| {
+            allocator.free(a.title);
+            allocator.free(a.body);
+        },
+        .context_usage => |a| allocator.free(a.session_id),
+    }
 }
 
 /// Extract JSON from text, handling markdown code fences.

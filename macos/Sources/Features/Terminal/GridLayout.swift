@@ -11,6 +11,33 @@ struct GridLayout<ID: Equatable> {
     var rowCols: [Int]
     var displayOrder: [ID]
 
+    // MARK: - Companion panes
+
+    /// Move `companion` so it sits immediately after `anchor` in display order.
+    ///
+    /// Used to keep an agent overview pinned beside the terminal pane it
+    /// describes: pane moves and swaps reorder `displayOrder` without knowing
+    /// about that binding, so the pair has to be re-pinned afterwards.
+    ///
+    /// No-ops when either id is absent or they are already adjacent.
+    @discardableResult
+    mutating func pinCompanion(_ companion: ID, after anchor: ID) -> Bool {
+        guard let anchorIdx = displayOrder.firstIndex(of: anchor),
+              displayOrder.contains(companion) else { return false }
+
+        // Already in place.
+        if displayOrder.indices.contains(anchorIdx + 1),
+           displayOrder[anchorIdx + 1] == companion {
+            return false
+        }
+
+        displayOrder.removeAll { $0 == companion }
+        // Re-find the anchor: the removal may have shifted it left.
+        guard let newAnchor = displayOrder.firstIndex(of: anchor) else { return false }
+        displayOrder.insert(companion, at: newAnchor + 1)
+        return true
+    }
+
     // MARK: - Position helpers
 
     /// Convert a flat index into (row, col).

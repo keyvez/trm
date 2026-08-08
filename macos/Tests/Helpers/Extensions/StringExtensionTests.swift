@@ -1,5 +1,5 @@
 import Testing
-@testable import Ghostty
+@testable import trm
 
 struct StringExtensionTests {
     @Test(arguments: [

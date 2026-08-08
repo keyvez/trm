@@ -625,6 +625,17 @@ pub fn init(
         // don't leak GHOSTTY_LOG to any subprocesses
         env.remove("GHOSTTY_LOG");
 
+        // Don't leak MallocStackLogging to subprocesses. When trm itself is
+        // launched under MallocStackLogging (for heap leak diagnosis), macOS
+        // would otherwise inherit it into every spawned shell and child, each
+        // of which prints "MallocStackLogging: recording malloc..." banners
+        // straight into the pane alongside real output. Stripping it here keeps
+        // panes clean while trm's own process stays fully instrumented.
+        env.remove("MallocStackLogging");
+        env.remove("MallocStackLoggingNoCompact");
+        env.remove("MallocStackLoggingDirectory");
+        env.remove("MallocScribble");
+
         // Initialize our IO backend
         var io_exec = try termio.Exec.init(alloc, .{
             .command = command,
@@ -5640,11 +5651,16 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             v,
         ),
 
-        .new_tab => return try self.rt_app.performAction(
-            .{ .surface = self },
-            .new_tab,
-            {},
-        ),
+        .new_tab => {
+            log.info("[newtab-trace] Surface.performBindingAction new_tab surface=0x{x} rt_app=0x{x}", .{ @intFromPtr(self), @intFromPtr(self.rt_app) });
+            const r = try self.rt_app.performAction(
+                .{ .surface = self },
+                .new_tab,
+                {},
+            );
+            log.info("[newtab-trace] Surface.performBindingAction new_tab done result={}", .{r});
+            return r;
+        },
 
         .close_tab => |v| return try self.rt_app.performAction(
             .{ .surface = self },

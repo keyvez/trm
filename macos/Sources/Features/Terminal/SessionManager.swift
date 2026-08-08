@@ -143,8 +143,11 @@ enum SessionManager {
         for (index, controller) in controllers.enumerated() {
             // Save scrollback for each terminal pane before building the TOML,
             // so that buildCurrentConfigToml can reference the scrollback files.
+            // force: true because clearAutoSaves() above just deleted the prior
+            // snapshot files and this uses a fresh base name — every pane must be
+            // re-written here regardless of the change-detection gate.
             let baseName = "_autosave_\(index)"
-            controller.saveScrollbackSnapshots(sessionBaseName: baseName)
+            controller.saveScrollbackSnapshots(sessionBaseName: baseName, force: true)
 
             let toml = controller.buildCurrentConfigToml()
             let filename = "\(baseName).toml"

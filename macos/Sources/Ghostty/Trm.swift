@@ -251,7 +251,10 @@ final class Trm {
         var textBuf = [CChar](repeating: 0, count: 1025)
         var textLen: UInt32 = 0
         while termania_drain_send(h, &paneId, &textBuf, UInt32(textBuf.count - 1), &textLen) != 0 {
-            let text = String(bytes: textBuf.prefix(Int(textLen)).map { UInt8(bitPattern: $0) }, encoding: .utf8) ?? ""
+            // Lossy decode: a payload that was truncated mid-codepoint on the
+            // Zig side should degrade to replacement characters, not silently
+            // become an empty command.
+            let text = String(decoding: textBuf.prefix(Int(textLen)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
             let pane = paneId == 0xFFFFFFFF ? -1 : Int(paneId)
             results.append((pane: pane, text: text))
             textLen = 0
@@ -355,7 +358,6 @@ final class Trm {
                 )
             }
             if let notification = self.pollNotification() {
-                self.showNotification(title: notification.title, body: notification.body)
                 // Use the pane ID from the notification source (text tap client's connected pane).
                 // Falls back to the focused pane if the source is unknown.
                 let paneId: Int
@@ -365,6 +367,17 @@ final class Trm {
                     paneId = Int(termania_focused_pane(h))
                 } else {
                     paneId = 0
+                }
+                // Attach the notification to the originating pane's surface so
+                // clicking the banner focuses that pane. Only fall back to an
+                // unattached notification when the pane can't be resolved.
+                if let surface = BaseTerminalController.findSurface(paneId: paneId) {
+                    surface.showUserNotification(
+                        title: notification.title,
+                        body: notification.body
+                    )
+                } else {
+                    self.showNotification(title: notification.title, body: notification.body)
                 }
                 NotificationCenter.default.post(
                     name: .trmClaudeNeedsAttention,
@@ -609,6 +622,12 @@ final class Trm {
     /// userInfo keys: "paneId" (Int), "hovering" (Bool — true=enter, false=exit).
     static let hoverPane = Notification.Name("TrmHoverPane")
 
+    /// Notification posted when the user taps a pane's grab handle (the
+    /// hover-revealed bar at the top of a surface) without dragging. The
+    /// controller toggles the peek/expand overlay for that pane. The object
+    /// is the tapped `Ghostty.SurfaceView`.
+    static let peekPaneRequest = Notification.Name("TrmPeekPaneRequest")
+
     /// Set the watermark text for a pane.
     func setWatermark(forPaneId paneId: UInt32, text: String) {
         guard let h = handle else { return }
@@ -646,6 +665,9 @@ final class Trm {
         var stackGroup: String?
         /// Filename (relative to scrollback directory) for scrollback replay on restore.
         var scrollbackFile: String?
+        /// zmx session name backing this pane (session persistence); restore
+        /// reattaches to it when the session daemon is still alive.
+        var zmxSession: String?
     }
 
     /// Grid layout config from termania.toml.
@@ -669,8 +691,9 @@ final class Trm {
         defer { termania_destroy(h) }
         var config = readGridConfig(from: h)
 
-        // The C API doesn't know about stack_group or scrollback_file,
-        // so parse them directly from the TOML file and attach to pane configs.
+        // The C API doesn't know about stack_group, scrollback_file, or
+        // zmx_session, so parse them directly from the TOML file and attach
+        // to pane configs.
         let extras = parsePaneExtras(fromPath: path)
         for i in 0..<min(config.panes.count, extras.count) {
             if let sg = extras[i].stackGroup {
@@ -678,6 +701,9 @@ final class Trm {
             }
             if let sbf = extras[i].scrollbackFile {
                 config.panes[i].scrollbackFile = sbf
+            }
+            if let zs = extras[i].zmxSession {
+                config.panes[i].zmxSession = zs
             }
         }
 
@@ -768,6 +794,7 @@ final class Trm {
     private struct PaneExtras {
         var stackGroup: String?
         var scrollbackFile: String?
+        var zmxSession: String?
     }
 
     /// Parse stack_group values from a TOML file.
@@ -801,6 +828,10 @@ final class Trm {
             } else if trimmed.hasPrefix("scrollback_file") {
                 if let value = parseTomlStringValue(trimmed) {
                     current?.scrollbackFile = value
+                }
+            } else if trimmed.hasPrefix("zmx_session") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.zmxSession = value
                 }
             }
         }

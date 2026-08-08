@@ -16,6 +16,24 @@ final class ContextUsageManager: ObservableObject {
     private var snapshots: [UsageSnapshot] = []
     private var snapshotsSinceLastSave: Int = 0
 
+    /// Per-session peaks inside the rolling daily/weekly windows. Maintained
+    /// incrementally on each poll; rebuilt from `snapshots` by the periodic
+    /// full recompute so expired sessions eventually fall out of the sums.
+    private var dailyPeaks: [String: UInt64] = [:]
+    private var weeklyPeaks: [String: UInt64] = [:]
+    private var lastFullRecompute: Date = .distantPast
+    private var lastSaveDate: Date = .distantPast
+
+    /// How often to do a full O(n) recompute over all snapshots (seconds).
+    /// Between recomputes, aggregates are bumped incrementally in O(1).
+    private static let fullRecomputeInterval: TimeInterval = 300
+
+    /// Minimum time between history saves (seconds).
+    private static let saveInterval: TimeInterval = 60
+
+    /// Hard cap on in-memory snapshots; oldest are dropped beyond this.
+    private static let maxSnapshots = 50_000
+
     private var timer: Timer?
 
     /// How often to poll for updates (seconds).
@@ -43,6 +61,14 @@ final class ContextUsageManager: ObservableObject {
     private func pollOnce() {
         guard let usage = Trm.shared.pollContextUsage() else { return }
 
+        // Fast path: if nothing changed since the last poll, skip all work.
+        // Poll runs at 1Hz and `computeAggregates` iterates all snapshots,
+        // which gets expensive over long sessions and can cause typing lag.
+        let changed = currentUsage?.usedTokens != usage.usedTokens
+            || currentUsage?.sessionId != usage.sessionId
+            || currentUsage?.lastUpdate != usage.lastUpdate
+        guard changed else { return }
+
         currentUsage = usage
 
         // Track per-session peak
@@ -64,10 +90,20 @@ final class ContextUsageManager: ObservableObject {
         snapshots.append(snapshot)
         snapshotsSinceLastSave += 1
 
-        computeAggregates()
+        // Full recompute is O(all snapshots); doing it on every changed poll
+        // (up to 1Hz) grows quadratic over long sessions and caused typing
+        // lag. Bump incrementally and recompute fully only every few minutes
+        // so sessions that age out of the daily/weekly windows are dropped.
+        if Date().timeIntervalSince(lastFullRecompute) >= Self.fullRecomputeInterval {
+            computeAggregates()
+        } else {
+            bumpAggregates(sessionId: usage.sessionId, usedTokens: usage.usedTokens)
+        }
 
-        // Auto-save every 10 snapshots
-        if snapshotsSinceLastSave >= 10 {
+        // Auto-save, throttled by time so a busy session doesn't re-encode
+        // the whole history every few seconds.
+        if snapshotsSinceLastSave >= 10,
+           Date().timeIntervalSince(lastSaveDate) >= Self.saveInterval {
             saveHistory()
             snapshotsSinceLastSave = 0
         }
@@ -75,15 +111,34 @@ final class ContextUsageManager: ObservableObject {
 
     /// Flush all data to disk.
     func flush() {
-        saveHistory()
+        saveHistory(synchronous: true)
         snapshotsSinceLastSave = 0
     }
 
     // MARK: - Aggregation
 
+    /// O(1) incremental update for the common case: a new reading for a
+    /// session already inside both windows can only raise its peak.
+    private func bumpAggregates(sessionId: String, usedTokens: UInt64) {
+        var changed = false
+        if usedTokens > (dailyPeaks[sessionId] ?? 0) {
+            dailyPeaks[sessionId] = usedTokens
+            changed = true
+        }
+        if usedTokens > (weeklyPeaks[sessionId] ?? 0) {
+            weeklyPeaks[sessionId] = usedTokens
+            changed = true
+        }
+        if changed {
+            dailyTokensUsed = dailyPeaks.values.reduce(0, +)
+            weeklyTokensUsed = weeklyPeaks.values.reduce(0, +)
+        }
+    }
+
     private func computeAggregates() {
         let now = Date()
         let calendar = Calendar.current
+        lastFullRecompute = now
 
         let dayAgo = calendar.date(byAdding: .day, value: -1, to: now) ?? now
         let weekAgo = calendar.date(byAdding: .day, value: -7, to: now) ?? now
@@ -115,6 +170,8 @@ final class ContextUsageManager: ObservableObject {
             if peak > existingWeekly { weeklyPeaks[sid] = peak }
         }
 
+        self.dailyPeaks = dailyPeaks
+        self.weeklyPeaks = weeklyPeaks
         dailyTokensUsed = dailyPeaks.values.reduce(0, +)
         weeklyTokensUsed = weeklyPeaks.values.reduce(0, +)
     }
@@ -140,14 +197,29 @@ final class ContextUsageManager: ObservableObject {
         snapshots = decoded.filter { $0.timestamp >= cutoff }
     }
 
-    private func saveHistory() {
+    /// Save history to disk. Encoding happens off the main thread unless
+    /// `synchronous` is set (used on quit, where a detached task could be
+    /// dropped before it runs).
+    private func saveHistory(synchronous: Bool = false) {
         // Prune before saving
         let cutoff = Calendar.current.date(byAdding: .day, value: -Self.retentionDays, to: Date()) ?? Date()
         snapshots = snapshots.filter { $0.timestamp >= cutoff }
+        if snapshots.count > Self.maxSnapshots {
+            snapshots = Array(snapshots.suffix(Self.maxSnapshots))
+        }
+        lastSaveDate = Date()
 
+        let toWrite = snapshots
         let url = historyFileURL
-        if let data = try? JSONEncoder().encode(snapshots) {
-            try? data.write(to: url, options: .atomic)
+        let work: @Sendable () -> Void = {
+            if let data = try? JSONEncoder().encode(toWrite) {
+                try? data.write(to: url, options: .atomic)
+            }
+        }
+        if synchronous {
+            work()
+        } else {
+            Task.detached(priority: .utility) { work() }
         }
     }
 }

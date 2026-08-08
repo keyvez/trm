@@ -389,10 +389,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         from parent: NSWindow? = nil,
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil
     ) -> TerminalController? {
+        TrmDiagnostics.log("[newtab-trace] TerminalController.newTab enter")
         // Making sure that we're dealing with a TerminalController. If not,
         // then we just create a new window.
         guard let parent,
               let parentController = parent.windowController as? TerminalController else {
+            TrmDiagnostics.log("[newtab-trace] TerminalController.newTab: no parent controller, falling back to newWindow")
             return newWindow(ghostty, withBaseConfig: baseConfig, withParent: parent)
         }
 
@@ -410,8 +412,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         // Create a new window and add it to the parent
+        TrmDiagnostics.log("[newtab-trace] TerminalController.newTab: creating new TerminalController")
         let controller = TerminalController.init(ghostty, withBaseConfig: baseConfig)
-        guard let window = controller.window else { return controller }
+        TrmDiagnostics.log("[newtab-trace] TerminalController.newTab: controller created, accessing window")
+        guard let window = controller.window else {
+            TrmDiagnostics.log("[newtab-trace] TerminalController.newTab: controller has no window")
+            return controller
+        }
+        TrmDiagnostics.log("[newtab-trace] TerminalController.newTab: window acquired, adding to tab group")
 
         // If the parent is miniaturized, then macOS exhibits really strange behaviors
         // so we have to bring it back out.
@@ -448,10 +456,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
 
+        TrmDiagnostics.log("[newtab-trace] TerminalController.newTab: added to tab group, scheduling show")
         // We're dispatching this async because otherwise the lastCascadePoint doesn't
         // take effect. Our best theory is there is some next-event-loop-tick logic
         // that Cocoa is doing that we need to be after.
         DispatchQueue.main.async {
+            TrmDiagnostics.log("[newtab-trace] TerminalController.newTab: async show block running")
             // Only cascade if we aren't fullscreen and are alone in the tab group.
             if !window.styleMask.contains(.fullScreen) &&
                 window.tabGroup?.windows.count ?? 1 == 1 {
@@ -460,6 +470,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
             controller.showWindow(self)
             window.makeKeyAndOrderFront(self)
+            TrmDiagnostics.log("[newtab-trace] TerminalController.newTab: window shown and made key")
 
             // We also activate our app so that it becomes front. This may be
             // necessary for the dock menu.

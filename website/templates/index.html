@@ -73,7 +73,17 @@
             <div class="feature-card">
                 <div class="feature-icon">&#x25A6;</div>
                 <h3>Multi-Pane Grid</h3>
-                <p>Jagged grid layout where each row can have different column counts. Drag dividers to resize panes. Option+drag an outer edge to create a new row or column. Broadcast input, navigate with keyboard, jump with Cmd+1-9.</p>
+                <p>Jagged grid layout where each row can have different column counts. Drag dividers to resize panes. Option+drag an outer edge to create a new row or column. Hover a pane's top edge to reveal its grip bar, then tap it to expand the pane for a closer look — or drag it to move and stack panes — drop on the top or bottom half of a pane to choose where it lands, or drop it into another trm window to move it there. Cmd+click any pane to peek it the same way. Broadcast input, navigate with keyboard, jump with Cmd+1-9. Cmd+D opens the Quick Terminal rooted in the focused pane's folder.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1FA84;</div>
+                <h3>LLM-Built Extensions</h3>
+                <p>Describe an extension in plain language and trm's LLM builds it: <em>"notify me when any pane prints BUILD FAILED."</em> Simple automations become declarative if-this-then-that rules (no code, can't leak); complex ones become supervised out-of-process programs with enforced capabilities, memory caps, and crash-restart &mdash; in any language. Hot-reloads on edit.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F50C;</div>
+                <h3>Detachable Sessions</h3>
+                <p>tmux-style persistence without tmux. With <code>session_persistence</code> on, every pane runs under its own session daemon &mdash; quit trm and your shells keep running, relaunch and they reattach with state replayed. Attach from any terminal with <code>trm attach</code>, mirror a session in two places at once, or attach remotely over SSH.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F4CB;</div>
@@ -83,7 +93,7 @@
             <div class="feature-card">
                 <div class="feature-icon">&#x1F9E9;</div>
                 <h3>Plugin System</h3>
-                <p>10 built-in plugin types with an extensible registry. Terminal, WebView, Notes, File Browser, Git Status, and more.</p>
+                <p>9 built-in plugin types with an extensible registry. Terminal, WebView, Notes, File Browser, Git Status, and more.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F517;</div>
@@ -103,7 +113,12 @@
             <div class="feature-card">
                 <div class="feature-icon">&#x1F514;</div>
                 <h3>Claude Code Notifications</h3>
-                <p>Native macOS notifications when Claude Code is waiting for input. Uses the Text Tap socket &mdash; no osascript needed. Drop-in hook script included.</p>
+                <p>Native macOS notifications when Claude Code is waiting for input or finishes working. Uses the Text Tap socket &mdash; no osascript needed. Each notification is attached to the pane it came from, so clicking it raises that window and focuses the exact pane &mdash; even with several agents running at once. Drop-in hook script included.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F4D6;</div>
+                <h3>Agent Overview Pane</h3>
+                <p>A native reading pane pinned beside your agent&rsquo;s terminal. Shows what you last asked, a live strip of the tool calls it&rsquo;s running, and its last message laid out for reading &mdash; prose as prose, code in its own scrollable block. Flip on bionic reading to bold the front of each word and skim it faster. Built for Claude Code.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F4CA;</div>
@@ -164,6 +179,11 @@
                 <div class="feature-icon">&#x26A1;</div>
                 <h3>One-Command Claude Workspace</h3>
                 <p><code>start-claude.sh</code> opens a multi-pane grid, launches Claude Code in the last pane, and auto-focuses it after a configurable delay &mdash; ready to code in under 5 seconds.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F343;</div>
+                <h3>Stays Light, For Days</h3>
+                <p>Leave trm running for a week with a dozen busy panes &mdash; memory stays flat. Periodic scrollback snapshots only re-read a pane when its output actually changes, so idle panes cost nothing and trm doesn't balloon over long uptime.</p>
             </div>
         </div>
     </div>

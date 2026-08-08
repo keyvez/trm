@@ -187,6 +187,80 @@ final class TrmLLMClient {
         }
     }
 
+    // MARK: - Generic Completion
+
+    /// One-shot completion on the configured provider (anthropic / openai /
+    /// ollama / lmstudio). Used by the extension builder. Unlike `submit`,
+    /// which is hardwired to Anthropic and the action-JSON contract, this
+    /// returns the raw model text.
+    func complete(system: String, user: String, maxTokens: Int = 4096) async throws -> String {
+        let config = resolvedConfig()
+        let cappedTokens = min(max(256, maxTokens), 16384)
+
+        let (data, response): (Data, URLResponse)
+        if config.useAnthropicFormat {
+            let body: [String: Any] = [
+                "model": config.model,
+                "max_tokens": cappedTokens,
+                "system": system,
+                "messages": [["role": "user", "content": user]]
+            ]
+            var request = URLRequest(url: config.apiURL)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            if let key = config.apiKey, !key.isEmpty {
+                request.setValue(key, forHTTPHeaderField: "x-api-key")
+            }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            request.timeoutInterval = 120
+            (data, response) = try await URLSession.shared.data(for: request)
+        } else {
+            let body: [String: Any] = [
+                "model": config.model,
+                "max_tokens": cappedTokens,
+                "messages": [
+                    ["role": "system", "content": system],
+                    ["role": "user", "content": user]
+                ]
+            ]
+            var request = URLRequest(url: config.apiURL)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            if let key = config.apiKey, !key.isEmpty {
+                request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            request.timeoutInterval = 120
+            (data, response) = try await URLSession.shared.data(for: request)
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMError.invalidResponse
+        }
+        if httpResponse.statusCode != 200 {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw LLMError.httpError(httpResponse.statusCode, body)
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LLMError.invalidResponse
+        }
+        // Anthropic format
+        if let content = json["content"] as? [[String: Any]],
+           let first = content.first,
+           let text = first["text"] as? String {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // OpenAI-compatible format
+        if let choices = json["choices"] as? [[String: Any]],
+           let first = choices.first,
+           let message = first["message"] as? [String: Any],
+           let text = message["content"] as? String {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        throw LLMError.invalidResponse
+    }
+
     // MARK: - Summarize
 
     /// Summarize the visible text of a pane using the configured LLM provider.

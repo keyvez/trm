@@ -140,9 +140,6 @@ export fn ghostty_config_open_path() c.String {
     return .fromSlice(path);
 }
 
-/// No-op stub: session persistence is managed by termania config.
-export fn ghostty_config_set_session_persistence(_: *Config, _: bool) void {}
-
 /// Sync with ghostty_diagnostic_s
 const Diagnostic = extern struct {
     message: [*:0]const u8 = "",

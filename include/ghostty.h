@@ -616,11 +616,6 @@ typedef enum {
   GHOSTTY_READONLY_ON,
 } ghostty_action_readonly_e;
 
-// apprt.action.DaemonSessionId.C
-typedef struct {
-  const char* session_id;
-} ghostty_action_daemon_session_id_s;
-
 // apprt.action.DesktopNotification.C
 typedef struct {
   const char* title;
@@ -910,7 +905,6 @@ typedef enum {
   GHOSTTY_ACTION_SEARCH_TOTAL,
   GHOSTTY_ACTION_SEARCH_SELECTED,
   GHOSTTY_ACTION_READONLY,
-  GHOSTTY_ACTION_DAEMON_SESSION_ID,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -951,7 +945,6 @@ typedef union {
   ghostty_action_search_total_s search_total;
   ghostty_action_search_selected_s search_selected;
   ghostty_action_readonly_e readonly;
-  ghostty_action_daemon_session_id_s daemon_session_id;
 } ghostty_action_u;
 
 typedef struct {
@@ -1043,7 +1036,6 @@ ghostty_input_trigger_s ghostty_config_trigger(ghostty_config_t,
 uint32_t ghostty_config_diagnostics_count(ghostty_config_t);
 ghostty_diagnostic_s ghostty_config_get_diagnostic(ghostty_config_t, uint32_t);
 ghostty_string_s ghostty_config_open_path(void);
-void ghostty_config_set_session_persistence(ghostty_config_t, bool);
 
 ghostty_app_t ghostty_app_new(const ghostty_runtime_config_s*,
                               ghostty_config_t);
@@ -1171,6 +1163,7 @@ typedef void* trm_app_t;
 
 // Termania pane info struct (matches CPaneInfo in capi.zig).
 typedef struct {
+    uint32_t pane_id;
     uint32_t rows;
     uint32_t cols;
     uint32_t cursor_row;
@@ -1191,17 +1184,19 @@ typedef struct {
 } termania_pane_layout_s;
 
 // Termania cell struct (matches CCell in terminal_types.zig).
+// Field order must stay in lock-step with the Zig struct: the color *type*
+// byte comes AFTER its r/g/b triple.
 typedef struct {
     uint32_t codepoint;
-    uint8_t  color_type;
-    uint8_t  color_r;
-    uint8_t  color_g;
-    uint8_t  color_b;
-    uint8_t  bg_type;
+    uint8_t  fg_r;
+    uint8_t  fg_g;
+    uint8_t  fg_b;
+    uint8_t  fg_type;  // 0=default, 1=ansi, 2=indexed, 3=rgb
     uint8_t  bg_r;
     uint8_t  bg_g;
     uint8_t  bg_b;
-    uint8_t  flags;
+    uint8_t  bg_type;  // 0=default, 1=ansi, 2=indexed, 3=rgb
+    uint8_t  flags;    // bit0=bold, bit1=italic, bit2=underline, bit3=inverse
     uint8_t  _pad[3];
 } termania_cell_s;
 

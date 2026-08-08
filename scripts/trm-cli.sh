@@ -31,6 +31,9 @@
 #   send-key --key K             Send a named key (cmux protocol)
 #   send-text --text T           Send text (cmux protocol)
 #   focus-surface --surface S    Focus a surface by ID
+#   sessions                     List persistent (zmx) sessions
+#   attach <name>                Attach to a persistent session in this terminal
+#   kill-session <name>          Kill a persistent session
 
 set -e
 
@@ -149,8 +152,21 @@ cmux-compatible commands:
   send-text --text T [--surface S]  Send text via cmux protocol
   focus-surface --surface S         Focus a surface by ID (e.g. surface-2)
 
+Persistent sessions (session_persistence = true in trm.toml):
+  sessions                          List persistent (zmx) sessions
+  attach <name>                     Attach to a session in this terminal
+                                    (detach: ctrl+\\ — the session keeps running)
+  kill-session <name>               Kill a session and its process
+  Remote attach: ssh -t host /Applications/trm.app/Contents/MacOS/zmx attach <name>
+
+Other:
+  version                           Show app version, build number, commit
+  ext create "<description>"        Build an extension with the LLM
+  ext list                          List installed extensions
+
 Environment:
   TRM_SOCKET_PATH   Override socket path (default: /tmp/trm.sock)
+  ZMX_DIR           Override session socket dir (default: ~/.trm/zmx)
 
 Socket protocol: Newline-delimited JSON over Unix socket.
 HELP
@@ -459,6 +475,107 @@ HELP
         else
             send_to_socket "{\"id\":\"cli-st\",\"method\":\"surface.send_text\",\"params\":{\"text\":\"$TEXT_ESC\"}}"
         fi
+        ;;
+
+    version|--version|-v)
+        # Report the installed app's version, build number, and commit,
+        # plus the bundled zmx version.
+        APP=""
+        for candidate in \
+            "/Applications/trm.app" \
+            "$HOME/Applications/trm.app" \
+            "$(dirname "$0")/../macos/build/ReleaseLocal/trm.app"; do
+            if [ -d "$candidate" ]; then
+                APP="$candidate"
+                break
+            fi
+        done
+        if [ -z "$APP" ]; then
+            echo "trm: app not found" >&2
+            exit 1
+        fi
+        PLIST="$APP/Contents/Info.plist"
+        VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST" 2>/dev/null || echo "?")
+        BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" 2>/dev/null || echo "?")
+        COMMIT=$(/usr/libexec/PlistBuddy -c "Print :GhosttyCommit" "$PLIST" 2>/dev/null || echo "?")
+        echo "trm $VER (build $BUILD, $COMMIT)"
+        if [ -x "$APP/Contents/MacOS/zmx" ]; then
+            "$APP/Contents/MacOS/zmx" version 2>/dev/null | head -1
+        fi
+        ;;
+
+    ext)
+        # Extension commands. `trm ext create "<description>"` drops a
+        # request file that the running app's LLM builder picks up.
+        SUB="${2:-}"
+        case "$SUB" in
+            create)
+                DESC="${3:-}"
+                if [ -z "$DESC" ]; then
+                    echo "Usage: trm ext create \"<description>\"" >&2
+                    exit 1
+                fi
+                REQ_DIR="$HOME/Library/Application Support/trm/extensions/.requests"
+                mkdir -p "$REQ_DIR"
+                printf '%s' "$DESC" > "$REQ_DIR/$(date +%s)-$$.txt"
+                echo "Request sent. trm will show a confirmation dialog when the extension is ready."
+                ;;
+            list)
+                EXT_DIR="$HOME/Library/Application Support/trm/extensions"
+                if [ -d "$EXT_DIR" ]; then
+                    find "$EXT_DIR" -mindepth 1 -maxdepth 1 -type d ! -name ".*" -exec basename {} \;
+                fi
+                ;;
+            *)
+                echo "Usage: trm ext create \"<description>\" | trm ext list" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+
+    sessions|attach|kill-session)
+        # Session-persistence commands, backed by the zmx binary bundled
+        # inside trm.app (built from vendor/zmx by zig build).
+        ZMX=""
+        for candidate in \
+            "/Applications/trm.app/Contents/MacOS/zmx" \
+            "$HOME/Applications/trm.app/Contents/MacOS/zmx" \
+            "$(dirname "$0")/../zig-out/bin/zmx" \
+            "$(dirname "$0")/../macos/build/ReleaseLocal/trm.app/Contents/MacOS/zmx"; do
+            if [ -x "$candidate" ]; then
+                ZMX="$candidate"
+                break
+            fi
+        done
+        if [ -z "$ZMX" ]; then
+            echo "Error: zmx binary not found (is trm installed?)" >&2
+            exit 1
+        fi
+        export ZMX_DIR="${ZMX_DIR:-$HOME/.trm/zmx}"
+        mkdir -p "$ZMX_DIR"
+        case "$COMMAND" in
+            sessions)
+                exec "$ZMX" list
+                ;;
+            attach)
+                NAME="${2:-}"
+                if [ -z "$NAME" ]; then
+                    echo "Usage: trm attach <session-name>" >&2
+                    echo "Sessions:" >&2
+                    "$ZMX" list >&2 || true
+                    exit 1
+                fi
+                exec "$ZMX" attach "$NAME"
+                ;;
+            kill-session)
+                NAME="${2:-}"
+                if [ -z "$NAME" ]; then
+                    echo "Usage: trm kill-session <session-name>" >&2
+                    exit 1
+                fi
+                exec "$ZMX" kill "$NAME"
+                ;;
+        esac
         ;;
 
     *)

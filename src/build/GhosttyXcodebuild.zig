@@ -108,7 +108,7 @@ pub fn init(
             "-project",
             "trm.xcodeproj",
             "-scheme",
-            "Ghostty",
+            "trm",
         });
         if (xc_arch) |arch| step.addArgs(&.{ "-arch", arch });
 

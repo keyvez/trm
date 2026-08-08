@@ -143,6 +143,16 @@ extension Ghostty {
         /// Stored so they can be round-tripped through session save/restore.
         var initialCommands: [String] = []
 
+        /// The zmx session name backing this pane when session persistence
+        /// is enabled. Persisted in TOML so restore can reattach.
+        var zmxSessionName: String?
+
+        /// The pane's logical command, i.e. what the user asked to run
+        /// BEFORE any `zmx attach` wrapping. `initialCommand` holds the
+        /// spawned (possibly wrapped) command; this one is what gets
+        /// persisted so autosave TOML never leaks the zmx wrapper.
+        var logicalCommand: String?
+
         /// True when the surface should show a highlight effect (e.g., when presented via goto_split).
         @Published private(set) var highlighted: Bool = false
 
@@ -507,6 +517,7 @@ extension Ghostty {
                 // DispatchQueue required since this may be called by SwiftUI off
                 // the main thread and Published changes need to be on the main
                 // thread. This caused a crash on macOS <= 14.
+                guard self.surfaceSize?.rows != size.rows || self.surfaceSize?.columns != size.columns else { return }
                 self.surfaceSize = size
             }
         }
@@ -735,8 +746,10 @@ extension Ghostty {
         @objc private func onUpdateRendererHealth(notification: SwiftUI.Notification) {
             guard let healthAny = notification.userInfo?["health"] else { return }
             guard let health = healthAny as? ghostty_action_renderer_health_e else { return }
+            let isHealthy = health == GHOSTTY_RENDERER_HEALTH_OK
             DispatchQueue.main.async { [weak self] in
-                self?.healthy = health == GHOSTTY_RENDERER_HEALTH_OK
+                guard let self, self.healthy != isHealthy else { return }
+                self.healthy = isHealthy
             }
         }
 
@@ -906,6 +919,24 @@ extension Ghostty {
         }
 
         override func mouseDown(with event: NSEvent) {
+            // Cmd+click (tap) on a pane toggles the peek/expand overlay for it.
+            // Same toggle the grab-handle tap uses; routed through the shared
+            // notification so the owning controller responds. We consume the
+            // press/release pair so the terminal never sees a spurious click.
+            //
+            // Skip when the cursor is over a link: Cmd+click on a link opens the
+            // URL (handled by the terminal core), so peek must defer to it.
+            if event.modifierFlags.contains(.command),
+               event.modifierFlags.isDisjoint(with: [.shift, .control, .option]),
+               hoverUrl == nil {
+                NotificationCenter.default.post(
+                    name: Trm.peekPaneRequest,
+                    object: self
+                )
+                suppressNextMouseButton = true
+                return
+            }
+
             // Ensure we have keyboard focus when clicked. In SwiftUI-hosted
             // grid layouts, focus can be silently lost during view updates;
             // clicking a pane should always restore it.

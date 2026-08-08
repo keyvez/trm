@@ -216,12 +216,15 @@ pub const TerminalPlugin = struct {
             std.fmt.bufPrint(&title_buf, "Pane {d}", .{index + 1}) catch "Pane";
 
         const term = try GhosttyTerminal.init(allocator, 80, 24, title);
+        errdefer term.deinit();
 
         // Allocate initial cell buffer (80*24 = 1920 cells)
         const initial_size = 80 * 24;
         const cell_buf = try allocator.alloc(CCell, initial_size);
+        errdefer allocator.free(cell_buf);
 
         const self = try allocator.create(TerminalPlugin);
+        errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
             .term = term,
@@ -229,6 +232,7 @@ pub const TerminalPlugin = struct {
             .cell_buf_size = initial_size,
             .pending_initial_commands = std.array_list.Managed([]const u8).init(allocator),
         };
+        errdefer self.pending_initial_commands.deinit();
 
         // Queue initial commands
         if (pane_config) |pc| {

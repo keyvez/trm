@@ -277,11 +277,18 @@ pub const App = struct {
             action,
             value,
         });
-        return self.opts.action(
+        if (action == .new_tab) {
+            log.debug("[newtab-trace] embedded performAction dispatching new_tab to embedder target={t}", .{target});
+        }
+        const action_result = self.opts.action(
             self,
             target.cval(),
             @unionInit(apprt.Action, @tagName(action), value).cval(),
         );
+        if (action == .new_tab) {
+            log.debug("[newtab-trace] embedded performAction new_tab returned result={}", .{action_result});
+        }
+        return action_result;
     }
 
     fn performPreAction(
@@ -459,6 +466,13 @@ pub const Surface = struct {
 
         /// Context for the new surface
         context: apprt.surface.NewSurfaceContext = .window,
+
+        /// Session ID to reconnect to a daemon-managed session. Must be the
+        /// last field to match the `ghostty_surface_config_s` C struct layout
+        /// in `include/ghostty.h`. If this is missing, Swift reads uninitialized
+        /// memory past the end of the struct for `reconnect_session_id`, which
+        /// in ReleaseFast is garbage and crashes in `String(cString:)`.
+        reconnect_session_id: ?[*:0]const u8 = null,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -1656,7 +1670,17 @@ pub const CAPI = struct {
         return true;
     }
 
-    export fn ghostty_surface_free_text(ptr: *Text) void {
+    export fn ghostty_surface_free_text(surface: *Surface, ptr: *Text) void {
+        // NOTE: `surface` is unused — the text is freed via global.alloc (see
+        // Text.deinit) — but it MUST be in the signature to match the C header
+        // (include/ghostty.h) and the Swift call site `ghostty_surface_free_text(
+        // surface, &text)`. Previously this took only `ptr: *Text`, so on arm64
+        // the Swift caller's first argument (the surface, in x0) was bound to
+        // `ptr` and Text.deinit ran against the surface struct — freeing garbage
+        // and NEVER freeing the real text buffer (in x1). That ABI mismatch
+        // leaked the read_text buffer on every call, ~1.3MB/min under the
+        // TerminalOutputScanner poll loop (multi-GB over days).
+        _ = surface;
         ptr.deinit();
     }
 
@@ -1952,15 +1976,18 @@ pub const CAPI = struct {
         action_len: usize,
     ) bool {
         const action_str = action_ptr[0..action_len];
+        log.debug("[newtab-trace] ghostty_surface_binding_action enter action={s} surface=0x{x}", .{ action_str, @intFromPtr(ptr) });
         const action = input.Binding.Action.parse(action_str) catch |err| {
             log.err("error parsing binding action action={s} err={}", .{ action_str, err });
             return false;
         };
 
-        return ptr.core_surface.performBindingAction(action) catch |err| {
+        const result = ptr.core_surface.performBindingAction(action) catch |err| {
             log.err("error performing binding action action={f} err={}", .{ action, err });
             return false;
         };
+        log.debug("[newtab-trace] ghostty_surface_binding_action exit action={s} result={}", .{ action_str, result });
+        return result;
     }
 
     /// Complete a clipboard read request started via the read callback.

@@ -38,6 +38,12 @@ class QuickTerminalController: BaseTerminalController {
     let restorable: Bool
     private var restorationState: QuickTerminalRestorableState?
 
+    /// When set, the next freshly-created quick terminal surface will start
+    /// in this directory instead of `$HOME`. Cleared after one use. Set via
+    /// `toggle(startingIn:)` so callers can open the quick terminal rooted at
+    /// the focused pane's pwd.
+    private var nextInitialCwd: String?
+
     init(_ ghostty: Ghostty.App,
          position: QuickTerminalPosition = .top,
          baseConfig base: Ghostty.SurfaceConfiguration? = nil,
@@ -323,6 +329,20 @@ class QuickTerminalController: BaseTerminalController {
         }
     }
 
+    /// Toggle the quick terminal. When opening, start in `cwd`: if the
+    /// surface tree is empty a fresh shell is spawned there; if a shell
+    /// already exists, `cd <cwd>` is sent to it.
+    func toggle(startingIn cwd: String?) {
+        if visible {
+            animateOut()
+            return
+        }
+        if let cwd, !cwd.isEmpty {
+            nextInitialCwd = cwd
+        }
+        animateIn()
+    }
+
     func animateIn() {
         guard let window = self.window else { return }
 
@@ -369,7 +389,12 @@ class QuickTerminalController: BaseTerminalController {
                 }
             } else {
                 var config = Ghostty.SurfaceConfiguration()
-                config.workingDirectory = NSHomeDirectory()
+                if let cwd = nextInitialCwd, !cwd.isEmpty {
+                    config.workingDirectory = NSString(string: cwd).expandingTildeInPath
+                } else {
+                    config.workingDirectory = NSHomeDirectory()
+                }
+                nextInitialCwd = nil
                 config.environmentVariables["GHOSTTY_QUICK_TERMINAL"] = "1"
 
                 let view = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
@@ -377,6 +402,18 @@ class QuickTerminalController: BaseTerminalController {
                 focusedSurface = view
             }
         }
+
+        // If a cwd was requested and the surface already existed, cd into it.
+        // Leading space avoids polluting shell history.
+        if let cwd = nextInitialCwd, !cwd.isEmpty,
+           let s = focusedSurface?.surface {
+            let escaped = cwd.replacingOccurrences(of: "'", with: "'\\''")
+            let cmd = " cd '\(escaped)'\n"
+            cmd.withCString { ptr in
+                ghostty_surface_text(s, ptr, UInt(cmd.utf8CString.count - 1))
+            }
+        }
+        nextInitialCwd = nil
 
         // Animate the window in
         animateWindowIn(window: window, from: position)

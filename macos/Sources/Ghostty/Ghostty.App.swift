@@ -66,11 +66,6 @@ extension Ghostty {
             }()
             self.sessionPersistence = sessionPersistence
 
-            // Bridge to Ghostty config so Surface.zig uses daemon backend
-            if sessionPersistence {
-                ghostty_config_set_session_persistence(config.config, true)
-            }
-
             // Create our "runtime" config. The "runtime" is the configuration that ghostty
             // uses to interface with the application runtime environment.
             var runtime_cfg = ghostty_runtime_config_s(
@@ -119,13 +114,6 @@ extension Ghostty {
 #endif
 
             self.readiness = .ready
-
-            // Launch daemon only if session persistence is enabled
-            #if os(macOS)
-            if sessionPersistence {
-                Self.ensureDaemonRunning()
-            }
-            #endif
         }
 
         deinit {
@@ -136,91 +124,6 @@ extension Ghostty {
             NotificationCenter.default.removeObserver(self)
 #endif
         }
-
-        // MARK: Daemon Lifecycle
-
-        #if os(macOS)
-        /// The path to the trm-server socket.
-        static var daemonSocketPath: String {
-            let appSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            ).first!.appendingPathComponent("trm")
-            return appSupport.appendingPathComponent("server.sock").path
-        }
-
-        /// The path to the trm-server PID file.
-        static var daemonPidPath: String {
-            let appSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            ).first!.appendingPathComponent("trm")
-            return appSupport.appendingPathComponent("server.pid").path
-        }
-
-        /// Check if the daemon is already running.
-        static var isDaemonRunning: Bool {
-            // Check if socket file exists
-            guard FileManager.default.fileExists(atPath: daemonSocketPath) else {
-                return false
-            }
-
-            // Check PID file
-            guard let pidStr = try? String(contentsOfFile: daemonPidPath, encoding: .utf8) else {
-                return false
-            }
-
-            guard let pid = Int32(pidStr.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-                return false
-            }
-
-            // Check if process is alive
-            return kill(pid, 0) == 0
-        }
-
-        /// Ensure the daemon is running, launching it if necessary.
-        static func ensureDaemonRunning() {
-            guard !isDaemonRunning else {
-                Ghostty.logger.info("trm-server daemon already running")
-                return
-            }
-
-            Ghostty.logger.info("launching trm-server daemon")
-
-            // Find the trm-server binary in our app bundle
-            guard let serverPath = Bundle.main.path(forAuxiliaryExecutable: "trm-server") else {
-                Ghostty.logger.warning("trm-server not found in app bundle, session persistence disabled")
-                return
-            }
-
-            // Ensure the app support directory exists
-            let appSupportDir = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            ).first!.appendingPathComponent("trm")
-
-            try? FileManager.default.createDirectory(
-                at: appSupportDir,
-                withIntermediateDirectories: true
-            )
-
-            // Launch the daemon
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: serverPath)
-            process.arguments = ["--socket", daemonSocketPath]
-
-            // Detach the process so it survives our exit
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-
-            do {
-                try process.run()
-                Ghostty.logger.info("trm-server launched with pid \(process.processIdentifier)")
-            } catch {
-                Ghostty.logger.warning("failed to launch trm-server: \(error)")
-            }
-        }
-        #endif
 
         // MARK: App Operations
 
@@ -296,9 +199,11 @@ extension Ghostty {
 
         func newTab(surface: ghostty_surface_t) {
             let action = "new_tab"
+            NSLog("%@", "[newtab-trace] Ghostty.App.newTab calling binding_action surface=\(String(describing: surface))")
             if (!ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8)))) {
                 logger.warning("action failed action=\(action)")
             }
+            NSLog("[newtab-trace] Ghostty.App.newTab binding_action returned")
         }
 
         func newWindow(surface: ghostty_surface_t) {
@@ -429,7 +334,11 @@ extension Ghostty {
         // MARK: Ghostty Callbacks (macOS)
 
         static func closeSurface(_ userdata: UnsafeMutableRawPointer?, processAlive: Bool) {
-            guard let surface = self.surfaceUserdata(from: userdata) else { return }
+            guard let surface = self.surfaceUserdata(from: userdata) else {
+                NSLog("[close-trace] core close_surface_cb fired but no surface for userdata")
+                return
+            }
+            NSLog("%@", "[close-trace] core close_surface_cb fired paneId=\(String(describing: surface.paneId)) processAlive=\(processAlive)")
             NotificationCenter.default.post(name: Notification.ghosttyCloseSurface, object: surface, userInfo: [
                 "process_alive": processAlive,
             ])
@@ -766,8 +675,6 @@ extension Ghostty {
             case GHOSTTY_ACTION_COMMAND_FINISHED:
                 commandFinished(app, target: target)
 
-            case GHOSTTY_ACTION_DAEMON_SESSION_ID:
-                daemonSessionIdChanged(app, target: target, v: action.action.daemon_session_id)
             default:
                 Ghostty.logger.warning("unknown action action=\(action.tag.rawValue)")
                 return false
@@ -920,6 +827,7 @@ extension Ghostty {
         }
 
         private static func newTab(_ app: ghostty_app_t, target: ghostty_target_s) {
+            NSLog("[newtab-trace] Ghostty.App.newTab action handler tag=\(target.tag.rawValue)")
             switch (target.tag) {
             case GHOSTTY_TARGET_APP:
                 NotificationCenter.default.post(
@@ -929,9 +837,19 @@ extension Ghostty {
                 )
 
             case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return }
-                guard let surfaceView = self.surfaceView(from: surface) else { return }
-                guard let appState = self.appState(fromView: surfaceView) else { return }
+                guard let surface = target.target.surface else {
+                    NSLog("[newtab-trace] newTab handler: nil surface")
+                    return
+                }
+                guard let surfaceView = self.surfaceView(from: surface) else {
+                    NSLog("[newtab-trace] newTab handler: no surfaceView for surface")
+                    return
+                }
+                guard let appState = self.appState(fromView: surfaceView) else {
+                    NSLog("[newtab-trace] newTab handler: no appState for surfaceView")
+                    return
+                }
+                NSLog("[newtab-trace] newTab handler: resolved surfaceView + appState, posting notification")
                 guard appState.config.windowDecorations else {
                     let alert = NSAlert()
                     alert.messageText = "Tabs are disabled"
@@ -1703,14 +1621,6 @@ extension Ghostty {
             default:
                 assertionFailure()
             }
-        }
-
-        private static func daemonSessionIdChanged(
-            _ app: ghostty_app_t,
-            target: ghostty_target_s,
-            v: ghostty_action_daemon_session_id_s) {
-            // TODO: daemon session tracking not yet implemented
-            Ghostty.logger.debug("daemon session id changed (unimplemented)")
         }
 
         private static func setMouseShape(

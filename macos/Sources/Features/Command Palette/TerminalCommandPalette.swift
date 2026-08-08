@@ -251,6 +251,22 @@ struct TerminalCommandPaletteView: View {
         })
 
         options.append(CommandOption(
+            title: "Show Agent Overview",
+            description: "Open a reading pane beside this pane showing the coding agent's last message and activity",
+            leadingIcon: "sparkle"
+        ) {
+            onAction("trm.agent_overview")
+        })
+
+        options.append(CommandOption(
+            title: "Create Extension...",
+            description: "Describe an extension in plain language and have the LLM build and install it",
+            leadingIcon: "wand.and.stars"
+        ) {
+            onAction("trm.create_extension")
+        })
+
+        options.append(CommandOption(
             title: "Restore Last Session",
             description: "Restore the most recently auto-saved session in a new window",
             leadingIcon: "arrow.counterclockwise"
@@ -330,6 +346,9 @@ struct TerminalCommandPaletteView: View {
                 case .fileSystemRead: return "filesystem"
                 case .clipboardWrite: return "clipboard"
                 case .userNotifications: return "notifications"
+                case .sendInput: return "send-input"
+                case .paneControl: return "pane-control"
+                case .paneDecorate: return "pane-decorate"
                 }
             }.sorted().joined(separator: ", ")
 

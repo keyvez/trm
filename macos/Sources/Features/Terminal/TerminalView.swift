@@ -164,14 +164,27 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         onClosePluginPane: { pane in
                             (self.delegate as? BaseTerminalController)?.closePluginPane(pane)
                         },
+                        onShowAgentOverview: { pane in
+                            (self.delegate as? BaseTerminalController)?.showAgentOverview(for: pane)
+                        },
+                        onCloseAgentOverview: { pane in
+                            (self.delegate as? BaseTerminalController)?.closeAgentOverview(pane)
+                        },
+                        hasAgentOverview: { pane in
+                            (self.delegate as? BaseTerminalController)?.hasAgentOverview(for: pane) ?? false
+                        },
                         onMovePane: { pane, direction in
                             (self.delegate as? BaseTerminalController)?.movePane(pane, direction: direction)
                         },
-                        onStackPane: { source, target in
-                            (self.delegate as? BaseTerminalController)?.stackPane(source, onto: target)
+                        onStackPane: { source, target, edge in
+                            (self.delegate as? BaseTerminalController)?.stackPane(source, onto: target, edge: edge)
                         },
                         onSwapPane: { source, target in
                             (self.delegate as? BaseTerminalController)?.swapPane(source, with: target)
+                        },
+                        onTransferPane: { uuid, target, stackMode, edge in
+                            (self.delegate as? BaseTerminalController)?.receiveDroppedPane(
+                                surfaceUUID: uuid, onto: target, stackMode: stackMode, edge: edge)
                         },
                         onUnstackPane: { pane in
                             (self.delegate as? BaseTerminalController)?.unstackPane(pane)

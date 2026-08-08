@@ -1,0 +1,21 @@
+# Agent Quota — the flagship example trm extension.
+#
+# Shows Claude Code's context-window usage as a colored pill on the focused
+# pane, fed by trm's context-usage pipeline (Claude Code Stop/PreCompact
+# hooks → Text Tap socket → host `context_usage` events).
+#
+# Install: copy this directory to
+#   ~/Library/Application Support/trm/extensions/agent-quota/
+# (or generate your own variant with `trm ext create`).
+
+name = "agent-quota"
+version = "1"
+kind = "program"
+description = "Displays Claude Code context-window usage as a colored quota pill."
+exec = "agent-quota.py"
+
+# Display-only: no capabilities are needed to publish overlay state.
+capabilities = []
+
+memory_limit_mb = 64
+cpu_limit_seconds = 120

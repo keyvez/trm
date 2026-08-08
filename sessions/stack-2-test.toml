@@ -1,0 +1,13 @@
+title = "Stack 2 Test"
+
+[[panes]]
+command = "/bin/sh"
+cwd = "/tmp"
+watermark = "A"
+stack_group = "main"
+
+[[panes]]
+command = "/bin/sh"
+cwd = "/tmp"
+watermark = "B"
+stack_group = "main"

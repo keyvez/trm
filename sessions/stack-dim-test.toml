@@ -1,0 +1,47 @@
+title = "Stack Dim Test"
+
+[grid]
+rows = 1
+cols = 2
+
+# 7 panes in group "A" + 1 standalone.
+# With the bug present the bottom panes will be progressively dimmer.
+
+[[panes]]
+command = "/bin/sh"
+cwd = "/tmp"
+stack_group = "A"
+
+[[panes]]
+command = "/bin/sh"
+cwd = "/tmp"
+stack_group = "A"
+
+[[panes]]
+command = "/bin/sh"
+cwd = "/tmp"
+stack_group = "A"
+
+[[panes]]
+command = "/bin/sh"
+cwd = "/tmp"
+stack_group = "A"
+
+[[panes]]
+command = "/bin/sh"
+cwd = "/tmp"
+stack_group = "A"
+
+[[panes]]
+command = "/bin/sh"
+cwd = "/tmp"
+stack_group = "A"
+
+[[panes]]
+command = "/bin/sh"
+cwd = "/tmp"
+stack_group = "A"
+
+[[panes]]
+command = "/bin/sh"
+cwd = "/tmp"

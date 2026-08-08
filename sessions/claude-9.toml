@@ -1,0 +1,41 @@
+title = "Claude Code x9"
+
+[grid]
+rows = 3
+cols = 3
+
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]
+
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]
+
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]
+
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]
+
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]
+
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]
+
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]
+
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]
+
+[[panes]]
+command = "/bin/zsh"
+initial_commands = ["claude"]

@@ -75,19 +75,19 @@ pub fn hasType(name: []const u8) bool {
 // Tests
 // ---------------------------------------------------------------------------
 
-test "registry has 10 builtins" {
-    try testing.expectEqual(@as(u32, 10), typeCount());
+test "registry has 9 builtins" {
+    try testing.expectEqual(@as(u32, 9), typeCount());
 }
 
 test "registry type names" {
     try testing.expectEqualSlices(u8, "terminal", typeName(0).?);
-    try testing.expectEqualSlices(u8, "git_status", typeName(9).?);
-    try testing.expect(typeName(10) == null);
+    try testing.expectEqualSlices(u8, "git_status", typeName(8).?);
+    try testing.expect(typeName(9) == null);
 }
 
 test "registry display names" {
     try testing.expectEqualSlices(u8, "Terminal", typeDisplayName(0).?);
-    try testing.expectEqualSlices(u8, "Git Status", typeDisplayName(9).?);
+    try testing.expectEqualSlices(u8, "Git Status", typeDisplayName(8).?);
 }
 
 test "registry hasType" {

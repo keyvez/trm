@@ -26,7 +26,7 @@ struct ClaudeAttentionPluginTests {
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 0]
+            userInfo: ["paneId": 0]
         )
 
         #expect(plugin.attentionPanes.contains(0))
@@ -42,7 +42,7 @@ struct ClaudeAttentionPluginTests {
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 1]
+            userInfo: ["paneId": 1]
         )
         #expect(plugin.attentionPanes.contains(1))
 
@@ -54,7 +54,7 @@ struct ClaudeAttentionPluginTests {
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 2]
+            userInfo: ["paneId": 2]
         )
         #expect(!plugin.attentionPanes.contains(2))
     }
@@ -68,7 +68,7 @@ struct ClaudeAttentionPluginTests {
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 5]
+            userInfo: ["paneId": 5]
         )
 
         #expect(plugin.attentionPanes.contains(5))
@@ -82,17 +82,17 @@ struct ClaudeAttentionPluginTests {
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 0]
+            userInfo: ["paneId": 0]
         )
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 1]
+            userInfo: ["paneId": 1]
         )
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 2]
+            userInfo: ["paneId": 2]
         )
 
         #expect(plugin.attentionPanes.count == 3)
@@ -127,12 +127,12 @@ struct ClaudeAttentionPluginTests {
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 0]
+            userInfo: ["paneId": 0]
         )
         #expect(plugin.attentionPanes.contains(0))
 
         // User types in that pane -> output changes
-        plugin.terminalOutputDidChange(paneIndex: 0, text: "user input", hash: "abc")
+        plugin.terminalOutputDidChange(paneId: 0, text: "user input", hash: "abc")
 
         #expect(!plugin.attentionPanes.contains(0))
         plugin.stop()
@@ -145,16 +145,16 @@ struct ClaudeAttentionPluginTests {
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 0]
+            userInfo: ["paneId": 0]
         )
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 1]
+            userInfo: ["paneId": 1]
         )
 
         // Output change on pane 0 only
-        plugin.terminalOutputDidChange(paneIndex: 0, text: "typed", hash: "x")
+        plugin.terminalOutputDidChange(paneId: 0, text: "typed", hash: "x")
 
         #expect(!plugin.attentionPanes.contains(0))
         #expect(plugin.attentionPanes.contains(1))
@@ -171,11 +171,11 @@ struct ClaudeAttentionPluginTests {
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 3]
+            userInfo: ["paneId": 3]
         )
         #expect(plugin.attentionPanes.contains(3))
 
-        plugin.terminalPaneDidClose(paneIndex: 3)
+        plugin.terminalPaneDidClose(paneId: 3)
 
         #expect(!plugin.attentionPanes.contains(3))
         plugin.stop()
@@ -186,7 +186,7 @@ struct ClaudeAttentionPluginTests {
     @Test func overlayViewReturnsNilWhenNoAttention() {
         let plugin = makePlugin()
 
-        #expect(plugin.overlayView(forPane: 0) == nil)
+        #expect(plugin.overlayView(forPaneId: 0) == nil)
     }
 
     @Test func overlayViewReturnsNonNilWhenAttentionExists() {
@@ -196,12 +196,12 @@ struct ClaudeAttentionPluginTests {
         NotificationCenter.default.post(
             name: .trmClaudeNeedsAttention,
             object: nil,
-            userInfo: ["paneIndex": 0]
+            userInfo: ["paneId": 0]
         )
 
-        #expect(plugin.overlayView(forPane: 0) != nil)
+        #expect(plugin.overlayView(forPaneId: 0) != nil)
         // Different pane should still be nil
-        #expect(plugin.overlayView(forPane: 1) == nil)
+        #expect(plugin.overlayView(forPaneId: 1) == nil)
 
         plugin.stop()
     }

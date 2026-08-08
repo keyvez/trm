@@ -121,6 +121,10 @@ class BaseTerminalController: NSWindowController,
     /// Inline utility plugin panes (notes, file browser, etc.).
     @Published var pluginPanes: [PluginPane] = []
 
+    /// Agent overview panes. Each is bound to one terminal surface and is kept
+    /// immediately adjacent to it in the grid.
+    @Published var agentOverviewPanes: [AgentOverviewPane] = []
+
     /// Per-pane "move back" targets for panes that were detached into this window.
     private var detachedTerminalOrigins: [ObjectIdentifier: PaneRestorePlacement] = [:]
     private var detachedWebviewOrigins: [UUID: PaneRestorePlacement] = [:]
@@ -161,7 +165,8 @@ class BaseTerminalController: NSWindowController,
         let all: [GridPane] =
             gridSurfaces.map { .terminal($0) } +
             webviewPanes.map { .webview($0) } +
-            pluginPanes.map { .plugin($0) }
+            pluginPanes.map { .plugin($0) } +
+            agentOverviewPanes.map { .agentOverview($0) }
 
         let sorted: [GridPane]
         if paneDisplayOrder.isEmpty {
@@ -378,8 +383,13 @@ class BaseTerminalController: NSWindowController,
             var cfg = initialConfig ?? Ghostty.SurfaceConfiguration()
             let paneId = Trm.shared.allocPaneId()
             Self.injectCmuxEnvVars(into: &cfg, paneId: paneId)
+            let persist = Self.wrapForPersistence(&cfg, ghostty: ghostty)
             let initialView = Ghostty.SurfaceView(ghostty_app, baseConfig: cfg)
             initialView.paneId = paneId
+            if let persist {
+                initialView.zmxSessionName = persist.session
+                initialView.logicalCommand = persist.logical
+            }
             Self.setDefaultWatermark(forPaneId: initialView.paneId!)
             self.surfaceTree = .init(view: initialView)
         }
@@ -439,6 +449,11 @@ class BaseTerminalController: NSWindowController,
             self,
             selector: #selector(ghosttySurfaceDragEndedNoTarget(_:)),
             name: .ghosttySurfaceDragEndedNoTarget,
+            object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(onPeekPaneRequest(_:)),
+            name: Trm.peekPaneRequest,
             object: nil)
 
         // Webview pane
@@ -505,11 +520,14 @@ class BaseTerminalController: NSWindowController,
 
         // Wire up the live summary manager's pane content provider.
         // Use the stable Zig pane index so summaries match overlay rendering.
+        // Use cachedVisibleContents (viewport only): summaries only describe the
+        // visible output, and cachedScreenContents reads the ENTIRE scrollback of
+        // every pane on the main thread each poll tick.
         liveSummaryManager.paneContentProvider = { [weak self] in
             guard let self else { return [] }
             return self.gridSurfaces.enumerated().map { index, surface in
                 let title = surface.title.isEmpty ? "Shell" : surface.title
-                let visibleText = surface.cachedScreenContents.get()
+                let visibleText = surface.cachedVisibleContents.get()
                 let effectivePaneId = surface.paneId ?? index
                 return (index: effectivePaneId, title: title, visibleText: visibleText)
             }
@@ -540,6 +558,19 @@ class BaseTerminalController: NSWindowController,
         servicePluginRegistry.startAll()
         startConfigFileWatcher()
         startScrollbackSnapshotTimer()
+
+        // Hot-reload service plugins when the installed/enabled extension
+        // set changes (extension dir watcher, builder installs, toggles).
+        ExtensionsManager.shared.startWatching()
+        center.addObserver(
+            self,
+            selector: #selector(trmExtensionsDidChange),
+            name: .trmExtensionsChanged,
+            object: nil)
+    }
+
+    @objc private func trmExtensionsDidChange(_ notification: Notification) {
+        reloadServicePlugins()
     }
 
     deinit {
@@ -548,6 +579,12 @@ class BaseTerminalController: NSWindowController,
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
         }
+        // windowWillClose normally tears these down, but a controller can be
+        // deallocated without its window ever closing; without this the timer
+        // fires (as a no-op) every 30s forever and the watcher leaks its fd.
+        scrollbackSnapshotTimer?.invalidate()
+        configReloadDebounce?.cancel()
+        configFileWatcher?.cancel()
     }
 
     // MARK: Service Plugin Setup & Hot-Reload
@@ -588,15 +625,45 @@ class BaseTerminalController: NSWindowController,
         }
         servicePluginRegistry.register(claudePromptPlugin)
 
-        // Subprocess plugin example (Phase 2/3 integration path):
-        //
-        // let subprocessPlugin = SubprocessPluginHost(
-        //     id: "my_scanner",
-        //     name: "My Custom Scanner",
-        //     executablePath: "/path/to/plugin-executable",
-        //     config: HostConfigPayload(patterns: ["custom_regex"])
-        // )
-        // servicePluginRegistry.register(subprocessPlugin)
+        // User extensions from ~/Library/Application Support/trm/extensions.
+        // Rules extensions run natively; program extensions run supervised
+        // out-of-process via SubprocessPluginHost.
+        for manifest in ExtensionsManager.shared.enabledExtensions() {
+            switch manifest.kind {
+            case .rules:
+                let plugin = RulesEnginePlugin(manifest: manifest)
+                plugin.actionExecutor = { [weak self] actions in
+                    self?.executeTrmActions(actions)
+                }
+                plugin.watermarkProvider = { paneId in
+                    Trm.shared.watermark(forPaneId: UInt32(paneId))
+                }
+                plugin.contextUsagePublisher =
+                    contextUsageManager.$currentUsage.eraseToAnyPublisher()
+                servicePluginRegistry.register(plugin)
+            case .program:
+                guard let dir = manifest.directory, let exec = manifest.exec else { break }
+                let execPath = dir.appendingPathComponent(exec).path
+                let caps = Set(manifest.capabilities.compactMap(PluginCapability.parse))
+                    .union([.terminalOutputRead])
+                let host = SubprocessPluginHost(
+                    id: "ext.\(manifest.name)",
+                    name: manifest.name,
+                    executablePath: execPath,
+                    config: HostConfigPayload(
+                        patterns: manifest.patterns.isEmpty ? nil : manifest.patterns),
+                    capabilities: caps,
+                    memoryLimitMB: manifest.memoryLimitMB ?? 256,
+                    cpuLimitSeconds: manifest.cpuLimitSeconds ?? 300
+                )
+                host.actionExecutor = { [weak self] actions in
+                    self?.executeTrmActions(actions)
+                }
+                host.contextUsagePublisher =
+                    contextUsageManager.$currentUsage.eraseToAnyPublisher()
+                servicePluginRegistry.register(host, capabilities: caps)
+            }
+        }
     }
 
     /// Tear down all plugins, re-read the config file, and re-register fresh plugins.
@@ -734,8 +801,13 @@ class BaseTerminalController: NSWindowController,
         let newPaneId = nextAvailablePaneId()
         var newConfig = config ?? Ghostty.SurfaceConfiguration()
         Self.injectCmuxEnvVars(into: &newConfig, paneId: newPaneId)
+        let persist = Self.wrapForPersistence(&newConfig, ghostty: ghostty)
         let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: newConfig)
         newView.paneId = newPaneId
+        if let persist {
+            newView.zmxSessionName = persist.session
+            newView.logicalCommand = persist.logical
+        }
         Self.setDefaultWatermark(forPaneId: newView.paneId!)
 
         // Use the VISUAL order (gridPanes respects paneDisplayOrder) to find
@@ -994,6 +1066,8 @@ class BaseTerminalController: NSWindowController,
     }
 
     func movePane(_ pane: GridPane, direction: PaneMoveDirection) {
+        TrmDiagnostics.log("[close-trace] movePane enter direction=\(direction) gridPanes=\(self.gridPanes.count)")
+        defer { TrmDiagnostics.log("[close-trace] movePane exit gridPanes=\(self.gridPanes.count)") }
         ensurePaneDisplayOrder()
         let panes = gridPanes
         guard panes.count > 1 else { return }
@@ -1019,6 +1093,9 @@ class BaseTerminalController: NSWindowController,
             guard srcRow < gridRowCols.count - 1 else { return }
             relocatePane(panes, flatIndex: flatIndex, fromRow: srcRow, toRow: srcRow + 1)
         }
+
+        // Keep each agent overview beside its terminal after the reorder.
+        repinAgentOverviews()
 
         // Flash the moved pane's watermark so the user can track it.
         // Delay slightly so SwiftUI finishes re-laying out the grid before
@@ -1085,6 +1162,7 @@ class BaseTerminalController: NSWindowController,
         guard let srcIdx = panes.firstIndex(where: { $0.id == source.id }),
               let dstIdx = panes.firstIndex(where: { $0.id == target.id }) else { return }
         swapPanesInDisplayOrder(panes, srcIdx, dstIdx)
+        repinAgentOverviews()
 
         // Flash the swapped pane so the user can track it.
         if case .terminal(let surface) = source, let pid = surface.paneId {
@@ -1102,7 +1180,9 @@ class BaseTerminalController: NSWindowController,
 
     /// Stack `source` pane onto `target` pane. The source's grid cell is removed
     /// and the target's cell becomes a vertical stack containing both panes.
-    func stackPane(_ source: GridPane, onto target: GridPane) {
+    /// `edge` controls whether the source lands above (`.top`) or below
+    /// (`.bottom`) the existing pane(s) in the stack.
+    func stackPane(_ source: GridPane, onto target: GridPane, edge: StackDropEdge = .bottom) {
         let sourceID = source.id
         let targetID = target.id
         guard sourceID != targetID else { return }
@@ -1127,20 +1207,26 @@ class BaseTerminalController: NSWindowController,
             }
         }
 
-        // Build or extend the stack on the target.
-        if var existingStack = paneStacks[targetID] {
-            existingStack.append(sourceID)
-            paneStacks[targetID] = existingStack
+        // If the source was itself a stack host, its children come along.
+        let sourceExtras: [ObjectIdentifier]
+        if let sourceStack = paneStacks.removeValue(forKey: sourceID) {
+            sourceExtras = sourceStack.filter { $0 != sourceID }
         } else {
-            // New stack: host + source.
-            paneStacks[targetID] = [targetID, sourceID]
+            sourceExtras = []
         }
 
-        // If the source was itself a stack host, merge its children into the
-        // target stack and remove its own entry.
-        if let sourceStack = paneStacks.removeValue(forKey: sourceID) {
-            let extras = sourceStack.filter { $0 != sourceID }
-            paneStacks[targetID]?.append(contentsOf: extras)
+        // Build or extend the stack on the target. The stack array renders
+        // top-to-bottom with the host (grid cell identity) as the first
+        // element, so a top-edge drop makes the source the new host.
+        let existingChildren = paneStacks[targetID] ?? [targetID]
+        switch edge {
+        case .bottom:
+            paneStacks[targetID] = existingChildren + [sourceID] + sourceExtras
+        case .top:
+            paneStacks.removeValue(forKey: targetID)
+            paneStacks[sourceID] = [sourceID] + sourceExtras + existingChildren
+            // Height fractions were keyed by the old host; reset them.
+            stackSubPaneHeightFractions.removeValue(forKey: targetID)
         }
 
         // Remove the source's grid cell using the pre-captured position.
@@ -1163,6 +1249,128 @@ class BaseTerminalController: NSWindowController,
         // Remove from paneDisplayOrder.
         if !paneDisplayOrder.isEmpty {
             paneDisplayOrder.removeAll { $0 == sourceID }
+        }
+
+        // For a top-edge drop the source is the new stack host, so the grid
+        // cell identity changes: the old host's display-order slot now belongs
+        // to the source. (Must come after the removeAll above so the source's
+        // original slot doesn't survive as a duplicate.)
+        if edge == .top, let idx = paneDisplayOrder.firstIndex(of: targetID) {
+            paneDisplayOrder[idx] = sourceID
+        }
+    }
+
+    // MARK: - Agent Overview Pane
+
+    /// Whether the given pane already has an agent overview open.
+    func hasAgentOverview(for pane: GridPane) -> Bool {
+        guard case .terminal(let surface) = pane else { return false }
+        return agentOverviewPanes.contains { $0.surface === surface }
+    }
+
+    /// Open (or focus) the agent overview for a terminal pane.
+    ///
+    /// The view is inserted immediately to the right of its terminal pane,
+    /// in the same row, which is the only placement the grid guarantees stays
+    /// adjacent. If one is already open for this pane, this is a no-op.
+    func showAgentOverview(for pane: GridPane) {
+        guard case .terminal(let surface) = pane else { return }
+        guard !hasAgentOverview(for: pane) else { return }
+
+        ensurePaneDisplayOrder()
+
+        let view = AgentOverviewPane(surface: surface)
+        agentOverviewPanes.append(view)
+
+        let viewID = ObjectIdentifier(view)
+        let surfaceID = ObjectIdentifier(surface)
+
+        // Place the overview directly after its terminal pane in display order
+        // and widen that terminal's row by one column, so the two sit
+        // side-by-side rather than the view landing in an arbitrary row.
+        if let anchorIdx = paneDisplayOrder.firstIndex(of: surfaceID) {
+            paneDisplayOrder.insert(viewID, at: anchorIdx + 1)
+            let visualIdx = gridPanes.firstIndex { $0.id == surfaceID } ?? anchorIdx
+            let (row, _) = gridPosition(flatIndex: visualIdx)
+            if row < gridRowCols.count {
+                gridRowCols[row] += 1
+            } else if gridRowCols.isEmpty {
+                gridRowCols = [1]
+            } else {
+                gridRowCols[gridRowCols.count - 1] += 1
+            }
+        } else {
+            paneDisplayOrder.append(viewID)
+            if gridRowCols.isEmpty {
+                gridRowCols = [1]
+            } else {
+                gridRowCols[gridRowCols.count - 1] += 1
+            }
+        }
+
+        // Column fractions are per-row and now have the wrong arity; drop them
+        // so the row re-normalises to equal widths including the new cell.
+        gridColWidthFractions = []
+    }
+
+    /// Re-pin every agent overview next to the terminal pane it describes.
+    ///
+    /// Moving or stacking panes reorders `paneDisplayOrder` without knowing
+    /// about the overview→terminal binding, which would let the pair drift
+    /// apart. Calling this after a reorder restores the invariant that an
+    /// overview always sits immediately after its agent's pane. Overviews
+    /// whose terminal has gone away are closed.
+    func repinAgentOverviews() {
+        guard !agentOverviewPanes.isEmpty else { return }
+
+        for view in agentOverviewPanes where view.surface == nil {
+            closeAgentOverview(view)
+        }
+        guard !agentOverviewPanes.isEmpty, !paneDisplayOrder.isEmpty else { return }
+
+        var layout = GridLayout<ObjectIdentifier>(
+            rowCols: gridRowCols,
+            displayOrder: paneDisplayOrder
+        )
+        for view in agentOverviewPanes {
+            guard let surface = view.surface else { continue }
+            layout.pinCompanion(ObjectIdentifier(view), after: ObjectIdentifier(surface))
+        }
+        paneDisplayOrder = layout.displayOrder
+    }
+
+    /// Close an agent overview pane.
+    func closeAgentOverview(_ pane: AgentOverviewPane) {
+        guard let idx = agentOverviewPanes.firstIndex(where: { $0 === pane }) else { return }
+        let paneID = ObjectIdentifier(pane)
+
+        // Shrink the row the view occupied before removing it, since gridPanes
+        // is derived and the position is gone once the array shrinks.
+        if let visualIdx = gridPanes.firstIndex(where: { $0.id == paneID }) {
+            let (row, _) = gridPosition(flatIndex: visualIdx)
+            if row < gridRowCols.count {
+                if gridRowCols[row] > 1 {
+                    gridRowCols[row] -= 1
+                } else if gridRowCols.count > 1 {
+                    gridRowCols.remove(at: row)
+                }
+            }
+        }
+
+        agentOverviewPanes.remove(at: idx)
+        paneDisplayOrder.removeAll { $0 == paneID }
+        paneStacks.removeValue(forKey: paneID)
+        if gridRowCols.isEmpty { gridRowCols = [1] }
+        gridColWidthFractions = []
+
+        closeWindowIfNoPanes()
+    }
+
+    /// Close any agent overview bound to a surface that is going away, so the
+    /// view never outlives the agent pane it describes.
+    func closeAgentOverviews(forSurface surface: Ghostty.SurfaceView) {
+        for view in agentOverviewPanes where view.surface === surface {
+            closeAgentOverview(view)
         }
     }
 
@@ -1192,11 +1400,47 @@ class BaseTerminalController: NSWindowController,
     /// Show the peek overlay for a stacked pane.
     func peekPane(_ pane: GridPane) {
         peekedPane = pane.id
+
+        // Move keyboard focus to the peeked pane's surface. Without this, focus
+        // stays on whatever pane was focused before the peek, so the expanded
+        // (bigger) pane is shown but not focused — the user would have to tap a
+        // second time to type into it. Peeking implies "I want to work in this
+        // pane now," so focus it immediately.
+        let surfaceToFocus: Ghostty.SurfaceView?
+        switch pane {
+        case .terminal(let surface):
+            surfaceToFocus = surface
+        case .stack(let children):
+            surfaceToFocus = children.lazy.compactMap {
+                if case .terminal(let s) = $0 { return s } else { return nil }
+            }.first
+        default:
+            surfaceToFocus = nil
+        }
+        if let surfaceToFocus {
+            focusSurface(surfaceToFocus)
+        }
     }
 
     /// Dismiss the peek overlay.
     func dismissPeek() {
         peekedPane = nil
+    }
+
+    /// Handle a tap on a pane's grab handle: toggle the peek/expand overlay
+    /// for that surface. Posted by `SurfaceGrabHandle` via `Trm.peekPaneRequest`.
+    @objc private func onPeekPaneRequest(_ notification: Notification) {
+        guard let surface = notification.object as? Ghostty.SurfaceView else { return }
+        // The notification is broadcast to every controller; only the one that
+        // actually owns this surface should respond.
+        guard surfaceTree.contains(surface) else { return }
+
+        let id = ObjectIdentifier(surface)
+        if peekedPane == id {
+            dismissPeek()
+        } else {
+            peekPane(.terminal(surface))
+        }
     }
 
     // MARK: - Grid Resize
@@ -1463,7 +1707,9 @@ class BaseTerminalController: NSWindowController,
             moveTerminalSurfaceToOwnWindow(surface)
         case .webview(let pane):
             moveWebviewPaneToOwnWindow(pane)
-        case .plugin, .stack:
+        // An agent overview is pinned beside the pane it describes, so it has
+        // no meaning in a window of its own.
+        case .plugin, .stack, .agentOverview:
             break
         }
     }
@@ -1475,7 +1721,8 @@ class BaseTerminalController: NSWindowController,
             moveTerminalSurfaceToAnotherWindow(surface)
         case .webview(let pane):
             moveWebviewPaneToAnotherWindow(pane)
-        case .plugin, .stack:
+        // Pinned beside its agent pane — moving it alone would break adjacency.
+        case .plugin, .stack, .agentOverview:
             break
         }
     }
@@ -1587,7 +1834,6 @@ class BaseTerminalController: NSWindowController,
     }
 
     private func moveTerminalSurfaceToAnotherWindow(_ source: Ghostty.SurfaceView) {
-        guard let sourceNode = surfaceTree.root?.node(view: source) else { return }
         let sourceKey = ObjectIdentifier(source)
         let restorePlacement = detachedTerminalOrigins[sourceKey]
         let restoredTarget = restorePlacement?.controller.value
@@ -1624,6 +1870,27 @@ class BaseTerminalController: NSWindowController,
             insertDirection = .right
         }
 
+        moveTerminalSurface(
+            source,
+            to: targetController,
+            destination: destination,
+            insertDirection: insertDirection,
+            restorePlacement: restorePlacement
+        )
+    }
+
+    /// Move `source` from this window into `targetController`'s grid, inserted
+    /// next to `destination` (or replacing an empty tree when nil).
+    private func moveTerminalSurface(
+        _ source: Ghostty.SurfaceView,
+        to targetController: BaseTerminalController,
+        destination: Ghostty.SurfaceView?,
+        insertDirection: SplitTree<Ghostty.SurfaceView>.NewDirection,
+        restorePlacement: PaneRestorePlacement? = nil
+    ) {
+        guard let sourceNode = surfaceTree.root?.node(view: source) else { return }
+        let sourceKey = ObjectIdentifier(source)
+        let oldSurfaces = targetController.gridSurfaces
         let targetTree: SplitTree<Ghostty.SurfaceView>
 
         do {
@@ -1766,6 +2033,62 @@ class BaseTerminalController: NSWindowController,
         }
 
         _ = detachedTerminalOrigins.removeValue(forKey: sourceKey)
+    }
+
+    /// Find the surface with the given trm pane ID across all open windows.
+    ///
+    /// Uses the same `paneId ?? gridIndex` mapping as `handleFocusPane` and
+    /// `buildCmuxSurfaceListResponse` so a pane ID means the same thing
+    /// everywhere it crosses the Text Tap boundary.
+    static func findSurface(paneId: Int) -> Ghostty.SurfaceView? {
+        for window in NSApp.windows {
+            guard let controller = window.windowController as? BaseTerminalController else { continue }
+            let surfaces = controller.gridSurfaces
+            if let match = surfaces.enumerated().first(where: { idx, s in
+                (s.paneId ?? idx) == paneId
+            })?.element {
+                return match
+            }
+        }
+        return nil
+    }
+
+    /// Find the terminal controller and surface owning the given surface UUID
+    /// across all open windows.
+    static func findSurface(uuid: UUID) -> (BaseTerminalController, Ghostty.SurfaceView)? {
+        for window in NSApp.windows {
+            guard let controller = window.windowController as? BaseTerminalController else { continue }
+            if let surface = controller.surfaceTree.first(where: { $0.id == uuid }) {
+                return (controller, surface)
+            }
+        }
+        return nil
+    }
+
+    /// Handle a pane dropped onto `target` in this window when the dragged
+    /// surface lives in another window: transfer it here, then optionally
+    /// stack it onto the target pane.
+    func receiveDroppedPane(surfaceUUID uuid: UUID, onto target: GridPane, stackMode: Bool, edge: StackDropEdge) {
+        guard let (sourceController, surface) = Self.findSurface(uuid: uuid) else { return }
+        guard sourceController !== self else { return }
+
+        // Insert next to the target pane's surface; fall back to the focused
+        // or first surface when the target has no terminal (webview/plugin).
+        let destination = target.firstTerminalSurface ?? focusedSurface ?? gridSurfaces.first
+        sourceController.moveTerminalSurface(
+            surface,
+            to: self,
+            destination: destination,
+            insertDirection: .right
+        )
+
+        // The surface must actually be in our tree before we can stack it —
+        // the move above can fail silently (e.g. tree insert error).
+        guard surfaceTree.contains(surface) else { return }
+
+        if stackMode {
+            stackPane(.terminal(surface), onto: target, edge: edge)
+        }
     }
 
     private func insertWebviewPane(_ pane: WebViewPane, at index: Int? = nil, preferredRow: Int? = nil) {
@@ -1917,6 +2240,14 @@ class BaseTerminalController: NSWindowController,
 
     private func closeWindowIfNoPanes() {
         guard surfaceTree.isEmpty, webviewPanes.isEmpty, pluginPanes.isEmpty else { return }
+        // An agent overview only ever describes a terminal pane, so once the
+        // tree is empty there is nothing left for it to show. Drop any
+        // survivors rather than keeping a window alive around a dead view.
+        if !agentOverviewPanes.isEmpty {
+            let ids = agentOverviewPanes.map { ObjectIdentifier($0) }
+            agentOverviewPanes.removeAll()
+            paneDisplayOrder.removeAll { ids.contains($0) }
+        }
         if let terminal = self as? TerminalController {
             // If this controller lives inside a tab group, only close this tab.
             // Closing the whole window group here can unexpectedly terminate
@@ -1967,8 +2298,9 @@ class BaseTerminalController: NSWindowController,
             let title = surface.title.isEmpty ? "Shell" : surface.title
             let isFocused = surface === focusedSurface
 
-            // Get visible text from the surface's cached contents.
-            let visibleText = surface.cachedScreenContents.get()
+            // Viewport only: the LLM system prompt truncates each pane to its
+            // last 30 lines, so reading the full scrollback here is pure waste.
+            let visibleText = surface.cachedVisibleContents.get()
 
             return PaneContext(
                 index: surface.paneId ?? index,
@@ -2201,6 +2533,7 @@ class BaseTerminalController: NSWindowController,
 
         // If the child process is not alive, then we exit immediately
         guard withConfirmation else {
+            Self.killZmxSessions(in: node)
             removeSurfaceNode(node)
             return
         }
@@ -2215,7 +2548,21 @@ class BaseTerminalController: NSWindowController,
             informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
         ) { [weak self] in
             if let self {
+                Self.killZmxSessions(in: node)
                 self.removeSurfaceNode(node)
+            }
+        }
+    }
+
+    /// Explicitly closing a pane is a kill, not a detach: take its zmx
+    /// session down too so closed panes don't accumulate background daemons.
+    /// (Window close / app quit never come through here, so those still
+    /// detach and the sessions persist.)
+    private static func killZmxSessions(in node: SplitTree<Ghostty.SurfaceView>.Node) {
+        for view in node {
+            if let session = view.zmxSessionName {
+                ZmxSessionManager.killSession(session)
+                view.zmxSessionName = nil
             }
         }
     }
@@ -2242,6 +2589,11 @@ class BaseTerminalController: NSWindowController,
     ///
     /// This does no confirmation and assumes confirmation is already done.
     private func removeSurfaceNode(_ node: SplitTree<Ghostty.SurfaceView>.Node) {
+        if case .leaf(let view) = node {
+            TrmDiagnostics.log("[close-trace] removeSurfaceNode paneId=\(String(describing: view.paneId)) gridPanes=\(self.gridPanes.count)")
+        } else {
+            TrmDiagnostics.log("[close-trace] removeSurfaceNode (non-leaf subtree) gridPanes=\(self.gridPanes.count)")
+        }
         // Move focus if the closed surface was focused and we have a next target
         let closingFocused = node.contains(where: { $0 == focusedSurface })
         // Capture the current focusedSurface before we update it, so we can
@@ -2286,6 +2638,9 @@ class BaseTerminalController: NSWindowController,
             }
 
             cleanupStacksForClosedPane(paneID)
+
+            // An agent overview only describes this surface, so it goes with it.
+            closeAgentOverviews(forSurface: view)
 
             // Dismiss peek if the peeked pane is being closed.
             if peekedPane == paneID { peekedPane = nil }
@@ -2499,8 +2854,13 @@ class BaseTerminalController: NSWindowController,
     @objc private func handleCmuxQuery(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
               let method = userInfo["method"] as? UInt8,
-              let requestId = userInfo["requestId"] as? String,
+              let rawRequestId = userInfo["requestId"] as? String,
               let clientIdx = userInfo["clientIdx"] as? UInt32 else { return }
+
+        // The id comes from the client unvalidated; escape it once here so
+        // every interpolation below yields well-formed JSON even when the id
+        // contains quotes or backslashes.
+        let requestId = Self.cmuxJSONEscape(rawRequestId)
 
         // Only one controller should respond to avoid duplicate responses.
         // Prefer the main window; otherwise use the first (oldest) controller.
@@ -2540,23 +2900,40 @@ class BaseTerminalController: NSWindowController,
         Trm.shared.respondCmux(clientIdx: clientIdx, resultJSON: json)
     }
 
+    static func cmuxJSONEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
     private func buildCmuxSurfaceListResponse(requestId: String) -> String {
         let surfaces = gridSurfaces
         var entries: [String] = []
+        func jsonEscape(_ s: String) -> String { Self.cmuxJSONEscape(s) }
         for (index, surface) in surfaces.enumerated() {
             let paneId = surface.paneId ?? index
             let title = surface.title.isEmpty ? "Shell" : surface.title
             let isFocused = surface === focusedSurface
-            let escapedTitle = title
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
+            let escapedTitle = jsonEscape(title)
             let childPid = Trm.shared.paneChildPid(paneId: UInt32(paneId))
+            // The pty child pid currently comes back 0 (Ghostty owns the PTY,
+            // the Zig pane stub doesn't track it), so external tools can't map a
+            // pane to its shell process. Ghostty DOES track the surface's working
+            // directory via the `pwd` action, so we emit it as the authoritative
+            // pane→cwd key — consumers (e.g. flan-tui) route by this instead of
+            // guessing from tty/process trees, which is unreliable.
+            let pwdField: String
+            if let pwd = surface.pwd, !pwd.isEmpty {
+                pwdField = "\"\(jsonEscape(pwd))\""
+            } else {
+                pwdField = "null"
+            }
             entries.append(
                 "{\"surface_id\":\"surface-\(paneId)\"," +
                 "\"pane_id\":\"\(paneId)\"," +
                 "\"title\":\"\(escapedTitle)\"," +
                 "\"focused\":\(isFocused)," +
                 "\"pid\":\(childPid)," +
+                "\"pwd\":\(pwdField)," +
                 "\"workspace_id\":\"workspace-0\"," +
                 "\"window_id\":\"window-0\"}"
             )
@@ -2580,6 +2957,30 @@ class BaseTerminalController: NSWindowController,
         return "{\"id\":\"\(requestId)\",\"ok\":true,\"result\":{\"workspaces\":[" +
             "{\"workspace_id\":\"workspace-0\",\"name\":\"default\",\"active\":true}" +
             "]}}"
+    }
+
+    /// Wrap a pane's spawn command with `zmx attach` when session persistence
+    /// is enabled, so the shell runs under a detachable per-session daemon
+    /// that survives GUI quit. Returns the session name and the logical
+    /// (unwrapped) command when wrapping happened, nil otherwise.
+    ///
+    /// Pass an existing `session` name to reattach (restore path); zmx
+    /// replays the terminal state itself in that case.
+    static func wrapForPersistence(
+        _ cfg: inout Ghostty.SurfaceConfiguration,
+        ghostty: Ghostty.App,
+        session: String? = nil
+    ) -> (session: String, logical: String?)? {
+        guard ghostty.sessionPersistence else { return nil }
+        let name = session ?? ZmxSessionManager.newSessionName()
+        let logical = cfg.command
+        guard let wrapped = ZmxSessionManager.wrappedCommand(session: name, logical: logical) else {
+            // zmx binary missing: run unwrapped rather than failing the pane.
+            return nil
+        }
+        cfg.command = wrapped
+        cfg.environmentVariables["ZMX_DIR"] = ZmxSessionManager.zmxDir
+        return (session: name, logical: logical)
     }
 
     /// Inject cmux/trm env vars into a surface configuration for a given pane ID.
@@ -2665,12 +3066,22 @@ class BaseTerminalController: NSWindowController,
     }
 
     @objc private func ghosttyDidCloseSurface(_ notification: Notification) {
+        let target = notification.object as? Ghostty.SurfaceView
+        let processAlive = notification.userInfo?["process_alive"] as? Bool
+        TrmDiagnostics.log("[close-trace] ghosttyDidCloseSurface fired paneId=\(String(describing: target?.paneId)) processAlive=\(String(describing: processAlive)) isMovingSurface=\(self.isMovingSurface)")
         guard !isMovingSurface else {
-            Ghostty.logger.info("ghosttyDidCloseSurface suppressed during surface move")
+            TrmDiagnostics.log("[close-trace] ghosttyDidCloseSurface suppressed during surface move")
             return
         }
-        guard let target = notification.object as? Ghostty.SurfaceView else { return }
-        guard let node = surfaceTree.root?.node(view: target) else { return }
+        guard let target else {
+            TrmDiagnostics.log("[close-trace] ghosttyDidCloseSurface: object is not a SurfaceView")
+            return
+        }
+        guard let node = surfaceTree.root?.node(view: target) else {
+            TrmDiagnostics.log("[close-trace] ghosttyDidCloseSurface: target not in surfaceTree (already removed?)")
+            return
+        }
+        TrmDiagnostics.log("[close-trace] ghosttyDidCloseSurface: calling closeSurface")
         closeSurface(
             node,
             withConfirmation: (notification.userInfo?["process_alive"] as? Bool) ?? false)
@@ -3152,6 +3563,8 @@ class BaseTerminalController: NSWindowController,
         case restoreLastSession
         case restoreSession(name: String?)
         case clearAutoSave
+        case createExtension
+        case agentOverview
     }
 
     private func handleInternalCommand(_ action: String, on surfaceView: Ghostty.SurfaceView) -> Bool {
@@ -3179,7 +3592,35 @@ class BaseTerminalController: NSWindowController,
         case .clearAutoSave:
             SessionManager.clearAutoSaves()
             return true
+        case .createExtension:
+            promptCreateExtension()
+            return true
+        case .agentOverview:
+            showAgentOverview(for: .terminal(surfaceView))
+            return true
         }
+    }
+
+    /// Prompt for an extension description and hand it to the LLM builder.
+    private func promptCreateExtension() {
+        let alert = NSAlert()
+        alert.messageText = "Create Extension"
+        alert.informativeText = """
+        Describe what the extension should do. Examples:
+        "notify me when any pane prints BUILD FAILED"
+        "show Claude's context usage as a pill on each pane"
+        """
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 48))
+        input.placeholderString = "When … then …"
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Generate")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = input
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let description = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !description.isEmpty else { return }
+        ExtensionBuilder.shared.createInteractively(description: description)
     }
 
     private func parseInternalCommand(_ action: String) -> InternalCommand? {
@@ -3259,6 +3700,16 @@ class BaseTerminalController: NSWindowController,
         // trm.clear_autosave
         if trimmed == "trm.clear_autosave" {
             return .clearAutoSave
+        }
+
+        // trm.create_extension
+        if trimmed == "trm.create_extension" {
+            return .createExtension
+        }
+
+        // trm.agent_overview
+        if trimmed == "trm.agent_overview" {
+            return .agentOverview
         }
 
         return nil
@@ -3493,14 +3944,35 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
+    /// Pane IDs that reattached to a live zmx session during the last
+    /// restore. `applyPaneConfig` skips scrollback/initial-command replay
+    /// for these (zmx already replayed the live session) and clears them.
+    private var reattachedPaneIds: Set<Int> = []
+
     /// Scrollback filenames saved by the most recent `saveScrollbackSnapshots` call,
     /// keyed by `ObjectIdentifier` of the `SurfaceView`.
     private var savedScrollbackFiles: [ObjectIdentifier: String] = [:]
 
+    /// Cheap per-surface fingerprint of the content at the last snapshot, used to
+    /// skip the expensive full-scrollback read+serialize when nothing changed.
+    ///
+    /// The 30s snapshot timer used to read & re-serialize the ENTIRE scrollback of
+    /// every pane on every tick, even when idle — the c_allocator buffers from those
+    /// full-screen reads accumulated unbounded and were the root of the multi-GB
+    /// memory growth. We now gate the full read on a cheap viewport fingerprint that
+    /// changes whenever new output arrives.
+    private var lastScrollbackFingerprint: [ObjectIdentifier: Int] = [:]
+
     /// Save the scrollback buffer of every terminal pane to disk.
     /// Call this before `buildCurrentConfigToml()` so the TOML can reference the files.
-    func saveScrollbackSnapshots(sessionBaseName: String) {
-        savedScrollbackFiles.removeAll()
+    ///
+    /// `force: true` bypasses the change-detection gate (use on quit / explicit save
+    /// where we want a snapshot regardless of whether the viewport changed).
+    func saveScrollbackSnapshots(sessionBaseName: String, force: Bool = false) {
+        // Carry prior filenames forward: a pane we skip below (unchanged since the
+        // last snapshot) still has a valid file on disk, so its TOML reference must
+        // survive. We prune below to drop any surface that no longer exists.
+        var liveKeys = Set<ObjectIdentifier>()
 
         // Flatten stacks the same way buildCurrentConfigToml does.
         var terminalIndex = 0
@@ -3516,6 +3988,24 @@ class BaseTerminalController: NSWindowController,
                 continue
             }
             for surface in terminals {
+                defer { terminalIndex += 1 }
+                let key = ObjectIdentifier(surface)
+                liveKeys.insert(key)
+
+                // Cheap change-detection: the visible viewport read is small and
+                // bounded (~a few KB), unlike the full scrollback. New shell output
+                // always mutates the viewport, so its fingerprint is a reliable
+                // "did anything change?" signal. Skip the expensive full read when
+                // it's unchanged since the last snapshot — the prior file on disk
+                // (and its entry in savedScrollbackFiles) stays valid.
+                let visible = surface.cachedVisibleContents.get()
+                var fingerprint = Hasher()
+                fingerprint.combine(visible)
+                let fp = fingerprint.finalize()
+                if !force, lastScrollbackFingerprint[key] == fp {
+                    continue
+                }
+
                 let text = surface.cachedScreenContents.get()
                 if !text.isEmpty {
                     if let filename = SessionManager.saveScrollback(
@@ -3523,12 +4013,16 @@ class BaseTerminalController: NSWindowController,
                         sessionBaseName: sessionBaseName,
                         paneIndex: terminalIndex
                     ) {
-                        savedScrollbackFiles[ObjectIdentifier(surface)] = filename
+                        savedScrollbackFiles[key] = filename
+                        lastScrollbackFingerprint[key] = fp
                     }
                 }
-                terminalIndex += 1
             }
         }
+
+        // Drop bookkeeping for surfaces that no longer exist in this controller.
+        savedScrollbackFiles = savedScrollbackFiles.filter { liveKeys.contains($0.key) }
+        lastScrollbackFingerprint = lastScrollbackFingerprint.filter { liveKeys.contains($0.key) }
     }
 
     func buildCurrentConfigToml() -> String {
@@ -3596,8 +4090,17 @@ class BaseTerminalController: NSWindowController,
             case .terminal(let surface):
                 lines.append("[[panes]]")
                 lines.append("pane_type = \"terminal\"")
-                if let command = surface.initialCommand, !command.isEmpty {
+                // Persist the logical command, never the zmx-wrapped one:
+                // restore re-wraps as needed, and a stale absolute zmx path
+                // inside the TOML would break attach after app updates.
+                let persistedCommand = surface.zmxSessionName != nil
+                    ? surface.logicalCommand
+                    : surface.initialCommand
+                if let command = persistedCommand, !command.isEmpty {
                     lines.append("command = \(tomlQuote(command))")
+                }
+                if let zmxSession = surface.zmxSessionName {
+                    lines.append("zmx_session = \(tomlQuote(zmxSession))")
                 }
                 if let pwd = surface.pwd, !pwd.isEmpty {
                     lines.append("cwd = \(tomlQuote(pwd))")
@@ -3674,6 +4177,10 @@ class BaseTerminalController: NSWindowController,
                 }
                 lines.append("")
 
+            case .agentOverview:
+                // A derived view of another pane's transcript, not restorable
+                // state — it is reopened from the terminal pane's menu.
+                break
             case .stack:
                 // Already flattened above — should not appear here.
                 break
@@ -4198,6 +4705,15 @@ class BaseTerminalController: NSWindowController,
                 surface.initialCommands = paneConfig.initialCommands
             }
 
+            // A pane that reattached to a live zmx session already has its
+            // shell running with history replayed — replaying scrollback or
+            // initial commands would type into the live session.
+            if reattachedPaneIds.contains(id) {
+                reattachedPaneIds.remove(id)
+                surfaceIndex += 1
+                continue
+            }
+
             // Build the command list: first replay scrollback (if present),
             // then run the original initial commands.
             var commands: [String] = []
@@ -4292,10 +4808,29 @@ class BaseTerminalController: NSWindowController,
             if let command = entry.config.command, !command.isEmpty {
                 surfaceConfig.command = command
             }
+            Self.injectCmuxEnvVars(into: &surfaceConfig, paneId: entry.paneId)
+
+            // Session persistence: reattach to the pane's saved zmx session
+            // when it is still alive (zmx replays the terminal state itself),
+            // otherwise start a fresh session.
+            var didReattach = false
+            var persist: (session: String, logical: String?)? = nil
+            if ghostty.sessionPersistence {
+                if let saved = entry.config.zmxSession,
+                   ZmxSessionManager.sessionExists(saved) {
+                    persist = Self.wrapForPersistence(
+                        &surfaceConfig, ghostty: ghostty, session: saved)
+                    didReattach = persist != nil
+                } else {
+                    persist = Self.wrapForPersistence(&surfaceConfig, ghostty: ghostty)
+                }
+            }
+
             // If a scrollback file exists, pass it as an environment variable.
             // The shell can replay it, or applyPaneConfig will cat it before
-            // running initial commands.
-            if let sbFile = entry.config.scrollbackFile {
+            // running initial commands. Skip when reattaching — zmx already
+            // replays the live session's screen and history.
+            if !didReattach, let sbFile = entry.config.scrollbackFile {
                 let sbPath = SessionManager.scrollbackDirectory
                     .appendingPathComponent(sbFile).path
                 if FileManager.default.fileExists(atPath: sbPath) {
@@ -4304,6 +4839,11 @@ class BaseTerminalController: NSWindowController,
             }
             let view = Ghostty.SurfaceView(ghosttyApp, baseConfig: surfaceConfig)
             view.paneId = entry.paneId
+            if let persist {
+                view.zmxSessionName = persist.session
+                view.logicalCommand = persist.logical
+            }
+            if didReattach { reattachedPaneIds.insert(entry.paneId) }
             newViews.append(view)
         }
 
@@ -4369,8 +4909,12 @@ class BaseTerminalController: NSWindowController,
         // If we already have an alert, continue with it
         guard alert == nil else { return false }
 
-        // If our surfaces don't require confirmation, close.
-        if !surfaceTree.contains(where: { $0.needsConfirmQuit }) { return true }
+        // If our surfaces don't require confirmation, close. A zmx-backed
+        // surface never requires confirmation here: closing the window only
+        // detaches the client; the session daemon and its process live on.
+        if !surfaceTree.contains(where: { $0.needsConfirmQuit && $0.zmxSessionName == nil }) {
+            return true
+        }
 
         // We require confirmation, so show an alert as long as we aren't already.
         confirmClose(
@@ -4503,7 +5047,7 @@ class BaseTerminalController: NSWindowController,
         guard let surface = focusedSurface?.surface else { return }
         ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_DOWN)
     }
-    
+
     @IBAction func find(_ sender: Any) {
         focusedSurface?.find(sender)
     }

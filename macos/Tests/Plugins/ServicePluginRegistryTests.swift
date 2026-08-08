@@ -63,7 +63,7 @@ final class MockSubscriberPlugin: ObservableObject, ServicePlugin, ObservableSer
     var started = false
     var stopped = false
 
-    var outputChanges: [(paneIndex: Int, text: String, hash: String)] = []
+    var outputChanges: [(paneId: Int, text: String, hash: String)] = []
     var closedPanes: [Int] = []
 
     @Published var dummy: Int = 0
@@ -77,12 +77,12 @@ final class MockSubscriberPlugin: ObservableObject, ServicePlugin, ObservableSer
     func start() { started = true }
     func stop() { stopped = true }
 
-    func terminalOutputDidChange(paneIndex: Int, text: String, hash: String) {
-        outputChanges.append((paneIndex, text, hash))
+    func terminalOutputDidChange(paneId: Int, text: String, hash: String) {
+        outputChanges.append((paneId, text, hash))
     }
 
-    func terminalPaneDidClose(paneIndex: Int) {
-        closedPanes.append(paneIndex)
+    func terminalPaneDidClose(paneId: Int) {
+        closedPanes.append(paneId)
     }
 }
 
@@ -111,7 +111,7 @@ final class MockOverlayPlugin: ObservableObject, ServicePlugin, ObservableServic
 
     var overlayAlignment: Alignment { .bottom }
 
-    func overlayView(forPane index: Int) -> AnyView? {
+    func overlayView(forPaneId index: Int) -> AnyView? {
         guard shouldProvideOverlay else { return nil }
         return AnyView(Text("Overlay"))
     }
@@ -191,7 +191,7 @@ struct ServicePluginRegistryTests {
 
     // MARK: - Scanner Subscriber Auto-Add
 
-    @Test func registerSubscriberPluginAddsToScanner() {
+    @Test func registerSubscriberPluginAddsToScanner() async {
         let scanner = TerminalOutputScanner()
         let registry = ServicePluginRegistry(scanner: scanner)
         let plugin = MockSubscriberPlugin()
@@ -202,10 +202,15 @@ struct ServicePluginRegistryTests {
         var pollCount = 0
         scanner.paneContentProvider = {
             pollCount += 1
-            return [(index: 0, visibleText: "hello")]
+            return [(paneId: 0, visibleText: "hello")]
         }
         scanner.start()
-        // The start() triggers an immediate pollOnce(), which should notify our subscriber
+
+        // The scanner hashes and notifies asynchronously — await delivery.
+        let deadline = Date().addingTimeInterval(2.0)
+        while plugin.outputChanges.isEmpty && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         scanner.stop()
 
         #expect(plugin.outputChanges.count == 1)
@@ -254,7 +259,7 @@ struct ServicePluginRegistryTests {
 
         // After stopAll, polling should NOT notify the subscriber
         scanner.paneContentProvider = {
-            [(index: 0, visibleText: "after stop")]
+            [(paneId: 0, visibleText: "after stop")]
         }
         scanner.start()
         scanner.stop()

@@ -133,6 +133,7 @@ const CApp = struct {
 
     fn initInternal(allocator: std.mem.Allocator, start_services: bool) !*CApp {
         const self = try allocator.create(CApp);
+        errdefer allocator.destroy(self);
 
         const cfg = config_mod.loadConfig();
         const session: ?*const config_mod.SessionConfig = null;
@@ -140,10 +141,17 @@ const CApp = struct {
         const num_rows = cfg.effectiveRows(session);
         const num_cols = cfg.effectiveCols(session);
         var grd = try grid_mod.GridManager.init(allocator, num_rows, num_cols);
+        errdefer grd.deinit();
 
         const total_panes = grd.totalPanes();
         var pane_map = std.AutoHashMap(u32, plugin_mod.PanePlugin).init(allocator);
+        errdefer {
+            var pm_it = pane_map.valueIterator();
+            while (pm_it.next()) |p| p.deinit();
+            pane_map.deinit();
+        }
         var grid_order = std.array_list.Managed(u32).init(allocator);
+        errdefer grid_order.deinit();
 
         const pane_cfgs = cfg.effectivePanes(session);
 
@@ -299,6 +307,28 @@ export fn termania_destroy(handle: ?*anyopaque) void {
 }
 
 /// Poll all panes for new output. Returns the number of dirty panes.
+/// Truncate a byte slice to at most `max` bytes without splitting a UTF-8
+/// sequence: if the cut would land mid-codepoint, the partial sequence is
+/// dropped. Swift decodes these buffers as UTF-8 and a mid-codepoint cut
+/// makes the whole string undecodable.
+fn truncateUtf8(bytes: []const u8, max: usize) []const u8 {
+    if (bytes.len <= max) return bytes;
+    var len = max;
+    while (len > 0 and (bytes[len] & 0xC0) == 0x80) len -= 1;
+    return bytes[0..len];
+}
+
+test "truncateUtf8 cuts on codepoint boundaries" {
+    const s = "ab\u{1F600}cd"; // emoji is 4 bytes at offset 2
+    try std.testing.expectEqualStrings("ab\u{1F600}cd", truncateUtf8(s, 100));
+    try std.testing.expectEqualStrings("ab\u{1F600}", truncateUtf8(s, 6));
+    try std.testing.expectEqualStrings("ab", truncateUtf8(s, 5));
+    try std.testing.expectEqualStrings("ab", truncateUtf8(s, 4));
+    try std.testing.expectEqualStrings("ab", truncateUtf8(s, 3));
+    try std.testing.expectEqualStrings("a", truncateUtf8(s, 1));
+    try std.testing.expectEqualStrings("", truncateUtf8(s, 0));
+}
+
 export fn termania_poll(handle: ?*anyopaque) u32 {
     const app = getApp(handle) orelse return 0;
     var dirty: u32 = 0;
@@ -328,25 +358,32 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
                             app.send_queue_panes[qi] = 0xFFFFFFFF; // sentinel for "all"
                         },
                     }
-                    const tlen = @min(s.input.len, app.send_queue_texts[qi].len);
-                    @memcpy(app.send_queue_texts[qi][0..tlen], s.input[0..tlen]);
-                    app.send_queue_lens[qi] = @intCast(tlen);
+                    const truncated = truncateUtf8(s.input, app.send_queue_texts[qi].len);
+                    @memcpy(app.send_queue_texts[qi][0..truncated.len], truncated);
+                    app.send_queue_lens[qi] = @intCast(truncated.len);
                     app.send_queue_count += 1;
                 }
                 app.allocator.free(s.input);
             },
             .action => |action| {
+                // Text-tap actions own their string fields (allocated with
+                // app.allocator). Release them once processed below.
+                defer llm_mod.freeAction(app.allocator, action);
                 switch (action) {
                     .notify => |n| {
-                        const tlen = @min(n.title.len, app.notification_title_buf.len);
-                        @memcpy(app.notification_title_buf[0..tlen], n.title[0..tlen]);
-                        app.notification_title_len = tlen;
-                        const blen = @min(n.body.len, app.notification_body_buf.len);
-                        @memcpy(app.notification_body_buf[0..blen], n.body[0..blen]);
-                        app.notification_body_len = blen;
+                        const title_t = truncateUtf8(n.title, app.notification_title_buf.len);
+                        @memcpy(app.notification_title_buf[0..title_t.len], title_t);
+                        app.notification_title_len = title_t.len;
+                        const body_t = truncateUtf8(n.body, app.notification_body_buf.len);
+                        @memcpy(app.notification_body_buf[0..body_t.len], body_t);
+                        app.notification_body_len = body_t.len;
                         app.has_notification = true;
-                        // Resolve source pane from connected text tap clients.
-                        app.notification_pane_id = resolveNotifyPane(&app.text_tap);
+                        // Prefer the pane the sender named (hook scripts pass
+                        // $TRM_PANE_ID); otherwise guess from connected clients.
+                        app.notification_pane_id = if (n.pane) |p|
+                            @intCast(p)
+                        else
+                            resolveNotifyPane(&app.text_tap);
                     },
                     .message => |m| {
                         // Surface message actions as notifications
@@ -354,9 +391,9 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
                         const tlen = @min(title.len, app.notification_title_buf.len);
                         @memcpy(app.notification_title_buf[0..tlen], title[0..tlen]);
                         app.notification_title_len = tlen;
-                        const blen = @min(m.text.len, app.notification_body_buf.len);
-                        @memcpy(app.notification_body_buf[0..blen], m.text[0..blen]);
-                        app.notification_body_len = blen;
+                        const body_t = truncateUtf8(m.text, app.notification_body_buf.len);
+                        @memcpy(app.notification_body_buf[0..body_t.len], body_t);
+                        app.notification_body_len = body_t.len;
                         app.has_notification = true;
                         app.notification_pane_id = resolveNotifyPane(&app.text_tap);
                     },
@@ -1186,11 +1223,13 @@ export fn termania_swap_overlay(handle: ?*anyopaque, fg_pane_id: u32) void {
     const app = getApp(handle) orelse return;
     const bg_id = app.overlay_map.get(fg_pane_id) orelse return;
 
-    // Swap the pane plugins between fg and bg IDs
-    const fg_p = app.pane_map.get(fg_pane_id) orelse return;
-    const bg_p = app.pane_map.get(bg_id) orelse return;
-    app.pane_map.put(fg_pane_id, bg_p) catch return;
-    app.pane_map.put(bg_id, fg_p) catch return;
+    // Swap the pane plugins between fg and bg IDs. Swap the stored values
+    // in place: a re-insert via put() could fail (OOM) between the two
+    // writes, leaving both keys pointing at one pane — which then gets
+    // double-freed on deinit while the other pane leaks.
+    const fg_ptr = app.pane_map.getPtr(fg_pane_id) orelse return;
+    const bg_ptr = app.pane_map.getPtr(bg_id) orelse return;
+    std.mem.swap(@TypeOf(fg_ptr.*), fg_ptr, bg_ptr);
 }
 
 /// Toggle focus between foreground and background overlay pane.
@@ -1508,7 +1547,7 @@ export fn termania_pane_child_pid(handle: ?*anyopaque, pane_id: u32) u32 {
 /// DEPRECATED: Use termania_text_tap_is_active for stable pane ID queries.
 export fn termania_text_tap_active_panes(handle: ?*anyopaque) u64 {
     const app = getApp(handle) orelse return 0;
-    app.text_tap.poll();
+    app.text_tap.pollThrottled();
     return app.text_tap.getActiveSendPanes() | app.text_tap.getConnectedPanes();
 }
 
@@ -1521,7 +1560,7 @@ export fn termania_text_tap_active_panes(handle: ?*anyopaque) u64 {
 /// grid slot index stored in active_pane_ids maps to the requested pane ID.
 export fn termania_text_tap_is_active(handle: ?*anyopaque, pane_id: u32) u8 {
     const app = getApp(handle) orelse return 0;
-    app.text_tap.poll();
+    app.text_tap.pollThrottled();
     // Direct match by stable pane ID.
     if (app.text_tap.isPaneActive(pane_id)) return 1;
     // Check if any active grid slot index maps to this stable pane ID.
@@ -1535,7 +1574,7 @@ export fn termania_text_tap_is_active(handle: ?*anyopaque, pane_id: u32) u8 {
 /// Also polls the socket for new connections / disconnections.
 export fn termania_text_tap_client_count(handle: ?*anyopaque) u32 {
     const app = getApp(handle) orelse return 0;
-    app.text_tap.poll();
+    app.text_tap.pollThrottled();
     return @intCast(app.text_tap.clientCount());
 }
 
@@ -1543,7 +1582,7 @@ export fn termania_text_tap_client_count(handle: ?*anyopaque) u32 {
 /// Returns the number of bytes written, or 0 if no subscribed client or no name.
 export fn termania_text_tap_app_name(handle: ?*anyopaque, buf: [*]u8, max_len: u32) u32 {
     const app = getApp(handle) orelse return 0;
-    app.text_tap.poll();
+    app.text_tap.pollThrottled();
     const name = app.text_tap.connectedAppName() orelse return 0;
     if (name.len == 0 or max_len == 0) return 0;
     const copy_len = @min(name.len, max_len);
@@ -1556,7 +1595,7 @@ export fn termania_text_tap_app_name(handle: ?*anyopaque, buf: [*]u8, max_len: u
 /// Returns the number of bytes written, or 0 if no name.
 export fn termania_text_tap_app_name_for_pane(handle: ?*anyopaque, pane_id: u32, buf: [*]u8, max_len: u32) u32 {
     const app = getApp(handle) orelse return 0;
-    app.text_tap.poll();
+    app.text_tap.pollThrottled();
     // Try per-pane name (stable ID), then by grid slot, then global fallback.
     const name = app.text_tap.appNameForPane(pane_id) orelse blk: {
         const slot = app.paneIdToGridSlot(pane_id) orelse break :blk app.text_tap.connectedAppName();

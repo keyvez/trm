@@ -47,6 +47,21 @@ fi
 # Copy fresh app bundle.
 cp -R "$APP_SRC" "$APP_DEST"
 
+# Re-sign with a stable developer identity when one is available.
+#
+# The zig build ad-hoc signs the bundle, and ad-hoc signatures change on every
+# rebuild — which invalidates the app's TCC grants (Accessibility, Screen
+# Recording, Notifications) each time it is reinstalled. Signing with a real
+# identity keeps the designated requirement stable so permissions survive.
+SIGN_IDENTITY="${TRM_SIGN_IDENTITY:-Apple Development}"
+if security find-identity -p codesigning -v 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+  if codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DEST" 2>/dev/null; then
+    echo "Re-signed with '$SIGN_IDENTITY' (stable TCC identity)."
+  else
+    echo "Warning: re-sign with '$SIGN_IDENTITY' failed; keeping ad-hoc signature."
+  fi
+fi
+
 # Register the app so Finder/open use the latest bundle.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 if [[ -x "$LSREGISTER" ]]; then
