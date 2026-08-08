@@ -116,6 +116,11 @@ const CApp = struct {
     focus_queue_panes: [8]u32 = .{0} ** 8,
     focus_queue_count: u32 = 0,
 
+    // Pending swap_panes actions from text tap (visual grid indices).
+    swap_queue_a: [8]u32 = .{0} ** 8,
+    swap_queue_b: [8]u32 = .{0} ** 8,
+    swap_queue_count: u32 = 0,
+
     // cmux query buffer: pending queries from text tap for Swift to drain.
     cmux_query_methods: [8]u8 = .{0} ** 8,
     cmux_query_req_ids: [8][64]u8 = undefined,
@@ -434,6 +439,13 @@ export fn termania_poll(handle: ?*anyopaque) u32 {
                             app.focus_queue_count += 1;
                         }
                     },
+                    .swap_panes => |sp| {
+                        if (app.swap_queue_count < app.swap_queue_a.len) {
+                            app.swap_queue_a[app.swap_queue_count] = @intCast(sp.a);
+                            app.swap_queue_b[app.swap_queue_count] = @intCast(sp.b);
+                            app.swap_queue_count += 1;
+                        }
+                    },
                     else => {},
                 }
             },
@@ -514,6 +526,33 @@ export fn termania_drain_focus_pane(
     if (remaining > 0) {
         for (0..remaining) |i| {
             app.focus_queue_panes[i] = app.focus_queue_panes[i + 1];
+        }
+    }
+
+    return 1;
+}
+
+/// Drain one pending swap_panes action (visual grid indices). Returns 1 if
+/// one was available and writes the two indices to a_out/b_out.
+export fn termania_drain_swap_panes(
+    handle: ?*anyopaque,
+    a_out: ?*u32,
+    b_out: ?*u32,
+) u8 {
+    const app = getApp(handle) orelse return 0;
+    if (app.swap_queue_count == 0) return 0;
+
+    const a = a_out orelse return 0;
+    const b = b_out orelse return 0;
+    a.* = app.swap_queue_a[0];
+    b.* = app.swap_queue_b[0];
+
+    app.swap_queue_count -= 1;
+    const remaining = app.swap_queue_count;
+    if (remaining > 0) {
+        for (0..remaining) |i| {
+            app.swap_queue_a[i] = app.swap_queue_a[i + 1];
+            app.swap_queue_b[i] = app.swap_queue_b[i + 1];
         }
     }
 
@@ -1696,4 +1735,57 @@ export fn termania_grid_slot_pane_id(handle: ?*anyopaque, grid_idx: u32) u32 {
 export fn termania_session_persistence(handle: ?*anyopaque) u8 {
     const app = getApp(handle) orelse return 0;
     return if (app.config.session_persistence) 1 else 0;
+}
+
+/// Return 1 if this instance's Text Tap server is running (socket bound).
+/// False for config-only handles and for instances launched with
+/// [text_tap] enabled = false (mirror UIs).
+export fn termania_text_tap_running(handle: ?*anyopaque) u8 {
+    const app = getApp(handle) orelse return 0;
+    return if (app.text_tap.running) 1 else 0;
+}
+
+/// Broadcast a layout update line to layout-subscribed Text Tap clients.
+/// `window` selects which window's subscribers receive it (clients that
+/// subscribed without a window filter receive all windows). The line is
+/// sent verbatim; a trailing newline is appended if missing.
+export fn termania_broadcast_layout(
+    handle: ?*anyopaque,
+    window: ?[*:0]const u8,
+    line: ?[*:0]const u8,
+) void {
+    const app = getApp(handle) orelse return;
+    if (!app.text_tap.running) return;
+    const l = line orelse return;
+    const line_slice = std.mem.sliceTo(l, 0);
+    if (line_slice.len == 0) return;
+    const win: ?[]const u8 = if (window) |w| std.mem.sliceTo(w, 0) else null;
+
+    if (line_slice[line_slice.len - 1] == '\n') {
+        app.text_tap.broadcastLayout(win, line_slice);
+    } else {
+        const buf = app.allocator.alloc(u8, line_slice.len + 1) catch return;
+        defer app.allocator.free(buf);
+        @memcpy(buf[0..line_slice.len], line_slice);
+        buf[line_slice.len] = '\n';
+        app.text_tap.broadcastLayout(win, buf);
+    }
+}
+
+/// Number of clients subscribed to layout updates. Polls the socket first
+/// so newly connected subscribers are counted promptly.
+export fn termania_layout_subscriber_count(handle: ?*anyopaque) u32 {
+    const app = getApp(handle) orelse return 0;
+    app.text_tap.pollThrottled();
+    return @intCast(app.text_tap.layoutSubscriberCount());
+}
+
+/// Monotonic counter incremented on every layout_subscribe. The UI watches
+/// this (not the count) to push initial snapshots: a subscriber that drops
+/// and resubscribes within one poll leaves the count unchanged but always
+/// advances the generation.
+export fn termania_layout_subscribe_generation(handle: ?*anyopaque) u64 {
+    const app = getApp(handle) orelse return 0;
+    app.text_tap.pollThrottled();
+    return app.text_tap.layout_subscribe_gen;
 }

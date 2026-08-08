@@ -454,6 +454,15 @@ extension Notification.Name {
 
     /// Focus a specific pane by pane ID (from surface.focus RPC). userInfo: "paneId" (Int)
     static let trmFocusPane = Notification.Name("app.roj.trm.focusPane")
+
+    /// Swap two panes by visual grid index (from the swap_panes socket action).
+    /// userInfo: "a" (Int), "b" (Int)
+    static let trmTextTapSwapPanes = Notification.Name("app.roj.trm.textTapSwapPanes")
+
+    /// The number of layout-subscribed Text Tap clients increased — primary
+    /// windows should re-broadcast their current layout snapshot so a newly
+    /// attached mirror gets its initial state. userInfo: "count" (Int)
+    static let trmLayoutSubscribersChanged = Notification.Name("app.roj.trm.layoutSubscribersChanged")
 }
 
 // NOTE: I am moving all of these to Notification.Name extensions over time. This

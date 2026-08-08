@@ -293,6 +293,65 @@ class BaseTerminalController: NSWindowController,
     /// Cancellable for gridRowCols structural-change observation (used to equalize fractions).
     private var gridRowColsCancellable: AnyCancellable?
 
+    // MARK: - Live Layout Sync State
+
+    /// Role of this window in the server-backed UI model.
+    enum SessionRole {
+        /// Owns its layout: checkpoints autosaves and broadcasts layout
+        /// updates to subscribed mirrors.
+        case primary
+        /// A `trm mirror` / `trm attach-remote` window: follows the primary's
+        /// layout, never autosaves the shared window, never kills shared zmx
+        /// daemons, and has local layout editing disabled.
+        case mirror
+    }
+
+    /// This window's role. Mirrors are marked by a `layout_mirror = true`
+    /// top-level key in the config they were opened from (written by
+    /// mirror-session.py).
+    private(set) var sessionRole: SessionRole = .primary
+
+    /// True once this process has hosted a mirror window. A mirror process
+    /// shares the sessions directory with the primary process, so it must
+    /// never wipe the autosave files — even after its own windows close.
+    private(set) static var processHostedMirrorWindow = false
+
+    /// Stable identity for this window, persisted as `window_id` in
+    /// checkpoint TOMLs so mirrors can subscribe to this window's layout.
+    private(set) var windowUUID: String = UUID().uuidString
+
+    /// Monotonic revision stamped on layout broadcasts (primary role).
+    private var layoutRevision = 0
+
+    /// Identifies this broadcasting controller instance. A window can be
+    /// closed and reopened (same window_id, same process) with its revision
+    /// counter starting over — mirrors reset their monotonic revision guard
+    /// when the epoch changes.
+    private let layoutEpoch = UUID().uuidString
+
+    /// True while a remote layout snapshot is being applied, so broadcast
+    /// hooks and edit guards don't react to our own mutations.
+    private var isApplyingRemoteLayout = false
+
+    /// Socket client following the primary's layout (mirror role only).
+    private var layoutSyncClient: LayoutSyncClient?
+
+    /// Debounced broadcast trigger over the layout vars (primary role only).
+    private var layoutBroadcastCancellable: AnyCancellable?
+
+    /// True while setupInitialPanes replays a saved layout. Restore paths
+    /// (restoreStackGroups → stackPane, restoreAgentOverviews →
+    /// showAgentOverview) apply the owner's layout rather than editing it,
+    /// so the mirror edit guard must not block them.
+    private var isRestoringLayout = false
+
+    /// True when local layout edits should be rejected (mirror windows: the
+    /// primary owns the layout and would overwrite local edits anyway).
+    /// False while a snapshot or saved layout is being applied.
+    var isLayoutEditingDisabled: Bool {
+        sessionRole == .mirror && !isApplyingRemoteLayout && !isRestoringLayout
+    }
+
     /// An override title for the tab/window set by the user via prompt_tab_title.
     /// When set, this takes precedence over the computed title from the terminal.
     var titleOverride: String? = nil {
@@ -344,6 +403,19 @@ class BaseTerminalController: NSWindowController,
         self.configFilePath = configPath
         self.runtimeGridConfig = nil
         self.servicePluginRegistry = ServicePluginRegistry(scanner: self.terminalOutputScanner)
+
+        // Adopt the window identity from the config we were opened from, so
+        // it stays stable across checkpoint/restore, and detect the mirror
+        // role (windows opened from a mirror-session.py transform).
+        if let cfg = gridConfigOverride {
+            if let wid = cfg.windowId, !wid.isEmpty {
+                self.windowUUID = wid
+            }
+            if cfg.layoutMirror {
+                self.sessionRole = .mirror
+                Self.processHostedMirrorWindow = true
+            }
+        }
 
         super.init(window: nil)
 
@@ -505,6 +577,13 @@ class BaseTerminalController: NSWindowController,
             name: .trmFocusPane,
             object: nil)
 
+        // swap_panes socket action: swap two panes by visual grid index
+        center.addObserver(
+            self,
+            selector: #selector(handleTextTapSwapPanes(_:)),
+            name: .trmTextTapSwapPanes,
+            object: nil)
+
         // Command lifecycle — notify scanner subscribers when a command finishes
         center.addObserver(
             self,
@@ -582,9 +661,12 @@ class BaseTerminalController: NSWindowController,
         // windowWillClose normally tears these down, but a controller can be
         // deallocated without its window ever closing; without this the timer
         // fires (as a no-op) every 30s forever and the watcher leaks its fd.
+        // The layout sync client's thread strongly holds the client until
+        // stop() — without this it would reconnect-loop forever.
         scrollbackSnapshotTimer?.invalidate()
         configReloadDebounce?.cancel()
         configFileWatcher?.cancel()
+        layoutSyncClient?.stop()
     }
 
     // MARK: Service Plugin Setup & Hot-Reload
@@ -783,6 +865,7 @@ class BaseTerminalController: NSWindowController,
         baseConfig config: Ghostty.SurfaceConfiguration? = nil,
         didReconcile: Bool = false
     ) -> Ghostty.SurfaceView? {
+        guard !isLayoutEditingDisabled else { return nil }
         guard let ghostty_app = ghostty.app else { return nil }
 
         // Validate that oldView is still in the surface tree. If a pane was
@@ -1066,6 +1149,7 @@ class BaseTerminalController: NSWindowController,
     }
 
     func movePane(_ pane: GridPane, direction: PaneMoveDirection) {
+        guard !isLayoutEditingDisabled else { return }
         TrmDiagnostics.log("[close-trace] movePane enter direction=\(direction) gridPanes=\(self.gridPanes.count)")
         defer { TrmDiagnostics.log("[close-trace] movePane exit gridPanes=\(self.gridPanes.count)") }
         ensurePaneDisplayOrder()
@@ -1156,6 +1240,7 @@ class BaseTerminalController: NSWindowController,
 
     /// Swap two panes' positions in the grid without stacking them.
     func swapPane(_ source: GridPane, with target: GridPane) {
+        guard !isLayoutEditingDisabled else { return }
         guard source.id != target.id else { return }
         ensurePaneDisplayOrder()
         let panes = gridPanes
@@ -1183,6 +1268,7 @@ class BaseTerminalController: NSWindowController,
     /// `edge` controls whether the source lands above (`.top`) or below
     /// (`.bottom`) the existing pane(s) in the stack.
     func stackPane(_ source: GridPane, onto target: GridPane, edge: StackDropEdge = .bottom) {
+        guard !isLayoutEditingDisabled else { return }
         let sourceID = source.id
         let targetID = target.id
         guard sourceID != targetID else { return }
@@ -1277,6 +1363,7 @@ class BaseTerminalController: NSWindowController,
     /// in the same row, which is the only placement the grid guarantees stays
     /// adjacent. If one is already open for this pane, this is a no-op.
     func showAgentOverview(for pane: GridPane) {
+        guard !isLayoutEditingDisabled else { return }
         guard case .terminal(let surface) = pane else { return }
         guard !hasAgentOverview(for: pane) else { return }
 
@@ -1334,6 +1421,7 @@ class BaseTerminalController: NSWindowController,
     /// pane is a valid target — anywhere else the drop is ignored, which is
     /// what keeps the overview adjacent to its agent.
     func placeOverview(overviewUUID uuid: UUID, onto target: GridPane, placement: AgentOverviewPlacement) {
+        guard !isLayoutEditingDisabled else { return }
         guard let view = agentOverviewPanes.first(where: { $0.id == uuid }) else { return }
         guard let surface = view.surface,
               case .terminal(let targetSurface) = target,
@@ -1393,6 +1481,7 @@ class BaseTerminalController: NSWindowController,
 
     /// Unstack a pane from its stack, restoring it to its own grid cell.
     func unstackPane(_ pane: GridPane) {
+        guard !isLayoutEditingDisabled else { return }
         let paneID = pane.id
 
         // Find which stack contains this pane.
@@ -1465,6 +1554,7 @@ class BaseTerminalController: NSWindowController,
     /// Resize row `row` so it takes `fraction` of the total available height.
     /// The adjacent row (row+1) absorbs the remainder.
     func resizeGridRow(_ row: Int, toFraction fraction: CGFloat) {
+        guard !isLayoutEditingDisabled else { return }
         let nRows = gridRowCols.count
         guard row >= 0, row < nRows - 1 else { return }
         var fracs = normalizedRowFractions()
@@ -1478,6 +1568,7 @@ class BaseTerminalController: NSWindowController,
     /// Resize column `col` in row `row` so it takes `fraction` of that row's available width.
     /// The adjacent column (col+1) absorbs the remainder.
     func resizeGridCol(_ row: Int, col: Int, toFraction fraction: CGFloat) {
+        guard !isLayoutEditingDisabled else { return }
         guard row >= 0, row < gridRowCols.count else { return }
         let nCols = gridRowCols[row]
         guard col >= 0, col < nCols - 1 else { return }
@@ -1496,6 +1587,7 @@ class BaseTerminalController: NSWindowController,
     /// combined height of sub-panes `subIdx` and `subIdx+1`. The adjacent sub-pane absorbs
     /// the remainder.
     func resizeStack(_ stackID: ObjectIdentifier, subIdx: Int, toFraction fraction: CGFloat) {
+        guard !isLayoutEditingDisabled else { return }
         guard let children = paneStacks[stackID] else { return }
         let n = children.count
         guard subIdx >= 0, subIdx < n - 1 else { return }
@@ -2109,6 +2201,7 @@ class BaseTerminalController: NSWindowController,
     }
 
     private func insertWebviewPane(_ pane: WebViewPane, at index: Int? = nil, preferredRow: Int? = nil) {
+        guard !isLayoutEditingDisabled else { return }
         let insertAt = min(max(index ?? webviewPanes.count, 0), webviewPanes.count)
         webviewPanes.insert(pane, at: insertAt)
 
@@ -2127,6 +2220,7 @@ class BaseTerminalController: NSWindowController,
     }
 
     private func insertPluginPane(_ pane: PluginPane, at index: Int? = nil, preferredRow: Int? = nil) {
+        guard !isLayoutEditingDisabled else { return }
         let insertAt = min(max(index ?? pluginPanes.count, 0), pluginPanes.count)
         pluginPanes.insert(pane, at: insertAt)
 
@@ -2548,9 +2642,14 @@ class BaseTerminalController: NSWindowController,
         // This node must be part of our tree
         guard surfaceTree.contains(node) else { return }
 
+        // Mirror windows never close panes locally: the primary owns the
+        // layout, and killing a pane here would take down the shared zmx
+        // daemon the primary is attached to.
+        guard !isLayoutEditingDisabled else { return }
+
         // If the child process is not alive, then we exit immediately
         guard withConfirmation else {
-            Self.killZmxSessions(in: node)
+            if sessionRole == .primary { Self.killZmxSessions(in: node) }
             removeSurfaceNode(node)
             return
         }
@@ -2565,7 +2664,7 @@ class BaseTerminalController: NSWindowController,
             informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
         ) { [weak self] in
             if let self {
-                Self.killZmxSessions(in: node)
+                if self.sessionRole == .primary { Self.killZmxSessions(in: node) }
                 self.removeSurfaceNode(node)
             }
         }
@@ -2956,7 +3055,38 @@ class BaseTerminalController: NSWindowController,
             )
         }
         let surfacesJSON = "[" + entries.joined(separator: ",") + "]"
-        return "{\"id\":\"\(requestId)\",\"ok\":true,\"result\":{\"surfaces\":\(surfacesJSON)}}"
+        let layoutJSON = buildCmuxLayoutJSON()
+        return "{\"id\":\"\(requestId)\",\"ok\":true,\"result\":{\"surfaces\":\(surfacesJSON),\"layout\":\(layoutJSON)}}"
+    }
+
+    /// Layout introspection attached to the surface.list response: the visual
+    /// cell order (zmx session names for terminals, pane types otherwise),
+    /// grid shape, and window identity/role. Lets external tools — and the
+    /// layout-sync E2E test — assert what a window actually shows.
+    private func buildCmuxLayoutJSON() -> String {
+        func cellKey(_ pane: GridPane) -> String {
+            switch pane {
+            case .terminal(let s):
+                return s.zmxSessionName ?? "terminal-\(s.paneId ?? -1)"
+            case .webview:
+                return "webview"
+            case .plugin(let p):
+                return p.kind.rawValue
+            case .agentOverview:
+                return "agent_overview"
+            case .stack(let children):
+                return "stack(" + children.map(cellKey).joined(separator: "+") + ")"
+            }
+        }
+        let cells = gridPanes
+            .map { "\"\(Self.cmuxJSONEscape(cellKey($0)))\"" }
+            .joined(separator: ",")
+        let rowCols = gridRowCols.map(String.init).joined(separator: ",")
+        let role = sessionRole == .mirror ? "mirror" : "primary"
+        return "{\"window_id\":\"\(Self.cmuxJSONEscape(windowUUID))\"," +
+            "\"role\":\"\(role)\"," +
+            "\"row_cols\":[\(rowCols)]," +
+            "\"cells\":[\(cells)]}"
     }
 
     private func buildCmuxIdentifyResponse(requestId: String) -> String {
@@ -4051,20 +4181,39 @@ class BaseTerminalController: NSWindowController,
         lines.append("# trm session config — saved \(timestamp)")
         lines.append("")
 
+        // Window identity for live layout sync: mirrors subscribe to this
+        // window's layout updates over the primary's Text Tap socket.
+        lines.append("window_id = \(tomlQuote(windowUUID))")
+        if sessionRole == .primary, Trm.shared.textTapRunning,
+           let socketPath = Trm.shared.textTapSocketPath {
+            lines.append("text_tap_socket = \(tomlQuote(socketPath))")
+        }
+        lines.append("")
+
         // Flatten stacks for serialization, tagging stacked panes with a
-        // group name so they can be re-stacked on restore.
+        // group name so they can be re-stacked on restore. The stack's
+        // sub-pane height fractions ride on its first (host) pane.
         let visualPanes = gridPanes
-        var flatPanes: [(pane: GridPane, stackGroup: String?)] = []
+        var flatPanes: [(pane: GridPane, stackGroup: String?, stackFractions: [CGFloat]?)] = []
         var stackCounter = 0
         for pane in visualPanes {
             if case .stack(let children) = pane {
                 let groupName = "stack_\(stackCounter)"
                 stackCounter += 1
-                for child in children {
-                    flatPanes.append((pane: child, stackGroup: groupName))
+                let hostFractions = children.first.flatMap { host -> [CGFloat]? in
+                    guard let fracs = stackSubPaneHeightFractions[host.id],
+                          fracs.count == children.count else { return nil }
+                    return fracs
+                }
+                for (childIdx, child) in children.enumerated() {
+                    flatPanes.append((
+                        pane: child,
+                        stackGroup: groupName,
+                        stackFractions: childIdx == 0 ? hostFractions : nil
+                    ))
                 }
             } else {
-                flatPanes.append((pane: pane, stackGroup: nil))
+                flatPanes.append((pane: pane, stackGroup: nil, stackFractions: nil))
             }
         }
 
@@ -4098,6 +4247,18 @@ class BaseTerminalController: NSWindowController,
         }
         lines.append("gap = \(Int(gridGap))")
         lines.append("outer_padding = \(Int(gridPadding))")
+        // Pane size fractions, only when they match the serialized shape
+        // (missing keys mean equal splits — same convention as the grid view).
+        if gridRowHeightFractions.count == saveRowCols.count {
+            lines.append("row_fractions = \(tomlQuote(Self.fractionListString(gridRowHeightFractions)))")
+        }
+        if gridColWidthFractions.count == saveRowCols.count,
+           zip(saveRowCols, gridColWidthFractions).allSatisfy({ $0 == $1.count }) {
+            let joined = gridColWidthFractions
+                .map { Self.fractionListString($0) }
+                .joined(separator: ";")
+            lines.append("col_fractions = \(tomlQuote(joined))")
+        }
         lines.append("")
 
         // Serialize panes in visual (display) order so watermarks,
@@ -4139,6 +4300,9 @@ class BaseTerminalController: NSWindowController,
                 if let sg = entry.stackGroup {
                     lines.append("stack_group = \(tomlQuote(sg))")
                 }
+                if let sf = entry.stackFractions {
+                    lines.append("stack_fractions = \(tomlQuote(Self.fractionListString(sf)))")
+                }
                 lines.append("")
 
             case .webview(let webviewPane):
@@ -4151,6 +4315,9 @@ class BaseTerminalController: NSWindowController,
                 }
                 if let sg = entry.stackGroup {
                     lines.append("stack_group = \(tomlQuote(sg))")
+                }
+                if let sf = entry.stackFractions {
+                    lines.append("stack_fractions = \(tomlQuote(Self.fractionListString(sf)))")
                 }
                 lines.append("")
 
@@ -4192,6 +4359,9 @@ class BaseTerminalController: NSWindowController,
                 if let sg = entry.stackGroup {
                     lines.append("stack_group = \(tomlQuote(sg))")
                 }
+                if let sf = entry.stackFractions {
+                    lines.append("stack_fractions = \(tomlQuote(Self.fractionListString(sf)))")
+                }
                 lines.append("")
 
             case .agentOverview(let view):
@@ -4225,6 +4395,387 @@ class BaseTerminalController: NSWindowController,
         escaped = escaped.replacingOccurrences(of: "\n", with: "\\n")
         escaped = escaped.replacingOccurrences(of: "\t", with: "\\t")
         return "\"\(escaped)\""
+    }
+
+    private static func fractionListString(_ fracs: [CGFloat]) -> String {
+        fracs.map { String(format: "%.4f", Double($0)) }.joined(separator: ",")
+    }
+
+    // MARK: - Live Layout Sync
+
+    /// Wire up layout sync for this window's role: primaries broadcast their
+    /// layout to subscribed mirrors, mirrors connect and follow.
+    private func setupLayoutSync() {
+        switch sessionRole {
+        case .primary:
+            setupLayoutBroadcast()
+        case .mirror:
+            startLayoutSyncClient()
+        }
+    }
+
+    /// Broadcast a debounced layout snapshot whenever any layout var changes.
+    private func setupLayoutBroadcast() {
+        let publishers: [AnyPublisher<Void, Never>] = [
+            $surfaceTree.map { _ in () }.eraseToAnyPublisher(),
+            $gridRowCols.map { _ in () }.eraseToAnyPublisher(),
+            $gridRowHeightFractions.map { _ in () }.eraseToAnyPublisher(),
+            $gridColWidthFractions.map { _ in () }.eraseToAnyPublisher(),
+            $paneDisplayOrder.map { _ in () }.eraseToAnyPublisher(),
+            $paneStacks.map { _ in () }.eraseToAnyPublisher(),
+            $stackSubPaneHeightFractions.map { _ in () }.eraseToAnyPublisher(),
+            $webviewPanes.map { _ in () }.eraseToAnyPublisher(),
+            $pluginPanes.map { _ in () }.eraseToAnyPublisher(),
+            $agentOverviewPanes.map { _ in () }.eraseToAnyPublisher(),
+        ]
+        layoutBroadcastCancellable = Publishers.MergeMany(publishers)
+            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.broadcastLayoutSnapshot()
+            }
+
+        // A newly attached mirror needs an initial snapshot: re-broadcast
+        // whenever the layout subscriber count rises.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(onLayoutSubscribersChanged(_:)),
+            name: .trmLayoutSubscribersChanged,
+            object: nil)
+    }
+
+    @objc private func onLayoutSubscribersChanged(_ notification: Notification) {
+        guard sessionRole == .primary else { return }
+        broadcastLayoutSnapshot()
+    }
+
+    /// Serialize the current layout and broadcast it to subscribed mirrors.
+    private func broadcastLayoutSnapshot() {
+        guard sessionRole == .primary, !isApplyingRemoteLayout else { return }
+        guard Trm.shared.textTapRunning, Trm.shared.layoutSubscriberCount() > 0 else { return }
+
+        layoutRevision += 1
+        let payload: [String: Any] = [
+            "type": "layout_update",
+            "window": windowUUID,
+            "epoch": layoutEpoch,
+            "revision": layoutRevision,
+            "toml": buildCurrentConfigToml(),
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let line = String(data: data, encoding: .utf8) else { return }
+        Trm.shared.broadcastLayout(windowId: windowUUID, line: line)
+    }
+
+    /// Connect to the primary UI's Text Tap socket and follow its layout.
+    private func startLayoutSyncClient() {
+        guard layoutSyncClient == nil,
+              let socketPath = gridConfigOverride?.textTapSocket,
+              !socketPath.isEmpty
+        else { return }
+        let client = LayoutSyncClient(socketPath: socketPath, windowId: windowUUID)
+        client.onLayoutUpdate = { [weak self] toml, revision in
+            self?.applyRemoteLayout(toml: toml, revision: revision)
+        }
+        client.start()
+        layoutSyncClient = client
+    }
+
+    /// Apply a layout snapshot broadcast by the primary UI, in place: existing
+    /// panes are matched (terminals by zmx session, webviews by URL, plugins
+    /// by kind+title, overviews by their terminal) and only genuinely added or
+    /// removed panes are created or dropped. Surviving PTY views are reused
+    /// as-is — the mirror never tears down live terminals.
+    func applyRemoteLayout(toml: String, revision: Int) {
+        guard sessionRole == .mirror, !isApplyingRemoteLayout else { return }
+
+        // Parse with the exact machinery the restore path uses; it wants a
+        // file path, so stage the snapshot in a temp file. The name includes
+        // pid + a nonce: two mirror processes of the same window receive the
+        // same (windowUUID, revision) within milliseconds and share $TMPDIR.
+        let tmpURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "trm-layout-\(windowUUID)-\(revision)-" +
+                "\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+        guard (try? toml.write(to: tmpURL, atomically: true, encoding: .utf8)) != nil,
+              let config = Trm.gridConfig(fromConfigPath: tmpURL.path)
+        else { return }
+
+        isApplyingRemoteLayout = true
+        defer { isApplyingRemoteLayout = false }
+        applyLayoutConfig(config)
+    }
+
+    /// The in-place reconciler behind `applyRemoteLayout`.
+    private func applyLayoutConfig(_ config: Trm.TrmGridConfig) {
+        guard let ghosttyApp = ghostty.app else { return }
+        let paneConfigs = config.panes
+        guard !paneConfigs.isEmpty else { return }
+
+        // Pools of existing panes still available for matching.
+        var freeSurfaces = gridSurfaces
+        var freeWebviews = webviewPanes
+        var freePlugins = pluginPanes
+        var freeOverviews = agentOverviewPanes
+
+        enum ResolvedPane {
+            case terminal(Ghostty.SurfaceView)
+            case webview(WebViewPane)
+            case plugin(PluginPane)
+            case overview(AgentOverviewPane)
+        }
+        var resolvedByConfigIndex: [Int: ResolvedPane] = [:]
+
+        // First pass: terminals, webviews, plugins.
+        for (i, paneConfig) in paneConfigs.enumerated() {
+            let type = normalizedPaneType(paneConfig.paneType)
+            switch type {
+            case "terminal":
+                if let session = paneConfig.zmxSession,
+                   let idx = freeSurfaces.firstIndex(where: { $0.zmxSessionName == session }) {
+                    let view = freeSurfaces.remove(at: idx)
+                    // Watermarks are part of the synced layout: follow the
+                    // primary's value (clearing when it cleared).
+                    if let paneId = view.paneId {
+                        Trm.shared.setWatermark(
+                            forPaneId: UInt32(paneId), text: paneConfig.watermark ?? "")
+                    }
+                    resolvedByConfigIndex[i] = .terminal(view)
+                } else if let view = makeMirrorTerminalSurface(paneConfig, ghosttyApp: ghosttyApp) {
+                    resolvedByConfigIndex[i] = .terminal(view)
+                }
+                // A pane whose zmx session isn't reachable yet is skipped;
+                // shape reconciliation below absorbs the gap and the next
+                // snapshot picks it up.
+            case "webview":
+                let targetURL = urlForWebview(from: paneConfig)
+                if let idx = freeWebviews.firstIndex(where: {
+                    ($0.currentURL ?? $0.initialURL).absoluteString == targetURL.absoluteString
+                }) {
+                    resolvedByConfigIndex[i] = .webview(freeWebviews.remove(at: idx))
+                } else if !freeWebviews.isEmpty {
+                    // URL drifted (independent navigation) — reuse in order
+                    // rather than reloading a fresh webview.
+                    resolvedByConfigIndex[i] = .webview(freeWebviews.removeFirst())
+                } else {
+                    resolvedByConfigIndex[i] = .webview(WebViewPane(url: targetURL))
+                }
+            case "agent_overview":
+                break // Second pass — the anchor terminal must resolve first.
+            default:
+                guard let kind = PluginPaneKind.fromPaneType(type) else { break }
+                if let idx = freePlugins.firstIndex(where: {
+                    $0.kind == kind && $0.configuredTitle == paneConfig.title
+                }) ?? freePlugins.firstIndex(where: { $0.kind == kind }) {
+                    resolvedByConfigIndex[i] = .plugin(freePlugins.remove(at: idx))
+                } else {
+                    resolvedByConfigIndex[i] = .plugin(PluginPane(kind: kind, config: paneConfig))
+                }
+            }
+        }
+
+        // Second pass: agent overviews, matched by their anchor terminal.
+        for (i, paneConfig) in paneConfigs.enumerated()
+        where normalizedPaneType(paneConfig.paneType) == "agent_overview" {
+            guard let ofIdx = paneConfig.overviewOf,
+                  let resolved = resolvedByConfigIndex[ofIdx],
+                  case .terminal(let anchor) = resolved else { continue }
+            let placement = paneConfig.overviewPlacement
+                .flatMap(AgentOverviewPlacement.init(rawValue:)) ?? .trailing
+            let view: AgentOverviewPane
+            if let idx = freeOverviews.firstIndex(where: { $0.surface === anchor }) {
+                view = freeOverviews.remove(at: idx)
+            } else {
+                view = AgentOverviewPane(surface: anchor)
+            }
+            view.placement = placement
+            resolvedByConfigIndex[i] = .overview(view)
+        }
+
+        // Assemble the final ordered pane lists and flat ID order.
+        var newSurfaces: [Ghostty.SurfaceView] = []
+        var newWebviews: [WebViewPane] = []
+        var newPlugins: [PluginPane] = []
+        var newOverviews: [AgentOverviewPane] = []
+        var flatIDs: [ObjectIdentifier] = []
+        var stackTags: [String?] = []
+        var stackFractionsByTag: [String: [CGFloat]] = [:]
+
+        for (i, paneConfig) in paneConfigs.enumerated() {
+            guard let resolved = resolvedByConfigIndex[i] else { continue }
+            let id: ObjectIdentifier
+            switch resolved {
+            case .terminal(let v):
+                newSurfaces.append(v)
+                id = ObjectIdentifier(v)
+            case .webview(let p):
+                newWebviews.append(p)
+                id = ObjectIdentifier(p)
+            case .plugin(let p):
+                newPlugins.append(p)
+                id = ObjectIdentifier(p)
+            case .overview(let p):
+                newOverviews.append(p)
+                id = ObjectIdentifier(p)
+            }
+            flatIDs.append(id)
+            stackTags.append(paneConfig.stackGroup)
+            if let tag = paneConfig.stackGroup,
+               let sf = paneConfig.stackFractions,
+               stackFractionsByTag[tag] == nil {
+                stackFractionsByTag[tag] = sf.map { CGFloat($0) }
+            }
+        }
+        guard !flatIDs.isEmpty else { return }
+
+        // Stack state, keyed by each group's first member (the host).
+        let groups = LayoutSyncModel.stackGroups(forTags: stackTags)
+        let newStacks = LayoutSyncModel.paneStacks(flatIDs: flatIDs, stackGroups: groups)
+        var newStackFractions: [ObjectIdentifier: [CGFloat]] = [:]
+        for group in groups {
+            guard let first = group.first, first < flatIDs.count,
+                  let tag = stackTags[first],
+                  let fracs = stackFractionsByTag[tag],
+                  fracs.count == group.count else { continue }
+            newStackFractions[flatIDs[first]] = fracs
+        }
+
+        // Rebuild the split tree REUSING surviving surface views — their PTYs
+        // are untouched. Dropped surfaces deallocate, which only detaches
+        // their zmx client; the session daemons live on.
+        var newTree = SplitTree<Ghostty.SurfaceView>()
+        if let first = newSurfaces.first {
+            newTree = .init(view: first)
+            var previous = first
+            for view in newSurfaces.dropFirst() {
+                do {
+                    newTree = try newTree.inserting(view: view, at: previous, direction: .right)
+                    previous = view
+                } catch {
+                    Ghostty.logger.warning("layout sync: failed to insert pane into tree: \(error)")
+                }
+            }
+        }
+
+        // Keep focus where it is when the focused surface survives.
+        let focusTarget: Ghostty.SurfaceView?
+        if let focused = focusedSurface, newSurfaces.contains(where: { $0 === focused }) {
+            focusTarget = nil
+        } else {
+            focusTarget = newSurfaces.first
+        }
+
+        // Assign the pane arrays BEFORE the tree: TerminalController's
+        // replaceSurfaceTree override closes the tab when the new tree is
+        // empty AND webviewPanes/pluginPanes are empty — it must judge the
+        // incoming layout's panes, not the stale ones.
+        webviewPanes = newWebviews
+        pluginPanes = newPlugins
+        agentOverviewPanes = newOverviews
+        replaceSurfaceTree(
+            newTree,
+            moveFocusTo: focusTarget,
+            moveFocusFrom: focusedSurface,
+            undoAction: nil
+        )
+        paneStacks = newStacks
+        paneDisplayOrder = flatIDs
+
+        // Visual shape from the config (stacks collapsed); reconcile when
+        // panes were skipped so the shape always matches the cell count.
+        let visualCount = LayoutSyncModel.visualCellCount(
+            flatCount: flatIDs.count, stackGroups: groups)
+        var rowCols = LayoutSyncModel.targetRowCols(
+            visualCount: visualCount,
+            configRowCols: config.rowCols,
+            rows: config.rows,
+            cols: config.cols
+        )
+        if rowCols.reduce(0, +) != visualCount {
+            var layout = GridLayout<ObjectIdentifier>(rowCols: rowCols, displayOrder: flatIDs)
+            layout.reconcile(actualCount: visualCount)
+            rowCols = layout.rowCols
+        }
+        gridRowCols = rowCols
+
+        // Fractions last: the gridRowCols assignment above may have
+        // re-equalized them via the structural-change sink. Empty/mismatched
+        // config fractions mean "equal splits" — [] is the grid's reset value.
+        if config.rowFractions.count == rowCols.count {
+            gridRowHeightFractions = config.rowFractions.map { CGFloat($0) }
+        } else {
+            gridRowHeightFractions = []
+        }
+        if config.colFractions.count == rowCols.count,
+           zip(rowCols, config.colFractions).allSatisfy({ $0 == $1.count }) {
+            gridColWidthFractions = config.colFractions.map { row in row.map { CGFloat($0) } }
+        } else {
+            gridColWidthFractions = []
+        }
+        stackSubPaneHeightFractions = newStackFractions
+
+        // Drop stale peek state for panes that no longer exist.
+        if let peeked = peekedPane, !flatIDs.contains(peeked) {
+            peekedPane = nil
+        }
+    }
+
+    /// Create a terminal surface for a mirror window by attaching to a pane's
+    /// live zmx session. Returns nil when the session daemon isn't reachable
+    /// (never spawns a fresh daemon — that would diverge from the primary).
+    private func makeMirrorTerminalSurface(
+        _ paneConfig: Trm.TrmPaneConfig,
+        ghosttyApp: ghostty_app_t
+    ) -> Ghostty.SurfaceView? {
+        guard ghostty.sessionPersistence,
+              let session = paneConfig.zmxSession,
+              ZmxSessionManager.sessionExists(session) else { return nil }
+
+        var surfaceConfig = Ghostty.SurfaceConfiguration()
+        if let cwd = paneConfig.cwd, !cwd.isEmpty {
+            surfaceConfig.workingDirectory = NSString(string: cwd).expandingTildeInPath
+        } else {
+            surfaceConfig.workingDirectory = NSHomeDirectory()
+        }
+        if let command = paneConfig.command, !command.isEmpty {
+            surfaceConfig.command = command
+        }
+        let paneId = Trm.shared.allocPaneId()
+        Self.injectCmuxEnvVars(into: &surfaceConfig, paneId: paneId)
+        guard let persist = Self.wrapForPersistence(
+            &surfaceConfig, ghostty: ghostty, session: session) else { return nil }
+
+        let view = Ghostty.SurfaceView(ghosttyApp, baseConfig: surfaceConfig)
+        view.paneId = paneId
+        view.zmxSessionName = persist.session
+        view.logicalCommand = persist.logical
+        Self.setDefaultWatermark(forPaneId: paneId)
+        if let watermark = paneConfig.watermark, !watermark.isEmpty {
+            Trm.shared.setWatermark(forPaneId: UInt32(paneId), text: watermark)
+        }
+        return view
+    }
+
+    /// Handle the swap_panes socket action (visual grid indices). Indices are
+    /// window-relative, so exactly one window may react: the key window when
+    /// it can act (primary role), otherwise the first primary main window
+    /// (which also covers headless automation with no key window). Resolving
+    /// a single designated handler keeps a key quick terminal from acting
+    /// alongside a main window, and a key mirror from swallowing the action.
+    @objc private func handleTextTapSwapPanes(_ notification: Notification) {
+        guard sessionRole == .primary,
+              let a = notification.userInfo?["a"] as? Int,
+              let b = notification.userInfo?["b"] as? Int else { return }
+        let keyController = NSApp.keyWindow?.windowController as? BaseTerminalController
+        let target: BaseTerminalController? = (keyController?.sessionRole == .primary)
+            ? keyController
+            : TerminalController.all.first(where: { $0.sessionRole == .primary })
+        guard target === self else { return }
+        ensurePaneDisplayOrder()
+        let panes = gridPanes
+        guard a != b, a >= 0, b >= 0, a < panes.count, b < panes.count else { return }
+        swapPanesInDisplayOrder(panes, a, b)
+        repinAgentOverviews()
     }
 
     private func resolveTomlPath(_ path: String, on surfaceView: Ghostty.SurfaceView) -> String {
@@ -4486,6 +5037,10 @@ class BaseTerminalController: NSWindowController,
                 }
             }
 
+        // Live layout sync: primary windows broadcast layout snapshots,
+        // mirror windows connect to the primary's socket and follow.
+        setupLayoutSync()
+
         // Setup initial panes from termania.toml config — but skip if we
         // were created with an existing surface tree (e.g., a popped-out pane or
         // macOS window restoration). In the external-tree case, assign pane IDs
@@ -4510,6 +5065,11 @@ class BaseTerminalController: NSWindowController,
 
     /// Apply a concrete grid config and create the pane layout in-place.
     private func setupInitialPanes(from config: Trm.TrmGridConfig) {
+        // Restore applies a saved layout; on mirror windows it must bypass
+        // the layout-edit guard (stackPane etc. are guarded).
+        isRestoringLayout = true
+        defer { isRestoringLayout = false }
+
         // Clear all existing watermarks before rebuilding so stale entries
         // from the previous layout don't leak into the new one.
         for surface in gridSurfaces {
@@ -4999,6 +5559,10 @@ class BaseTerminalController: NSWindowController,
         guard let window else { return }
 
         SessionManager.autoSaveSingleWindow(self)
+
+        layoutSyncClient?.stop()
+        layoutSyncClient = nil
+        layoutBroadcastCancellable = nil
 
         stopConfigFileWatcher()
         scrollbackSnapshotTimer?.invalidate()

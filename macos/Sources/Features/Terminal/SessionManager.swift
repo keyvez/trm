@@ -201,10 +201,23 @@ enum SessionManager {
     // MARK: - Auto-Save
 
     static func autoSaveAllWindows() {
-        clearAutoSaves()
+        // Mirror windows follow another UI's layout and must never checkpoint
+        // the shared window — clearAutoSaves() below would clobber the
+        // primary process's files with the mirror's state.
+        let controllers = TerminalController.all.filter { $0.sessionRole == .primary }
+        guard !controllers.isEmpty else {
+            // Zero primary windows: an ordinary process should still wipe
+            // stale autosaves (the user closed everything — nothing should
+            // resurrect on relaunch), but a process that has hosted a mirror
+            // shares the sessions directory with the primary process and
+            // must never touch its files.
+            if !BaseTerminalController.processHostedMirrorWindow {
+                clearAutoSaves()
+            }
+            return
+        }
 
-        let controllers = TerminalController.all
-        guard !controllers.isEmpty else { return }
+        clearAutoSaves()
 
         let dir = sessionsDirectory
         let dateFormatter = ISO8601DateFormatter()
@@ -252,6 +265,8 @@ enum SessionManager {
     }
 
     static func autoSaveSingleWindow(_ controller: BaseTerminalController) {
+        // Mirrors never checkpoint the shared window they're following.
+        guard controller.sessionRole == .primary else { return }
         let dir = sessionsDirectory
         let toml = controller.buildCurrentConfigToml()
         let fileURL = dir.appendingPathComponent("_autosave_last.toml")

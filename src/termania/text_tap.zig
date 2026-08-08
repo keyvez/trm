@@ -83,6 +83,27 @@ pub const ClientConnection = struct {
     app_name: ?[]const u8 = null,
     /// The pane this client marked as connected (via mark_connected), or null.
     connected_pane: ?u32 = null,
+    /// True if this client subscribed to window layout updates.
+    layout_subscribed: bool = false,
+    /// Optional window UUID filter from layout_subscribe (heap-allocated).
+    /// null means the client receives every window's layout updates.
+    layout_window: ?[]const u8 = null,
+    /// Outbound bytes that didn't fit in the socket buffer, flushed each
+    /// poll in FIFO order so lines are never torn or reordered.
+    pending_out: ?std.array_list.Managed(u8) = null,
+    /// Set when the pending buffer overflowed or a write hard-failed; the
+    /// client is reaped on the next poll's read pass.
+    write_overflow: bool = false,
+
+    /// Free heap-allocated fields. Does not close the fd.
+    fn freeResources(self: *ClientConnection, allocator: std.mem.Allocator) void {
+        if (self.app_name) |name| allocator.free(name);
+        self.app_name = null;
+        if (self.layout_window) |w| allocator.free(w);
+        self.layout_window = null;
+        if (self.pending_out) |*p| p.deinit();
+        self.pending_out = null;
+    }
 };
 
 /// Text Tap server state.
@@ -109,6 +130,10 @@ pub const TextTapServer = struct {
     cmux_pending: std.array_list.Managed(CmuxPendingQuery),
     /// Queued cmux responses from Swift, ready to write to clients.
     cmux_responses: std.array_list.Managed(CmuxResponse),
+    /// Incremented on every layout_subscribe. Lets the UI detect subscriber
+    /// churn (drop + resubscribe within one poll leaves the COUNT unchanged)
+    /// so every new subscription gets an initial layout snapshot.
+    layout_subscribe_gen: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, socket_path: []const u8) TextTapServer {
         return .{
@@ -189,9 +214,9 @@ pub const TextTapServer = struct {
         if (!self.running) return;
 
         // Close all client connections.
-        for (self.clients.items) |client| {
+        for (self.clients.items) |*client| {
             posix.close(client.fd);
-            if (client.app_name) |name| self.allocator.free(name);
+            client.freeResources(self.allocator);
         }
         self.clients.clearRetainingCapacity();
 
@@ -225,6 +250,9 @@ pub const TextTapServer = struct {
     pub fn poll(self: *TextTapServer) void {
         if (!self.running) return;
         self.last_poll_ms = std.time.milliTimestamp();
+
+        // Retry writes that didn't fit in a client's socket buffer.
+        self.flushPendingWrites();
 
         // Accept new connections (non-blocking).
         self.acceptNewClients();
@@ -274,9 +302,9 @@ pub const TextTapServer = struct {
                 // Don't close/remove if this client has pending cmux queries.
                 // The fd must stay open so Swift can respond asynchronously.
                 if (self.hasPendingCmux(self.clients.items[i].fd)) continue;
-                const client = self.clients.orderedRemove(i);
+                var client = self.clients.orderedRemove(i);
                 posix.close(client.fd);
-                if (client.app_name) |name| self.allocator.free(name);
+                client.freeResources(self.allocator);
                 // Clear the pane this client had marked as connected.
                 if (client.connected_pane) |pane| {
                     _ = self.active_pane_ids.remove(pane);
@@ -296,6 +324,7 @@ pub const TextTapServer = struct {
     /// Read from a single client. Returns false if the client should be removed.
     fn readFromClient(self: *TextTapServer, idx: usize) bool {
         const client = &self.clients.items[idx];
+        if (client.write_overflow) return false;
         const remaining = client.read_buf[client.read_pos..];
         if (remaining.len == 0) {
             // Buffer is full with no newline — the line is too large for the
@@ -391,6 +420,18 @@ pub const TextTapServer = struct {
         } else if (std.mem.eql(u8, msg_type, "unsubscribe")) {
             self.clients.items[idx].subscribed = false;
             self.respond(idx, "{\"status\": \"unsubscribed\"}\n");
+        } else if (std.mem.eql(u8, msg_type, "layout_subscribe")) {
+            self.clients.items[idx].layout_subscribed = true;
+            self.layout_subscribe_gen +%= 1;
+            // Optional "window" field filters updates to one window's layout.
+            if (extractQuotedValue(self.allocator, trimmed, "window") catch null) |w| {
+                if (self.clients.items[idx].layout_window) |old| self.allocator.free(old);
+                self.clients.items[idx].layout_window = w;
+            }
+            self.respond(idx, "{\"status\": \"layout_subscribed\"}\n");
+        } else if (std.mem.eql(u8, msg_type, "layout_unsubscribe")) {
+            self.clients.items[idx].layout_subscribed = false;
+            self.respond(idx, "{\"status\": \"layout_unsubscribed\"}\n");
         } else if (std.mem.eql(u8, msg_type, "list_panes")) {
             var buf: [128]u8 = undefined;
             const response = std.fmt.bufPrint(&buf, "{{\"pane_count\": {d}}}\n", .{self.pane_count}) catch return;
@@ -590,6 +631,28 @@ pub const TextTapServer = struct {
                 return;
             };
             self.respond(idx, "{\"status\": \"queued\"}\n");
+        } else if (std.mem.eql(u8, action_type, "swap_panes")) {
+            // Swap two panes by visual grid index. Keys are pane_a/pane_b
+            // (not "a"/"b" — the naive extractor would match "a" inside
+            // other keys like "action").
+            const a = extractNumberAfter(msg, "pane_a") orelse {
+                self.respond(idx, "{\"error\": \"missing pane_a\"}\n");
+                return;
+            };
+            const b = extractNumberAfter(msg, "pane_b") orelse {
+                self.respond(idx, "{\"error\": \"missing pane_b\"}\n");
+                return;
+            };
+            // The drain path casts to u32; reject out-of-range values here
+            // so a hostile line can't panic the safety-checked cast.
+            if (a > std.math.maxInt(u32) or b > std.math.maxInt(u32)) {
+                self.respond(idx, "{\"error\": \"pane index out of range\"}\n");
+                return;
+            }
+            self.pending_commands.append(.{
+                .action = .{ .swap_panes = .{ .a = a, .b = b } },
+            }) catch return;
+            self.respond(idx, "{\"status\": \"queued\"}\n");
         } else {
             self.respond(idx, "{\"error\": \"unknown action\"}\n");
         }
@@ -684,20 +747,118 @@ pub const TextTapServer = struct {
         self.respond(idx, "{\"status\": \"queued\"}\n");
     }
 
+    /// Cap on buffered outbound bytes per client. A client that falls this
+    /// far behind is considered hung and is dropped (it can reconnect).
+    const max_pending_out: usize = 1 << 20; // 1 MiB
+
+    /// Write to a client without blocking and without tearing lines: if
+    /// earlier bytes are still pending (socket buffer full), append behind
+    /// them; otherwise write directly and buffer whatever didn't fit. The
+    /// pending buffer is flushed at the start of each poll.
+    fn writeToClient(self: *TextTapServer, idx: usize, data: []const u8) void {
+        const client = &self.clients.items[idx];
+        if (client.write_overflow) return;
+
+        var written: usize = 0;
+        const has_pending = if (client.pending_out) |p| p.items.len > 0 else false;
+        if (!has_pending) {
+            written = posix.write(client.fd, data) catch |err| blk: {
+                switch (err) {
+                    error.WouldBlock => break :blk 0,
+                    else => {
+                        // Hard write error (EPIPE etc.) — reap on next poll.
+                        client.write_overflow = true;
+                        return;
+                    },
+                }
+            };
+            if (written >= data.len) return;
+        }
+
+        if (client.pending_out == null) {
+            client.pending_out = std.array_list.Managed(u8).init(self.allocator);
+        }
+        const pending = &client.pending_out.?;
+        if (pending.items.len + (data.len - written) > max_pending_out) {
+            client.write_overflow = true;
+            pending.clearAndFree();
+            return;
+        }
+        pending.appendSlice(data[written..]) catch {
+            client.write_overflow = true;
+        };
+    }
+
+    /// Retry buffered writes for clients whose socket buffer was full.
+    fn flushPendingWrites(self: *TextTapServer) void {
+        for (self.clients.items) |*client| {
+            if (client.write_overflow) continue;
+            const pending = if (client.pending_out) |*p| p else continue;
+            if (pending.items.len == 0) continue;
+            const n = posix.write(client.fd, pending.items) catch |err| {
+                switch (err) {
+                    error.WouldBlock => continue,
+                    else => {
+                        client.write_overflow = true;
+                        continue;
+                    },
+                }
+            };
+            if (n >= pending.items.len) {
+                pending.clearRetainingCapacity();
+            } else {
+                const remaining = pending.items.len - n;
+                std.mem.copyForwards(u8, pending.items[0..remaining], pending.items[n..]);
+                pending.shrinkRetainingCapacity(remaining);
+            }
+        }
+    }
+
+    /// Find the current index of a client by fd, or null if gone.
+    fn clientIndexForFd(self: *TextTapServer, fd: posix.socket_t) ?usize {
+        for (self.clients.items, 0..) |client, i| {
+            if (client.fd == fd) return i;
+        }
+        return null;
+    }
+
     /// Write a JSON response to a specific client.
     pub fn respond(self: *TextTapServer, idx: usize, data: []const u8) void {
         if (idx >= self.clients.items.len) return;
-        const fd = self.clients.items[idx].fd;
-        _ = posix.write(fd, data) catch {};
+        self.writeToClient(idx, data);
     }
 
     /// Broadcast a message to all subscribed clients.
     pub fn broadcast(self: *TextTapServer, data: []const u8) void {
-        for (self.clients.items) |client| {
+        for (self.clients.items, 0..) |client, i| {
             if (client.subscribed) {
-                _ = posix.write(client.fd, data) catch {};
+                self.writeToClient(i, data);
             }
         }
+    }
+
+    /// Broadcast a layout update line to layout-subscribed clients. A client
+    /// that subscribed with a window filter only receives lines for that
+    /// window; a client with no filter receives every window's updates.
+    pub fn broadcastLayout(self: *TextTapServer, window: ?[]const u8, line: []const u8) void {
+        for (self.clients.items, 0..) |client, i| {
+            if (!client.layout_subscribed) continue;
+            if (client.layout_window) |w| {
+                if (window) |bw| {
+                    if (!std.mem.eql(u8, w, bw)) continue;
+                }
+            }
+            self.writeToClient(i, line);
+        }
+    }
+
+    /// Number of clients subscribed to layout updates.
+    pub fn layoutSubscriberCount(self: *TextTapServer) usize {
+        var count: usize = 0;
+        for (self.clients.items) |client| {
+            if (client.layout_subscribed) count += 1;
+        }
+        return count;
     }
 
     /// Broadcast pane content to all subscribed clients as JSON.
@@ -1032,7 +1193,9 @@ pub const TextTapServer = struct {
         const responses = self.cmux_responses.toOwnedSlice() catch return;
         defer self.allocator.free(responses);
         for (responses) |r| {
-            _ = posix.write(r.client_fd, r.data) catch {};
+            if (self.clientIndexForFd(r.client_fd)) |idx| {
+                self.writeToClient(idx, r.data);
+            }
             self.allocator.free(r.data);
         }
     }
@@ -1838,6 +2001,177 @@ test "cmux unknown method returns error" {
         const response = buf[0..n];
         try testing.expect(std.mem.indexOf(u8, response, "\"ok\":false") != null);
     }
+
+    server.stop();
+}
+
+test "layout subscribe receives broadcastLayout, plain subscriber does not" {
+    const path = "/tmp/test_termania_layout_bcast.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+
+    // Client 1: layout subscriber with a window filter.
+    const c1_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(c1_fd);
+    try posix.connect(c1_fd, &addr.any, addr.getOsSockLen());
+
+    // Client 2: plain content subscriber only.
+    const c2_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(c2_fd);
+    try posix.connect(c2_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll(); // Accept both.
+    try testing.expectEqual(@as(usize, 2), server.clientCount());
+
+    _ = try posix.write(c1_fd, "{\"type\": \"layout_subscribe\", \"window\": \"w1\"}\n");
+    _ = try posix.write(c2_fd, "{\"type\": \"subscribe\"}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    try testing.expectEqual(@as(usize, 1), server.layoutSubscriberCount());
+
+    // Drain acks.
+    var drain_buf: [256]u8 = undefined;
+    _ = posix.read(c1_fd, &drain_buf) catch 0;
+    _ = posix.read(c2_fd, &drain_buf) catch 0;
+
+    server.broadcastLayout("w1", "{\"type\": \"layout_update\", \"revision\": 1}\n");
+    std.Thread.sleep(1_000_000);
+
+    // Layout subscriber receives it.
+    var buf1: [256]u8 = undefined;
+    const n1 = posix.read(c1_fd, &buf1) catch 0;
+    try testing.expect(n1 > 0);
+    try testing.expect(std.mem.indexOf(u8, buf1[0..n1], "layout_update") != null);
+
+    // Plain subscriber does not (non-blocking check; O_NONBLOCK file-status
+    // flag, same rationale as the broadcast test above).
+    const O_NONBLOCK: usize = 0x0004;
+    const flags = posix.fcntl(c2_fd, posix.F.GETFL, 0) catch 0;
+    _ = posix.fcntl(c2_fd, posix.F.SETFL, flags | O_NONBLOCK) catch {};
+    var buf2: [256]u8 = undefined;
+    const n2 = posix.read(c2_fd, &buf2) catch |err| blk: {
+        if (err == error.WouldBlock) break :blk @as(usize, 0);
+        break :blk @as(usize, 0);
+    };
+    try testing.expectEqual(@as(usize, 0), n2);
+
+    server.stop();
+}
+
+test "layout broadcast honors window filter" {
+    const path = "/tmp/test_termania_layout_filter.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const c_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(c_fd);
+    try posix.connect(c_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll();
+
+    _ = try posix.write(c_fd, "{\"type\": \"layout_subscribe\", \"window\": \"w1\"}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    var drain_buf: [256]u8 = undefined;
+    _ = posix.read(c_fd, &drain_buf) catch 0;
+
+    // Broadcast for a different window — filtered out.
+    server.broadcastLayout("w2", "{\"type\": \"layout_update\", \"revision\": 7}\n");
+    std.Thread.sleep(1_000_000);
+
+    const O_NONBLOCK: usize = 0x0004;
+    const flags = posix.fcntl(c_fd, posix.F.GETFL, 0) catch 0;
+    _ = posix.fcntl(c_fd, posix.F.SETFL, flags | O_NONBLOCK) catch {};
+    var buf: [256]u8 = undefined;
+    const n = posix.read(c_fd, &buf) catch |err| blk: {
+        if (err == error.WouldBlock) break :blk @as(usize, 0);
+        break :blk @as(usize, 0);
+    };
+    try testing.expectEqual(@as(usize, 0), n);
+
+    // Matching window goes through.
+    server.broadcastLayout("w1", "{\"type\": \"layout_update\", \"revision\": 8}\n");
+    std.Thread.sleep(1_000_000);
+    const n2 = posix.read(c_fd, &buf) catch |err| blk: {
+        if (err == error.WouldBlock) break :blk @as(usize, 0);
+        break :blk @as(usize, 0);
+    };
+    try testing.expect(n2 > 0);
+    try testing.expect(std.mem.indexOf(u8, buf[0..n2], "\"revision\": 8") != null);
+
+    server.stop();
+}
+
+test "socket action swap_panes queues command" {
+    const path = "/tmp/test_termania_swap_action.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll();
+
+    _ = try posix.write(client_fd, "{\"type\": \"action\", \"action\": \"swap_panes\", \"pane_a\": 0, \"pane_b\": 2}\n");
+    std.Thread.sleep(1_000_000);
+    server.poll();
+
+    const cmds = server.drainCommands();
+    defer testing.allocator.free(cmds);
+    try testing.expectEqual(@as(usize, 1), cmds.len);
+    try testing.expect(cmds[0] == .action);
+    try testing.expect(cmds[0].action == .swap_panes);
+    try testing.expectEqual(@as(usize, 0), cmds[0].action.swap_panes.a);
+    try testing.expectEqual(@as(usize, 2), cmds[0].action.swap_panes.b);
+
+    server.stop();
+}
+
+test "writeToClient preserves order behind pending bytes" {
+    const path = "/tmp/test_termania_pending_order.sock";
+    var server = TextTapServer.init(testing.allocator, path);
+    defer server.deinit();
+
+    try server.start();
+
+    var addr = try std.net.Address.initUnix(path);
+    const client_fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    defer posix.close(client_fd);
+    try posix.connect(client_fd, &addr.any, addr.getOsSockLen());
+
+    server.poll(); // Accept.
+    try testing.expectEqual(@as(usize, 1), server.clientCount());
+
+    // Simulate a backlog: pre-load pending bytes as if an earlier write
+    // had filled the socket buffer.
+    server.clients.items[0].pending_out = std.array_list.Managed(u8).init(testing.allocator);
+    try server.clients.items[0].pending_out.?.appendSlice("first\n");
+
+    // A new write while pending exists must append behind it, not write
+    // directly (which would reorder/tear lines).
+    server.writeToClient(0, "second\n");
+    try testing.expectEqualSlices(u8, "first\nsecond\n", server.clients.items[0].pending_out.?.items);
+
+    // Flush delivers both, in order.
+    server.flushPendingWrites();
+    std.Thread.sleep(1_000_000);
+    var buf: [64]u8 = undefined;
+    const n = posix.read(client_fd, &buf) catch 0;
+    try testing.expect(n > 0);
+    try testing.expect(std.mem.indexOf(u8, buf[0..n], "first\nsecond\n") != null);
 
     server.stop();
 }

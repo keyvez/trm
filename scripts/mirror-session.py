@@ -12,11 +12,21 @@ Modes:
   --local < in.toml > out      Passthrough transform for a local mirror UI:
                                panes keep their zmx_session (native reattach);
                                the Text Tap server is disabled so the mirror
-                               doesn't steal the primary UI's socket.
+                               doesn't steal the primary UI's socket. The
+                               primary's window_id and text_tap_socket
+                               top-level keys pass through, so the mirror
+                               subscribes to live layout updates.
   --remote HOST [--zmx PATH]   Transform for a remote UI: each server-backed
                                terminal pane's command becomes
                                `ssh -t HOST ZMX attach <session>`, so the PTY
                                stream rides SSH while rendering stays local.
+                               text_tap_socket is dropped (the remote socket
+                               path is meaningless locally), so remote UIs
+                               show a layout snapshot, not live sync.
+
+Both transforms mark the output with layout_mirror = true, which makes the
+launched UI a mirror: it follows the primary's layout, disables local layout
+edits, and never autosaves the shared window.
 
 Layout-only fields (grid, watermarks, stacks, agent overviews) pass through
 untouched in both transforms.
@@ -99,8 +109,17 @@ def transform(lines: list[str], remote_host: str | None, zmx_path: str) -> list[
             else:
                 pane.append(line)
         else:
+            # A remote UI can't reach the primary's local socket; drop the
+            # top-level key so no layout sync client starts.
+            if remote_host is not None and line.strip().startswith("text_tap_socket"):
+                continue
             out.append(line)
     flush()
+
+    # Mark the launched UI as a mirror: it follows the primary's layout and
+    # never autosaves the shared window. Top-level keys must precede the
+    # first section, so insert at the very top.
+    out.insert(0, "layout_mirror = true")
 
     # The mirror UI must not bind the primary UI's Text Tap socket.
     out.append("")
@@ -128,6 +147,17 @@ def main() -> int:
 
     lines = sys.stdin.read().splitlines()
     host = args.remote if args.remote else None
+
+    if args.local and not any(
+        line.strip().startswith("text_tap_socket") for line in lines
+    ):
+        print(
+            "warning: source session has no text_tap_socket — the primary's "
+            "Text Tap is disabled or the autosave predates layout sync; the "
+            "mirror will show a static snapshot without live layout sync",
+            file=sys.stderr,
+        )
+
     for line in transform(lines, host, args.zmx):
         print(line)
     return 0

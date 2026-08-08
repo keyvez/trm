@@ -1242,6 +1242,7 @@ const char* termania_font_family(trm_app_t);
 uint32_t termania_focused_pane(trm_app_t);
 void termania_set_focused_pane(trm_app_t, uint32_t);
 uint8_t  termania_drain_focus_pane(trm_app_t, uint32_t*);
+uint8_t  termania_drain_swap_panes(trm_app_t, uint32_t*, uint32_t*);
 
 // UI config
 float termania_title_bar_height(trm_app_t);
@@ -1317,6 +1318,13 @@ uint32_t termania_text_tap_app_name_for_pane(trm_app_t, uint32_t, char*, uint32_
 uint8_t  termania_cmux_drain_query(trm_app_t, uint8_t*, char*, uint32_t, uint32_t*, uint32_t*);
 void     termania_cmux_respond(trm_app_t, uint32_t, const char*, uint32_t);
 uint32_t termania_cmux_socket_path(trm_app_t, char*, uint32_t);
+
+// Live layout sync (multi-UI attach): primary broadcasts serialized layout
+// snapshots to layout-subscribed clients (mirror UIs)
+uint8_t  termania_text_tap_running(trm_app_t);
+void     termania_broadcast_layout(trm_app_t, const char*, const char*);
+uint32_t termania_layout_subscriber_count(trm_app_t);
+uint64_t termania_layout_subscribe_generation(trm_app_t);
 
 // LLM config accessors
 uint32_t termania_config_llm_provider(trm_app_t, char*, uint32_t);

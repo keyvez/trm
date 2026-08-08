@@ -21,4 +21,11 @@ echo "Installing $CLI_NAME CLI to $INSTALL_DIR/$CLI_NAME ..."
 sudo cp "$CLI_SOURCE" "$INSTALL_DIR/$CLI_NAME"
 sudo chmod +x "$INSTALL_DIR/$CLI_NAME"
 
+# `trm mirror` / `trm attach-remote` resolve mirror-session.py next to the
+# CLI first (fallback: app Resources), so install it alongside.
+if [ -f "$SCRIPT_DIR/mirror-session.py" ]; then
+    sudo cp "$SCRIPT_DIR/mirror-session.py" "$INSTALL_DIR/mirror-session.py"
+    sudo chmod +x "$INSTALL_DIR/mirror-session.py"
+fi
+
 echo "Done! Run 'trm --help' for usage."

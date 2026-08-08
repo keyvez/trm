@@ -273,6 +273,65 @@ final class Trm {
         return results
     }
 
+    /// Drain all pending swap_panes actions (visual grid index pairs).
+    func drainSwapPanes() -> [(a: Int, b: Int)] {
+        guard let h = handle else { return [] }
+        var results: [(a: Int, b: Int)] = []
+        var a: UInt32 = 0
+        var b: UInt32 = 0
+        while termania_drain_swap_panes(h, &a, &b) != 0 {
+            results.append((a: Int(a), b: Int(b)))
+        }
+        return results
+    }
+
+    // MARK: - Live Layout Sync
+
+    /// True if this instance's Text Tap server is running (socket bound).
+    /// False for mirror UIs, whose config disables the tap.
+    var textTapRunning: Bool {
+        guard let h = handle else { return false }
+        return termania_text_tap_running(h) != 0
+    }
+
+    /// This instance's Text Tap socket path (from config).
+    var textTapSocketPath: String? {
+        guard let h = handle else { return nil }
+        var buf = [CChar](repeating: 0, count: 1025)
+        let len = termania_cmux_socket_path(h, &buf, UInt32(buf.count - 1))
+        guard len > 0 else { return nil }
+        buf[Int(len)] = 0
+        return String(cString: buf)
+    }
+
+    /// Broadcast a layout update line to layout-subscribed Text Tap clients
+    /// interested in the given window.
+    func broadcastLayout(windowId: String, line: String) {
+        guard let h = handle else { return }
+        windowId.withCString { win in
+            line.withCString { l in
+                termania_broadcast_layout(h, win, l)
+            }
+        }
+    }
+
+    /// Number of Text Tap clients subscribed to layout updates.
+    func layoutSubscriberCount() -> Int {
+        guard let h = handle else { return 0 }
+        return Int(termania_layout_subscriber_count(h))
+    }
+
+    /// Monotonic layout_subscribe counter — advances on every subscribe, so
+    /// drop+resubscribe churn that leaves the COUNT unchanged is still seen.
+    func layoutSubscribeGeneration() -> UInt64 {
+        guard let h = handle else { return 0 }
+        return termania_layout_subscribe_generation(h)
+    }
+
+    /// Last observed subscribe generation, for change detection in the
+    /// polling loop.
+    private var lastLayoutSubscribeGen: UInt64 = 0
+
     /// Poll the C API for a pending notification. Returns (title, body, paneId) or nil.
     /// paneId is the source pane that generated the notification, or -1 if unknown.
     func pollNotification() -> (title: String, body: String, paneId: Int)? {
@@ -423,6 +482,29 @@ final class Trm {
                         "clientIdx": query.clientIdx,
                     ]
                 )
+            }
+            // Drain swap_panes actions (socket-driven layout edits).
+            for swap in self.drainSwapPanes() {
+                NotificationCenter.default.post(
+                    name: .trmTextTapSwapPanes,
+                    object: nil,
+                    userInfo: ["a": swap.a, "b": swap.b]
+                )
+            }
+            // Watch for newly attached layout subscribers (mirror UIs) so
+            // primary windows can push them an initial layout snapshot. The
+            // generation (not the count) is compared: a mirror that drops and
+            // resubscribes within one poll leaves the count unchanged.
+            if self.textTapRunning {
+                let gen = self.layoutSubscribeGeneration()
+                if gen != self.lastLayoutSubscribeGen {
+                    self.lastLayoutSubscribeGen = gen
+                    NotificationCenter.default.post(
+                        name: .trmLayoutSubscribersChanged,
+                        object: nil,
+                        userInfo: ["count": self.layoutSubscriberCount()]
+                    )
+                }
             }
         }
     }
@@ -674,6 +756,8 @@ final class Trm {
         /// For pane_type "agent_overview": placement relative to its terminal
         /// ("trailing", "leading", "above", "below").
         var overviewPlacement: String?
+        /// For stack host panes: sub-pane height fractions of the stack cell.
+        var stackFractions: [Double]?
     }
 
     /// Grid layout config from termania.toml.
@@ -685,6 +769,20 @@ final class Trm {
         var panes: [TrmPaneConfig]
         /// Per-row column counts for jagged grids. Empty means use rows/cols.
         let rowCols: [Int]
+        /// Stable window identity carried in checkpoint TOMLs (top-level
+        /// window_id key). Mirrors subscribe to layout updates with it.
+        var windowId: String?
+        /// The primary UI's Text Tap socket path (top-level text_tap_socket
+        /// key), used by mirrors to connect for live layout sync.
+        var textTapSocket: String?
+        /// True when this config marks the window as a mirror of another UI
+        /// (top-level layout_mirror key, written by mirror-session.py).
+        var layoutMirror: Bool = false
+        /// Row height fractions ([grid] row_fractions). Empty = equal rows.
+        var rowFractions: [Double] = []
+        /// Per-row column width fractions ([grid] col_fractions, rows joined
+        /// by ';'). Empty = equal columns.
+        var colFractions: [[Double]] = []
     }
 
     /// Read grid/session config from a specific config file path.
@@ -717,9 +815,78 @@ final class Trm {
             if let op = extras[i].overviewPlacement {
                 config.panes[i].overviewPlacement = op
             }
+            if let sf = extras[i].stackFractions {
+                config.panes[i].stackFractions = sf
+            }
         }
 
+        // Layout-sync extras: top-level window identity keys and [grid]
+        // fraction keys the C API doesn't know about.
+        let layoutExtras = parseLayoutExtras(fromToml: (try? String(contentsOfFile: path, encoding: .utf8)) ?? "")
+        config.windowId = layoutExtras.windowId
+        config.textTapSocket = layoutExtras.textTapSocket
+        config.layoutMirror = layoutExtras.layoutMirror
+        config.rowFractions = layoutExtras.rowFractions
+        config.colFractions = layoutExtras.colFractions
+
         return config
+    }
+
+    /// Layout-sync fields parsed directly from TOML text.
+    struct LayoutExtras {
+        var windowId: String?
+        var textTapSocket: String?
+        var layoutMirror: Bool = false
+        var rowFractions: [Double] = []
+        var colFractions: [[Double]] = []
+    }
+
+    /// Parse top-level layout-sync keys (window_id, text_tap_socket,
+    /// layout_mirror) and [grid] fraction keys (row_fractions, col_fractions)
+    /// from TOML text. Top-level keys are only honored before the first
+    /// section header; grid keys only inside [grid].
+    static func parseLayoutExtras(fromToml content: String) -> LayoutExtras {
+        var extras = LayoutExtras()
+        var section: String? = nil // nil = top level
+
+        for line in content.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") {
+                let name = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                section = name
+                continue
+            }
+
+            if section == nil {
+                if trimmed.hasPrefix("window_id") {
+                    extras.windowId = parseTomlStringValue(trimmed)
+                } else if trimmed.hasPrefix("text_tap_socket") {
+                    extras.textTapSocket = parseTomlStringValue(trimmed)
+                } else if trimmed.hasPrefix("layout_mirror") {
+                    if let value = parseTomlStringValue(trimmed) {
+                        extras.layoutMirror = value == "true"
+                    }
+                }
+            } else if section == "grid" {
+                if trimmed.hasPrefix("row_fractions") {
+                    if let value = parseTomlStringValue(trimmed) {
+                        extras.rowFractions = parseFractionList(value)
+                    }
+                } else if trimmed.hasPrefix("col_fractions") {
+                    if let value = parseTomlStringValue(trimmed) {
+                        extras.colFractions = value.components(separatedBy: ";").map(parseFractionList)
+                    }
+                }
+            }
+        }
+        return extras
+    }
+
+    /// Parse a comma-separated fraction list like "0.25,0.75".
+    static func parseFractionList(_ s: String) -> [Double] {
+        s.components(separatedBy: ",").compactMap {
+            Double($0.trimmingCharacters(in: .whitespaces))
+        }
     }
 
     /// Read the grid/session config from termania.toml.
@@ -809,6 +976,7 @@ final class Trm {
         var zmxSession: String?
         var overviewOf: Int?
         var overviewPlacement: String?
+        var stackFractions: [Double]?
     }
 
     /// Parse stack_group values from a TOML file.
@@ -855,6 +1023,10 @@ final class Trm {
             } else if trimmed.hasPrefix("overview_placement") {
                 if let value = parseTomlStringValue(trimmed) {
                     current?.overviewPlacement = value
+                }
+            } else if trimmed.hasPrefix("stack_fractions") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.stackFractions = parseFractionList(value)
                 }
             }
         }

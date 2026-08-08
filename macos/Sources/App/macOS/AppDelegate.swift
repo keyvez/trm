@@ -626,6 +626,14 @@ class AppDelegate: NSObject,
     /// Kill every trm-owned zmx session so nothing keeps running in the
     /// background, and clear auto-saves so the dead sessions aren't restored.
     @MainActor private func terminateDaemonSessions() {
+        // A mirror process must never take down the shared state it is only
+        // viewing: killAllTrmSessions is machine-wide and would kill daemons
+        // the primary process is attached to, and the autosave files belong
+        // to the primary. "Terminate All & Quit" from a pure-mirror process
+        // just quits.
+        guard TerminalController.all.contains(where: { $0.sessionRole == .primary }) else {
+            return
+        }
         ZmxSessionManager.killAllTrmSessions()
         SessionManager.clearAutoSaves()
     }

@@ -40,13 +40,39 @@ the window returns without a dialog and the loop never stopped
   `clients=2` on the daemons, input injected server-side rendered in both;
   either UI can be `kill -9`ed with zero process impact.
 - The mirror UI's Text Tap server is disabled (it must not steal the
-  primary's socket); layout in a mirror is a snapshot, not yet live-synced.
-
-Still open in phase 2: **live layout sync** — layout edits in one UI
-propagating to others. Requires window identity + an ownership/broadcast
-protocol; candidate transport is the Text Tap / cmux socket (already
-JSON, already has surface.list/focus/spawn). Until then, a mirror
-re-opened via `trm mirror` picks up the latest checkpoint.
+  primary's socket).
+- **Live layout sync (shipped)**: layout edits in the primary propagate
+  to attached mirrors within ~1 s. How it works:
+  - *Window identity*: every window has a stable UUID, persisted as a
+    top-level `window_id` key in its checkpoint TOML alongside
+    `text_tap_socket` (the primary's Text Tap socket path).
+    `mirror-session.py` passes both through and adds
+    `layout_mirror = true`, which marks the launched UI as a mirror.
+  - *Transport*: the mirror connects to the primary's Text Tap socket as
+    a client and sends `{"type": "layout_subscribe", "window": "<uuid>"}`.
+    The primary broadcasts `{"type": "layout_update", "window", "revision",
+    "toml"}` lines — the full serialized session TOML as a snapshot,
+    debounced ~200 ms after any layout change (order, grid shape, stacks,
+    pane sizes, agent overviews). No diffs: snapshots are idempotent, so a
+    dropped message self-heals on the next one. New subscribers are pushed
+    a snapshot immediately; per-client outbound buffering on the server
+    keeps a slow mirror from tearing lines.
+  - *In-place apply*: the mirror matches panes by identity (terminals by
+    `zmx_session`, webviews by URL, plugins by kind+title, overviews by
+    their terminal) and mutates order/shape/stacks/fractions in place —
+    PTY views are never rebuilt. Only genuinely added/removed panes are
+    created or dropped; closing a pane on the mirror side never kills the
+    shared zmx daemon. Watermarks follow snapshots too, though a
+    watermark-only edit doesn't trigger a broadcast by itself (it rides
+    along on the next layout change).
+  - *Ownership*: the primary owns the layout. Mirrors have local layout
+    editing disabled and never autosave the shared window (a mirror
+    process's checkpoint timer previously clobbered the primary's
+    `_autosave_*` files; it now stands down entirely). If the primary
+    dies, mirrors keep the last layout and PTYs stay live via zmx;
+    the mirror reconnects with backoff and resyncs when a primary
+    returns. Pane size fractions now round-trip through the checkpoint
+    TOML too (`row_fractions`, `col_fractions`, `stack_fractions`).
 
 ## Phase 3 — remote UI (shipped, first cut)
 
@@ -60,4 +86,7 @@ SSH to the host and trm installed on both ends. Overview/webview panes
 pass through as layout (their data sources are machine-local).
 
 Still open in phase 3: full remote parity — remote agent-overview data,
-live layout sync over the same channel, reconnect-on-drop for SSH panes.
+live layout sync for remote attaches (the local mirror sync rides a unix
+socket; a remote UI would need the socket forwarded over SSH —
+`mirror-session.py --remote` drops `text_tap_socket` for now, so remote
+UIs show a snapshot), reconnect-on-drop for SSH panes.
