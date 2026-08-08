@@ -1258,6 +1258,9 @@ class BaseTerminalController: NSWindowController,
         if edge == .top, let idx = paneDisplayOrder.firstIndex(of: targetID) {
             paneDisplayOrder[idx] = sourceID
         }
+
+        // Stacking removed a cell; keep overviews beside their terminals.
+        repinAgentOverviews()
     }
 
     // MARK: - Agent Overview Pane
@@ -1281,36 +1284,61 @@ class BaseTerminalController: NSWindowController,
 
         let view = AgentOverviewPane(surface: surface)
         agentOverviewPanes.append(view)
+        applyOverviewPlacement(view)
+    }
 
-        let viewID = ObjectIdentifier(view)
-        let surfaceID = ObjectIdentifier(surface)
-
-        // Place the overview directly after its terminal pane in display order
-        // and widen that terminal's row by one column, so the two sit
-        // side-by-side rather than the view landing in an arbitrary row.
-        if let anchorIdx = paneDisplayOrder.firstIndex(of: surfaceID) {
-            paneDisplayOrder.insert(viewID, at: anchorIdx + 1)
-            let visualIdx = gridPanes.firstIndex { $0.id == surfaceID } ?? anchorIdx
-            let (row, _) = gridPosition(flatIndex: visualIdx)
-            if row < gridRowCols.count {
-                gridRowCols[row] += 1
-            } else if gridRowCols.isEmpty {
-                gridRowCols = [1]
-            } else {
-                gridRowCols[gridRowCols.count - 1] += 1
-            }
-        } else {
-            paneDisplayOrder.append(viewID)
-            if gridRowCols.isEmpty {
-                gridRowCols = [1]
-            } else {
-                gridRowCols[gridRowCols.count - 1] += 1
-            }
+    /// Map an overview placement to grid-layout terms.
+    private static func companionSide(for placement: AgentOverviewPlacement) -> GridLayout<ObjectIdentifier>.CompanionSide {
+        switch placement {
+        case .trailing: return .after
+        case .leading: return .before
+        case .above: return .rowAbove
+        case .below: return .rowBelow
         }
+    }
 
-        // Column fractions are per-row and now have the wrong arity; drop them
-        // so the row re-normalises to equal widths including the new cell.
+    /// (Re-)apply one overview's placement: put its cell adjacent to its
+    /// terminal pane on the side its `placement` names, wherever it currently
+    /// is. Also used by `repinAgentOverviews` after grid reorders.
+    private func applyOverviewPlacement(_ view: AgentOverviewPane) {
+        guard let surface = view.surface else { return }
+        ensurePaneDisplayOrder()
+
+        var layout = GridLayout<ObjectIdentifier>(
+            rowCols: gridRowCols,
+            displayOrder: paneDisplayOrder
+        )
+        layout.placeCompanion(
+            ObjectIdentifier(view),
+            near: ObjectIdentifier(surface),
+            side: Self.companionSide(for: view.placement)
+        )
+        gridRowCols = layout.rowCols
+        paneDisplayOrder = layout.displayOrder
+
+        // Fractions are shaped per row/column and are now stale; drop them so
+        // the grid re-normalises around the new cell arrangement.
         gridColWidthFractions = []
+        gridRowHeightFractions = []
+    }
+
+    /// Change where an overview sits relative to its terminal pane.
+    func setOverviewPlacement(_ view: AgentOverviewPane, _ placement: AgentOverviewPlacement) {
+        view.placement = placement
+        applyOverviewPlacement(view)
+    }
+
+    /// Handle an overview grab-bar drop: `uuid` identifies the dragged
+    /// overview (its `id`), `target` is the cell it was dropped on, and
+    /// `placement` which side of that cell. Only the overview's own terminal
+    /// pane is a valid target — anywhere else the drop is ignored, which is
+    /// what keeps the overview adjacent to its agent.
+    func placeOverview(overviewUUID uuid: UUID, onto target: GridPane, placement: AgentOverviewPlacement) {
+        guard let view = agentOverviewPanes.first(where: { $0.id == uuid }) else { return }
+        guard let surface = view.surface,
+              case .terminal(let targetSurface) = target,
+              targetSurface === surface else { return }
+        setOverviewPlacement(view, placement)
     }
 
     /// Re-pin every agent overview next to the terminal pane it describes.
@@ -1328,15 +1356,9 @@ class BaseTerminalController: NSWindowController,
         }
         guard !agentOverviewPanes.isEmpty, !paneDisplayOrder.isEmpty else { return }
 
-        var layout = GridLayout<ObjectIdentifier>(
-            rowCols: gridRowCols,
-            displayOrder: paneDisplayOrder
-        )
         for view in agentOverviewPanes {
-            guard let surface = view.surface else { continue }
-            layout.pinCompanion(ObjectIdentifier(view), after: ObjectIdentifier(surface))
+            applyOverviewPlacement(view)
         }
-        paneDisplayOrder = layout.displayOrder
     }
 
     /// Close an agent overview pane.
@@ -1344,24 +1366,19 @@ class BaseTerminalController: NSWindowController,
         guard let idx = agentOverviewPanes.firstIndex(where: { $0 === pane }) else { return }
         let paneID = ObjectIdentifier(pane)
 
-        // Shrink the row the view occupied before removing it, since gridPanes
-        // is derived and the position is gone once the array shrinks.
-        if let visualIdx = gridPanes.firstIndex(where: { $0.id == paneID }) {
-            let (row, _) = gridPosition(flatIndex: visualIdx)
-            if row < gridRowCols.count {
-                if gridRowCols[row] > 1 {
-                    gridRowCols[row] -= 1
-                } else if gridRowCols.count > 1 {
-                    gridRowCols.remove(at: row)
-                }
-            }
-        }
+        var layout = GridLayout<ObjectIdentifier>(
+            rowCols: gridRowCols,
+            displayOrder: paneDisplayOrder
+        )
+        layout.removeCell(of: paneID)
+        gridRowCols = layout.rowCols
+        paneDisplayOrder = layout.displayOrder
 
         agentOverviewPanes.remove(at: idx)
-        paneDisplayOrder.removeAll { $0 == paneID }
         paneStacks.removeValue(forKey: paneID)
         if gridRowCols.isEmpty { gridRowCols = [1] }
         gridColWidthFractions = []
+        gridRowHeightFractions = []
 
         closeWindowIfNoPanes()
     }
@@ -4177,10 +4194,21 @@ class BaseTerminalController: NSWindowController,
                 }
                 lines.append("")
 
-            case .agentOverview:
-                // A derived view of another pane's transcript, not restorable
-                // state — it is reopened from the terminal pane's menu.
-                break
+            case .agentOverview(let view):
+                // Persist the overview by reference: the index of its terminal
+                // pane within this same pane list, plus its placement. Restore
+                // recreates it after the terminal panes exist.
+                lines.append("[[panes]]")
+                lines.append("pane_type = \"agent_overview\"")
+                if let surface = view.surface,
+                   let anchorIdx = flatPanes.firstIndex(where: { entry in
+                       if case .terminal(let s) = entry.pane { return s === surface }
+                       return false
+                   }) {
+                    lines.append("overview_of = \(anchorIdx)")
+                }
+                lines.append("overview_placement = \(tomlQuote(view.placement.rawValue))")
+                lines.append("")
             case .stack:
                 // Already flattened above — should not appear here.
                 break
@@ -4587,6 +4615,41 @@ class BaseTerminalController: NSWindowController,
         // Apply per-pane config (watermarks, initial commands) for terminal panes.
         // Explicit watermarks from the config will override the defaults above.
         applyPaneConfig(paneConfigs)
+
+        // Recreate agent overview panes once their terminal panes exist.
+        restoreAgentOverviews(from: paneConfigs)
+    }
+
+    /// Recreate agent overviews saved in the session config. Each entry names
+    /// its terminal pane by config index (`overview_of`) plus a placement.
+    private func restoreAgentOverviews(from paneConfigs: [Trm.TrmPaneConfig]) {
+        let surfaces = gridSurfaces
+
+        // Map config index -> index among terminal panes, since surfaces were
+        // created in config order but only for terminal entries.
+        var terminalIndexByConfigIndex: [Int: Int] = [:]
+        var terminalCount = 0
+        for (i, cfg) in paneConfigs.enumerated()
+        where normalizedPaneType(cfg.paneType) == "terminal" {
+            terminalIndexByConfigIndex[i] = terminalCount
+            terminalCount += 1
+        }
+
+        for cfg in paneConfigs
+        where normalizedPaneType(cfg.paneType) == "agent_overview" {
+            guard let ofIdx = cfg.overviewOf,
+                  let termIdx = terminalIndexByConfigIndex[ofIdx],
+                  termIdx < surfaces.count else { continue }
+            let target = GridPane.terminal(surfaces[termIdx])
+            guard !hasAgentOverview(for: target) else { continue }
+            showAgentOverview(for: target)
+            if let raw = cfg.overviewPlacement,
+               let placement = AgentOverviewPlacement(rawValue: raw),
+               placement != .trailing,
+               let view = agentOverviewPanes.first(where: { $0.surface === surfaces[termIdx] }) {
+                setOverviewPlacement(view, placement)
+            }
+        }
     }
 
     /// Expand visual (stacked) row_cols to flat row_cols by counting how many
@@ -4773,6 +4836,11 @@ class BaseTerminalController: NSWindowController,
         case "notes", "file_browser", "process_monitor",
              "log_viewer", "markdown_preview", "system_info", "git_status":
             return rawType.lowercased()
+        case "agent_overview":
+            // Not a plugin: recreated by restoreAgentOverviews after the
+            // terminal panes exist. Must not fall through to "terminal" or a
+            // spurious empty terminal appears in its place.
+            return "agent_overview"
         default:
             return "terminal"
         }

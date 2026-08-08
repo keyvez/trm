@@ -48,11 +48,17 @@ extension UTType {
     /// A format that encodes the bare UUID only for the surface. This can be used if you have
     /// a way to look up a surface by ID.
     static let ghosttySurfaceId = UTType(exportedAs: "com.mitchellh.ghosttySurfaceId")
+
+    /// The bare UUID of an agent overview pane being repositioned by drag.
+    static let trmAgentOverviewId = UTType(exportedAs: "app.roj.trm.agentOverviewId")
 }
 
 #if canImport(AppKit)
 extension NSPasteboard.PasteboardType {
     /// Pasteboard type for dragging surface IDs.
     static let ghosttySurfaceId = NSPasteboard.PasteboardType(UTType.ghosttySurfaceId.identifier)
+
+    /// Pasteboard type for dragging agent overview panes.
+    static let trmAgentOverviewId = NSPasteboard.PasteboardType(UTType.trmAgentOverviewId.identifier)
 }
 #endif

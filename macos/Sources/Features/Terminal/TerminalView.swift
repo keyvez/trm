@@ -173,6 +173,13 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         hasAgentOverview: { pane in
                             (self.delegate as? BaseTerminalController)?.hasAgentOverview(for: pane) ?? false
                         },
+                        onPlaceOverview: { uuid, target, placement in
+                            (self.delegate as? BaseTerminalController)?.placeOverview(
+                                overviewUUID: uuid, onto: target, placement: placement)
+                        },
+                        onSetOverviewPlacement: { overviewPane, placement in
+                            (self.delegate as? BaseTerminalController)?.setOverviewPlacement(overviewPane, placement)
+                        },
                         onMovePane: { pane, direction in
                             (self.delegate as? BaseTerminalController)?.movePane(pane, direction: direction)
                         },

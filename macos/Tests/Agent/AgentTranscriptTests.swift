@@ -229,6 +229,30 @@ struct AgentTranscriptTests {
         #expect(t.lastUserPrompt == "real question")
     }
 
+    // MARK: - Context usage
+
+    @Test func contextPercentUsesStandardWindow() {
+        #expect(AgentTranscriptReader.contextPercent(usedTokens: 100_000) == 50)
+    }
+
+    @Test func contextPercentInfersLargeWindowWhenOverStandard() {
+        // A 1M-context session's transcript still reports the plain model id,
+        // so usage past 200k is the only signal the window is bigger.
+        #expect(AgentTranscriptReader.contextPercent(usedTokens: 600_000) == 60)
+        #expect(AgentTranscriptReader.contextPercent(usedTokens: 1_200_000) == 100)
+    }
+
+    @Test func claudeUsageFlowsIntoTranscript() {
+        let obj: [String: Any] = ["type": "assistant", "message": [
+            "content": [["type": "text", "text": "hi"]],
+            "usage": ["input_tokens": 2, "cache_creation_input_tokens": 818,
+                      "cache_read_input_tokens": 99_180],
+        ]]
+        let line = String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+        let t = AgentTranscriptReader.parse(lines: [userLine("go"), line])
+        #expect(t.contextUsedPercent == 50)
+    }
+
     @Test func emptyTranscriptIsEmpty() {
         let t = AgentTranscriptReader.parse(lines: [])
         #expect(t.isEmpty)
@@ -272,77 +296,271 @@ struct AgentTranscriptTests {
     }
 }
 
-/// The agent overview must stay immediately beside the pane it describes.
-/// `pinCompanion` is what restores that invariant after a move or swap.
+/// The agent overview must stay adjacent to the pane it describes — beside
+/// it in the same row, or in its own row directly above/below.
+/// `placeCompanion` applies and restores that invariant.
 struct AgentOverviewAdjacencyTests {
 
-    @Test func pinsCompanionDirectlyAfterAnchor() {
-        var layout = GridLayout(rowCols: [3], displayOrder: ["term", "other", "view"])
-        layout.pinCompanion("view", after: "term")
+    @Test func placesAfterAnchorInSameRow() {
+        var layout = GridLayout(rowCols: [2], displayOrder: ["term", "other"])
+        layout.placeCompanion("view", near: "term", side: .after)
         #expect(layout.displayOrder == ["term", "view", "other"])
+        #expect(layout.rowCols == [3])
     }
 
-    @Test func alreadyAdjacentIsLeftAlone() {
-        var layout = GridLayout(rowCols: [3], displayOrder: ["term", "view", "other"])
-        let moved = layout.pinCompanion("view", after: "term")
-        #expect(!moved)
-        #expect(layout.displayOrder == ["term", "view", "other"])
+    @Test func placesBeforeAnchorInSameRow() {
+        var layout = GridLayout(rowCols: [2], displayOrder: ["term", "other"])
+        layout.placeCompanion("view", near: "term", side: .before)
+        #expect(layout.displayOrder == ["view", "term", "other"])
+        #expect(layout.rowCols == [3])
     }
 
-    @Test func companionBeforeAnchorIsMovedAfterIt() {
-        // The removal shifts the anchor left; inserting at a stale index would
-        // put the view in the wrong slot.
-        var layout = GridLayout(rowCols: [3], displayOrder: ["view", "other", "term"])
-        layout.pinCompanion("view", after: "term")
-        #expect(layout.displayOrder == ["other", "term", "view"])
+    @Test func placesInOwnRowAbove() {
+        var layout = GridLayout(rowCols: [2, 1], displayOrder: ["a", "b", "term"])
+        layout.placeCompanion("view", near: "term", side: .rowAbove)
+        #expect(layout.displayOrder == ["a", "b", "view", "term"])
+        #expect(layout.rowCols == [2, 1, 1])
+    }
+
+    @Test func placesInOwnRowBelow() {
+        var layout = GridLayout(rowCols: [1, 2], displayOrder: ["term", "a", "b"])
+        layout.placeCompanion("view", near: "term", side: .rowBelow)
+        #expect(layout.displayOrder == ["term", "view", "a", "b"])
+        #expect(layout.rowCols == [1, 1, 2])
+    }
+
+    @Test func movingBetweenSidesRemovesOldCell() {
+        var layout = GridLayout(rowCols: [2], displayOrder: ["term", "other"])
+        layout.placeCompanion("view", near: "term", side: .after)
+        layout.placeCompanion("view", near: "term", side: .rowBelow)
+        // Row-below means a new row after ALL cells of the anchor's row.
+        #expect(layout.displayOrder == ["term", "other", "view"])
+        #expect(layout.rowCols == [2, 1])
+        #expect(layout.displayOrder.filter { $0 == "view" }.count == 1)
+    }
+
+    @Test func movingFromOwnRowBackBesideCollapsesTheRow() {
+        var layout = GridLayout(rowCols: [2], displayOrder: ["term", "other"])
+        layout.placeCompanion("view", near: "term", side: .rowAbove)
+        #expect(layout.rowCols == [1, 2])
+        layout.placeCompanion("view", near: "term", side: .after)
+        #expect(layout.rowCols == [3])
+        #expect(layout.displayOrder == ["term", "view", "other"])
     }
 
     @Test func companionImmediatelyBeforeAnchorEndsUpImmediatelyAfter() {
-        // The view landing just left of its terminal is what a swap produces.
-        // Removing it shifts the anchor left by one, so inserting at the
-        // pre-removal index would leave a pane wedged between the pair.
+        // The view sitting just left of its terminal is what a swap produces.
+        // Removal shifts the anchor left; a stale insert index would wedge a
+        // pane between the pair.
         var layout = GridLayout(rowCols: [3], displayOrder: ["view", "term", "other"])
-        layout.pinCompanion("view", after: "term")
+        layout.placeCompanion("view", near: "term", side: .after)
         #expect(layout.displayOrder == ["term", "view", "other"])
     }
 
-    @Test func anchorAtEndAppendsCompanion() {
-        var layout = GridLayout(rowCols: [3], displayOrder: ["view", "other", "term"])
-        layout.pinCompanion("view", after: "term")
-        #expect(layout.displayOrder.last == "view")
-    }
-
-    @Test func missingAnchorLeavesOrderUnchanged() {
+    @Test func missingAnchorLeavesLayoutUnchanged() {
         var layout = GridLayout(rowCols: [2], displayOrder: ["a", "view"])
-        let moved = layout.pinCompanion("view", after: "gone")
-        #expect(!moved)
+        layout.placeCompanion("view", near: "gone", side: .after)
         #expect(layout.displayOrder == ["a", "view"])
+        #expect(layout.rowCols == [2])
     }
 
-    @Test func missingCompanionLeavesOrderUnchanged() {
-        var layout = GridLayout(rowCols: [2], displayOrder: ["term", "a"])
-        let moved = layout.pinCompanion("view", after: "term")
-        #expect(!moved)
-        #expect(layout.displayOrder == ["term", "a"])
-    }
-
-    @Test func pinningNeverLosesOrDuplicatesPanes() {
+    @Test func placementNeverLosesOrDuplicatesPanes() {
         var layout = GridLayout(rowCols: [4], displayOrder: ["a", "view", "b", "term"])
-        layout.pinCompanion("view", after: "term")
-        #expect(layout.displayOrder.count == 4)
-        #expect(Set(layout.displayOrder) == Set(["a", "b", "term", "view"]))
+        for side in [GridLayout<String>.CompanionSide.after, .before, .rowAbove, .rowBelow, .after] {
+            layout.placeCompanion("view", near: "term", side: side)
+            #expect(layout.displayOrder.count == 4)
+            #expect(Set(layout.displayOrder) == Set(["a", "b", "term", "view"]))
+            #expect(layout.rowCols.reduce(0, +) == 4)
+        }
+    }
+
+    @Test func removeCellDropsSingleCellRow() {
+        var layout = GridLayout(rowCols: [1, 2], displayOrder: ["view", "term", "b"])
+        layout.removeCell(of: "view")
+        #expect(layout.displayOrder == ["term", "b"])
+        #expect(layout.rowCols == [2])
+    }
+
+    @Test func removeCellAbsentIdIsNoOp() {
+        var layout = GridLayout(rowCols: [2], displayOrder: ["a", "b"])
+        layout.removeCell(of: "ghost")
+        #expect(layout.displayOrder == ["a", "b"])
+        #expect(layout.rowCols == [2])
     }
 
     @Test func twoOverviewsBothStayPinned() {
-        var layout = GridLayout(
-            rowCols: [4],
-            displayOrder: ["t1", "t2", "v1", "v2"]
-        )
-        layout.pinCompanion("v1", after: "t1")
-        layout.pinCompanion("v2", after: "t2")
+        var layout = GridLayout(rowCols: [4], displayOrder: ["t1", "t2", "v1", "v2"])
+        layout.placeCompanion("v1", near: "t1", side: .after)
+        layout.placeCompanion("v2", near: "t2", side: .after)
         let order = layout.displayOrder
         #expect(order.firstIndex(of: "v1") == order.firstIndex(of: "t1")! + 1)
         #expect(order.firstIndex(of: "v2") == order.firstIndex(of: "t2")! + 1)
+    }
+}
+
+/// Parsing of Codex CLI rollout transcripts. Fixture shapes mirror a real
+/// rollout file (rollout-2026-08-08T01-08-57-*.jsonl).
+struct CodexTranscriptTests {
+
+    private func line(_ payload: [String: Any]) -> String {
+        let obj: [String: Any] = ["timestamp": "2026-08-08T08:10:24.207Z", "type": "response_item", "payload": payload]
+        return String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+    }
+
+    private func userLine(_ text: String) -> String {
+        line(["type": "message", "role": "user", "content": [["type": "input_text", "text": text]]])
+    }
+
+    private func assistantLine(_ text: String) -> String {
+        line(["type": "message", "role": "assistant", "content": [["type": "output_text", "text": text]]])
+    }
+
+    @Test func parsesAssistantMessageAndPrompt() {
+        let t = CodexTranscriptReader.parse(lines: [
+            userLine("fix the build"),
+            assistantLine("Looking at the failure now."),
+        ])
+        #expect(t.lastUserPrompt == "fix the build")
+        #expect(t.blocks == [.paragraph("Looking at the failure now.")])
+    }
+
+    @Test func environmentContextIsNotAPrompt() {
+        // Codex injects synthetic user messages wrapped in tags.
+        let t = CodexTranscriptReader.parse(lines: [
+            userLine("real ask"),
+            userLine("<environment_context>\n  <cwd>/x</cwd>\n</environment_context>"),
+        ])
+        #expect(t.lastUserPrompt == "real ask")
+    }
+
+    @Test func developerMessagesAreIgnored() {
+        let t = CodexTranscriptReader.parse(lines: [
+            userLine("go"),
+            line(["type": "message", "role": "developer",
+                  "content": [["type": "input_text", "text": "<skills_instructions>…"]]]),
+            assistantLine("Done."),
+        ])
+        #expect(t.lastUserPrompt == "go")
+        #expect(t.blocks == [.paragraph("Done.")])
+    }
+
+    @Test func customToolCallsTrackAsActivity() {
+        let t = CodexTranscriptReader.parse(lines: [
+            userLine("build it"),
+            line(["type": "custom_tool_call", "call_id": "c1", "name": "exec",
+                  "input": "const r = await tools.exec_command({cmd:\"zig build\"})"]),
+        ])
+        #expect(t.activity.count == 1)
+        #expect(t.activity[0].name == "exec")
+        #expect(t.isWorking)
+    }
+
+    @Test func toolOutputMarksCallFinished() {
+        let t = CodexTranscriptReader.parse(lines: [
+            userLine("go"),
+            line(["type": "custom_tool_call", "call_id": "c1", "name": "exec", "input": "ls"]),
+            line(["type": "custom_tool_call_output", "call_id": "c1",
+                  "output": [["type": "input_text", "text": "ok"]]]),
+        ])
+        #expect(t.activity[0].finished)
+        #expect(!t.isWorking)
+    }
+
+    @Test func functionCallsParseArgumentsAsDetail() {
+        let t = CodexTranscriptReader.parse(lines: [
+            userLine("go"),
+            line(["type": "function_call", "call_id": "f1", "name": "wait",
+                  "arguments": "{\"cell_id\":\"20\"}"]),
+        ])
+        #expect(t.activity[0].name == "wait")
+        #expect(t.activity[0].detail?.contains("cell_id") == true)
+    }
+
+    @Test func newPromptResetsTurn() {
+        let t = CodexTranscriptReader.parse(lines: [
+            userLine("first"),
+            line(["type": "custom_tool_call", "call_id": "c1", "name": "exec", "input": "ls"]),
+            userLine("second"),
+        ])
+        #expect(t.lastUserPrompt == "second")
+        #expect(t.activity.isEmpty)
+    }
+
+    @Test func toolOnlyTurnKeepsPreviousProse() {
+        let t = CodexTranscriptReader.parse(lines: [
+            userLine("go"),
+            assistantLine("Starting."),
+            line(["type": "custom_tool_call", "call_id": "c1", "name": "exec", "input": "ls"]),
+        ])
+        #expect(t.blocks == [.paragraph("Starting.")])
+    }
+
+    @Test func tokenCountEventYieldsContextPercent() {
+        // Shape from a real rollout: token_count carries the window size.
+        let obj: [String: Any] = ["timestamp": "t", "type": "event_msg", "payload": [
+            "type": "token_count",
+            "info": ["model_context_window": 258_400,
+                     "last_token_usage": ["total_tokens": 129_200]],
+        ]]
+        let tc = String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+        let t = CodexTranscriptReader.parse(lines: [userLine("go"), tc, assistantLine("ok")])
+        #expect(t.contextUsedPercent == 50)
+    }
+}
+
+/// Pure parts of the per-pane agent-session resolution.
+struct AgentSessionLocatorTests {
+
+    @Test func recognizesAgentProcessNames() {
+        #expect(AgentSessionLocator.kind(forProcessName: "claude") == .claude)
+        #expect(AgentSessionLocator.kind(forProcessName: "codex") == .codex)
+        #expect(AgentSessionLocator.kind(forProcessName: "zsh") == nil)
+        #expect(AgentSessionLocator.kind(forProcessName: "claude-helper") == nil)
+    }
+
+    @Test func birthTimeCorrelationPicksThisProcessSession() {
+        // Mirrors the observed disambiguation case: two Claude sessions share
+        // one cwd. The pane's process started at T; its transcript was born
+        // T+2m; the other session's file was born a month earlier. Agents
+        // don't hold transcripts open, so this correlation is the binding.
+        let started = Date(timeIntervalSince1970: 1_000_000)
+        let old = (URL(fileURLWithPath: "/t/old.jsonl"), started.addingTimeInterval(-3_000_000))
+        let mine = (URL(fileURLWithPath: "/t/mine.jsonl"), started.addingTimeInterval(140))
+        let later = (URL(fileURLWithPath: "/t/later.jsonl"), started.addingTimeInterval(90_000))
+        let pick = AgentSessionLocator.selectTranscript(
+            startedAt: started, slack: 30, candidates: [later, old, mine])
+        #expect(pick?.0.lastPathComponent == "mine.jsonl")
+    }
+
+    @Test func noCandidateBornAfterStartMeansNoMatch() {
+        // A resumed session reuses an old file — correlation must miss and let
+        // the caller fall back rather than guessing.
+        let started = Date(timeIntervalSince1970: 1_000_000)
+        let old = (URL(fileURLWithPath: "/t/old.jsonl"), started.addingTimeInterval(-86_400))
+        let pick = AgentSessionLocator.selectTranscript(
+            startedAt: started, slack: 30, candidates: [old])
+        #expect(pick == nil)
+    }
+
+    @Test func slackToleratesFileBornJustBeforeProcessClock() {
+        let started = Date(timeIntervalSince1970: 1_000_000)
+        let justBefore = (URL(fileURLWithPath: "/t/j.jsonl"), started.addingTimeInterval(-10))
+        let pick = AgentSessionLocator.selectTranscript(
+            startedAt: started, slack: 30, candidates: [justBefore])
+        #expect(pick?.0.lastPathComponent == "j.jsonl")
+    }
+
+    @Test func transcriptPathsMatchPerAgent() {
+        #expect(AgentSessionLocator.isTranscriptPath(
+            "/Users/x/.claude/projects/-Users-x-dev/abc.jsonl", kind: .claude))
+        #expect(!AgentSessionLocator.isTranscriptPath(
+            "/Users/x/.claude/projects/-Users-x-dev/abc.jsonl", kind: .codex))
+        #expect(AgentSessionLocator.isTranscriptPath(
+            "/Users/x/.codex/sessions/2026/08/08/rollout-abc.jsonl", kind: .codex))
+        #expect(!AgentSessionLocator.isTranscriptPath(
+            "/Users/x/.codex/sessions/2026/08/08/rollout-abc.txt", kind: .codex))
+        #expect(!AgentSessionLocator.isTranscriptPath(
+            "/Users/x/somewhere/else.jsonl", kind: .claude))
     }
 }
 

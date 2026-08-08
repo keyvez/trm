@@ -13,29 +13,74 @@ struct GridLayout<ID: Equatable> {
 
     // MARK: - Companion panes
 
-    /// Move `companion` so it sits immediately after `anchor` in display order.
-    ///
-    /// Used to keep an agent overview pinned beside the terminal pane it
-    /// describes: pane moves and swaps reorder `displayOrder` without knowing
-    /// about that binding, so the pair has to be re-pinned afterwards.
-    ///
-    /// No-ops when either id is absent or they are already adjacent.
-    @discardableResult
-    mutating func pinCompanion(_ companion: ID, after anchor: ID) -> Bool {
-        guard let anchorIdx = displayOrder.firstIndex(of: anchor),
-              displayOrder.contains(companion) else { return false }
+    /// Where a companion cell sits relative to its anchor cell.
+    enum CompanionSide {
+        /// Same row, immediately after the anchor.
+        case after
+        /// Same row, immediately before the anchor.
+        case before
+        /// A new single-cell row directly above the anchor's row.
+        case rowAbove
+        /// A new single-cell row directly below the anchor's row.
+        case rowBelow
+    }
 
-        // Already in place.
-        if displayOrder.indices.contains(anchorIdx + 1),
-           displayOrder[anchorIdx + 1] == companion {
-            return false
+    /// Remove `id`'s cell from the layout: drops it from display order and
+    /// shrinks (or removes) the row it occupied. No-op when absent.
+    mutating func removeCell(of id: ID) {
+        guard let flat = displayOrder.firstIndex(of: id) else { return }
+        let (row, _) = gridPosition(flatIndex: flat)
+        displayOrder.remove(at: flat)
+        if row < rowCols.count {
+            if rowCols[row] > 1 {
+                rowCols[row] -= 1
+            } else {
+                rowCols.remove(at: row)
+            }
         }
+        if rowCols.isEmpty && !displayOrder.isEmpty { rowCols = [displayOrder.count] }
+    }
 
-        displayOrder.removeAll { $0 == companion }
-        // Re-find the anchor: the removal may have shifted it left.
-        guard let newAnchor = displayOrder.firstIndex(of: anchor) else { return false }
-        displayOrder.insert(companion, at: newAnchor + 1)
-        return true
+    /// Place `companion` adjacent to `anchor` on the given side, moving it
+    /// from wherever it currently is (its old cell is removed first).
+    ///
+    /// Used to keep an agent overview pinned to the terminal pane it
+    /// describes: pane moves and swaps reorder the grid without knowing about
+    /// that binding, so the placement is re-applied afterwards. No-op when the
+    /// anchor is absent.
+    mutating func placeCompanion(_ companion: ID, near anchor: ID, side: CompanionSide) {
+        guard displayOrder.contains(anchor) else { return }
+        removeCell(of: companion)
+        // Re-find after removal — it may have shifted the anchor.
+        guard let anchorFlat = displayOrder.firstIndex(of: anchor) else { return }
+        let (anchorRow, _) = gridPosition(flatIndex: anchorFlat)
+
+        switch side {
+        case .after:
+            displayOrder.insert(companion, at: anchorFlat + 1)
+            bumpRow(anchorRow)
+        case .before:
+            displayOrder.insert(companion, at: anchorFlat)
+            bumpRow(anchorRow)
+        case .rowAbove:
+            displayOrder.insert(companion, at: flatIndexFor(row: anchorRow, col: 0))
+            rowCols.insert(1, at: min(anchorRow, rowCols.count))
+        case .rowBelow:
+            let rowStart = flatIndexFor(row: anchorRow, col: 0)
+            let rowLen = anchorRow < rowCols.count ? rowCols[anchorRow] : 1
+            displayOrder.insert(companion, at: rowStart + rowLen)
+            rowCols.insert(1, at: min(anchorRow + 1, rowCols.count))
+        }
+    }
+
+    private mutating func bumpRow(_ row: Int) {
+        if row < rowCols.count {
+            rowCols[row] += 1
+        } else if rowCols.isEmpty {
+            rowCols = [1]
+        } else {
+            rowCols[rowCols.count - 1] += 1
+        }
     }
 
     // MARK: - Position helpers

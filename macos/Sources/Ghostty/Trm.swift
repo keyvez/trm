@@ -668,6 +668,12 @@ final class Trm {
         /// zmx session name backing this pane (session persistence); restore
         /// reattaches to it when the session daemon is still alive.
         var zmxSession: String?
+        /// For pane_type "agent_overview": index (in this pane list) of the
+        /// terminal pane the overview is bound to.
+        var overviewOf: Int?
+        /// For pane_type "agent_overview": placement relative to its terminal
+        /// ("trailing", "leading", "above", "below").
+        var overviewPlacement: String?
     }
 
     /// Grid layout config from termania.toml.
@@ -704,6 +710,12 @@ final class Trm {
             }
             if let zs = extras[i].zmxSession {
                 config.panes[i].zmxSession = zs
+            }
+            if let of = extras[i].overviewOf {
+                config.panes[i].overviewOf = of
+            }
+            if let op = extras[i].overviewPlacement {
+                config.panes[i].overviewPlacement = op
             }
         }
 
@@ -795,6 +807,8 @@ final class Trm {
         var stackGroup: String?
         var scrollbackFile: String?
         var zmxSession: String?
+        var overviewOf: Int?
+        var overviewPlacement: String?
     }
 
     /// Parse stack_group values from a TOML file.
@@ -832,6 +846,15 @@ final class Trm {
             } else if trimmed.hasPrefix("zmx_session") {
                 if let value = parseTomlStringValue(trimmed) {
                     current?.zmxSession = value
+                }
+            } else if trimmed.hasPrefix("overview_of") {
+                if let eqIdx = trimmed.firstIndex(of: "=") {
+                    let raw = trimmed[trimmed.index(after: eqIdx)...].trimmingCharacters(in: .whitespaces)
+                    current?.overviewOf = Int(raw)
+                }
+            } else if trimmed.hasPrefix("overview_placement") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.overviewPlacement = value
                 }
             }
         }

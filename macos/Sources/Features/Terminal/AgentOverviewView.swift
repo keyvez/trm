@@ -53,6 +53,18 @@ struct AgentOverviewView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
+            // Grab bar: drag onto the bound terminal pane to re-place the
+            // overview left/right/above/below it.
+            AgentOverviewDragBar(pane: pane)
+                .frame(width: 26, height: 16)
+                .overlay(
+                    Image(systemName: "dot.grid.2x3.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .allowsHitTesting(false)
+                )
+                .help("Drag onto this overview's terminal pane to move it (left, right, above, below)")
+
             Image(systemName: "sparkle")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
@@ -67,6 +79,10 @@ struct AgentOverviewView: View {
                     .controlSize(.small)
                     .scaleEffect(0.6)
                     .frame(width: 12, height: 12)
+            }
+
+            if let percent = pane.transcript.contextUsedPercent {
+                contextUsagePill(percent)
             }
 
             Spacer()
@@ -166,7 +182,7 @@ struct AgentOverviewView: View {
 
     private var messageSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionLabel("Claude said")
+            sectionLabel("\(pane.agentKind.displayName) said")
             ForEach(pane.transcript.blocks) { block in
                 switch block {
                 case .paragraph(let text):
@@ -279,10 +295,138 @@ struct AgentOverviewView: View {
         )
     }
 
+    /// Small "N% ctx" pill showing how full the agent's context window is,
+    /// stepping through warning colors as it fills.
+    private func contextUsagePill(_ percent: Int) -> some View {
+        let color: Color = percent >= 80 ? .red : (percent >= 50 ? .orange : .secondary)
+        return Text("\(percent)% ctx")
+            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+            .foregroundStyle(color)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(color.opacity(0.12)))
+            .help("Agent context window \(percent)% full")
+    }
+
     private func sectionLabel(_ text: String) -> some View {
         Text(text.uppercased())
             .font(.system(size: 9.5, weight: .semibold))
             .foregroundStyle(.tertiary)
             .tracking(0.9)
+    }
+}
+
+// MARK: - Drag support
+
+/// The overview drag currently in flight, if any.
+///
+/// The SwiftUI drop delegate needs to know synchronously — during hover, not
+/// just at drop time — which overview is being dragged and which terminal pane
+/// it is bound to, so it can highlight only the valid target. Pasteboard data
+/// can only be read at drop time, hence this side channel set by the drag
+/// source for the drag's duration.
+@MainActor
+enum AgentOverviewDragContext {
+    struct Drag {
+        let overviewUUID: UUID
+        let boundSurfaceID: ObjectIdentifier
+    }
+
+    static var current: Drag? = nil
+}
+
+/// A grab bar for the agent overview pane, shown in its header.
+///
+/// Starts an `NSDraggingSession` carrying the overview's UUID under the
+/// `trmAgentOverviewId` pasteboard type. Dropping on the overview's own
+/// terminal pane repositions it (left/right/above/below); anywhere else the
+/// drag simply ends and the overview stays where it was.
+struct AgentOverviewDragBar: NSViewRepresentable {
+    let pane: AgentOverviewPane
+
+    func makeNSView(context: Context) -> OverviewDragBarNSView {
+        let view = OverviewDragBarNSView()
+        view.pane = pane
+        return view
+    }
+
+    func updateNSView(_ nsView: OverviewDragBarNSView, context: Context) {
+        nsView.pane = pane
+    }
+}
+
+final class OverviewDragBarNSView: NSView, NSDraggingSource {
+    weak var pane: AgentOverviewPane?
+    private var dragStart: NSPoint?
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        dragStart = convert(event.locationInWindow, from: nil)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let pane, let start = dragStart else { return }
+        let location = convert(event.locationInWindow, from: nil)
+        let dx = location.x - start.x, dy = location.y - start.y
+        guard dx * dx + dy * dy > 9 else { return }
+        dragStart = nil
+
+        guard let surface = pane.surface else { return }
+
+        let item = NSPasteboardItem()
+        var uuid = pane.id.uuid
+        let data = withUnsafeBytes(of: &uuid) { Data($0) }
+        item.setData(data, forType: .trmAgentOverviewId)
+
+        let draggingItem = NSDraggingItem(pasteboardWriter: item)
+
+        // A small translucent card as the drag image — the overview itself is
+        // large and text-heavy, and the placement targets matter more than a
+        // faithful preview.
+        let size = NSSize(width: 120, height: 72)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let rect = NSRect(origin: .zero, size: size)
+        let path = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: 8, yRadius: 8)
+        NSColor.controlAccentColor.withAlphaComponent(0.25).setFill()
+        path.fill()
+        NSColor.controlAccentColor.withAlphaComponent(0.7).setStroke()
+        path.lineWidth = 1.5
+        path.stroke()
+        image.unlockFocus()
+
+        let mouse = convert(event.locationInWindow, from: nil)
+        draggingItem.setDraggingFrame(
+            NSRect(x: mouse.x - size.width / 2, y: mouse.y - size.height / 2,
+                   width: size.width, height: size.height),
+            contents: image
+        )
+
+        AgentOverviewDragContext.current = .init(
+            overviewUUID: pane.id,
+            boundSurfaceID: ObjectIdentifier(surface)
+        )
+
+        let session = beginDraggingSession(with: [draggingItem], event: event, source: self)
+        session.animatesToStartingPositionsOnCancelOrFail = false
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStart = nil
+    }
+
+    // MARK: NSDraggingSource
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .withinApplication ? .move : []
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        AgentOverviewDragContext.current = nil
     }
 }

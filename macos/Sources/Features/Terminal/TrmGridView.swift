@@ -78,6 +78,13 @@ struct TrmGridView: View {
     /// Whether the given pane already has an agent overview open.
     var hasAgentOverview: ((GridPane) -> Bool)? = nil
 
+    /// Callback when an overview grab bar is dropped on its terminal pane:
+    /// (overview UUID, target pane, chosen placement).
+    var onPlaceOverview: ((UUID, GridPane, AgentOverviewPlacement) -> Void)? = nil
+
+    /// Callback to set an overview's placement from its context menu.
+    var onSetOverviewPlacement: ((AgentOverviewPane, AgentOverviewPlacement) -> Void)? = nil
+
     /// Callback to move a pane in a direction (left/right/up/down).
     var onMovePane: ((GridPane, BaseTerminalController.PaneMoveDirection) -> Void)? = nil
 
@@ -138,6 +145,10 @@ struct TrmGridView: View {
     /// Which edge of the target cell the pane will land on when stacking,
     /// based on whether the cursor is in the top or bottom half of the cell.
     @State private var dropEdge: StackDropEdge = .bottom
+
+    /// During an overview grab-bar drag: the placement slot the cursor is
+    /// over on the overview's terminal pane, or nil when not hovering it.
+    @State private var overviewDropPlacement: AgentOverviewPlacement? = nil
 
     var body: some View {
         content
@@ -200,16 +211,18 @@ struct TrmGridView: View {
                         )
                         .allowsHitTesting(false)
                     )
-                    .onDrop(of: [.ghosttySurfaceId], delegate: PaneStackDropDelegate(
+                    .onDrop(of: [.ghosttySurfaceId, .trmAgentOverviewId], delegate: PaneStackDropDelegate(
                         targetPane: panes[0],
                         allPanes: panes,
                         targetSize: geo.size,
                         onStack: onStackPane,
                         onSwap: onSwapPane,
                         onTransfer: onTransferPane,
+                        onPlaceOverview: onPlaceOverview,
                         dropHighlightPaneId: $dropHighlightPaneId,
                         dropIsStackMode: $dropIsStackMode,
-                        dropEdge: $dropEdge
+                        dropEdge: $dropEdge,
+                        overviewDropPlacement: $overviewDropPlacement
                     ))
                     .contextMenu {
                         if let pid = paneIdForPane(panes[0]) {
@@ -366,33 +379,80 @@ struct TrmGridView: View {
                 dropPlaceholder(isVisible: isDropTarget, isStackMode: dropIsStackMode, stackCount: existingCount, edge: dropEdge)
                     .allowsHitTesting(false)
             )
+            .overlay(
+                // Overview placement placeholder — highlights the slot the
+                // overview will occupy around its terminal pane.
+                overviewPlacementPlaceholder(
+                    isVisible: isDropTarget && overviewDropPlacement != nil,
+                    placement: overviewDropPlacement ?? .trailing
+                )
+                .allowsHitTesting(false)
+            )
             .contextMenu {
-                if let onPeekPane {
-                    Button {
-                        onPeekPane(pane)
-                    } label: {
-                        Label("Peek Pane", systemImage: "rectangle.expand.vertical")
+                if case .agentOverview(let overviewPane) = pane {
+                    // The overview moves only relative to its terminal pane;
+                    // the generic move/stack items don't apply to it.
+                    overviewPlacementMenu(overviewPane)
+                } else {
+                    if let onPeekPane {
+                        Button {
+                            onPeekPane(pane)
+                        } label: {
+                            Label("Peek Pane", systemImage: "rectangle.expand.vertical")
+                        }
+                        Divider()
                     }
-                    Divider()
-                }
-                agentOverviewMenuItem(for: pane)
-                paneMoveMenu(pane: pane, row: row, col: col)
-                if let pid = paneIdForPane(pane) {
-                    Divider()
-                    pluginsMenu(forPaneId: pid)
+                    agentOverviewMenuItem(for: pane)
+                    paneMoveMenu(pane: pane, row: row, col: col)
+                    if let pid = paneIdForPane(pane) {
+                        Divider()
+                        pluginsMenu(forPaneId: pid)
+                    }
                 }
             }
-            .onDrop(of: [.ghosttySurfaceId], delegate: PaneStackDropDelegate(
+            .onDrop(of: [.ghosttySurfaceId, .trmAgentOverviewId], delegate: PaneStackDropDelegate(
                 targetPane: pane,
                 allPanes: panes,
                 targetSize: cellSize,
                 onStack: onStackPane,
                 onSwap: onSwapPane,
                 onTransfer: onTransferPane,
+                onPlaceOverview: onPlaceOverview,
                 dropHighlightPaneId: $dropHighlightPaneId,
                 dropIsStackMode: $dropIsStackMode,
-                dropEdge: $dropEdge
+                dropEdge: $dropEdge,
+                overviewDropPlacement: $overviewDropPlacement
             ))
+    }
+
+    /// Context menu for an agent overview cell: placement choices + close.
+    @ViewBuilder
+    private func overviewPlacementMenu(_ overviewPane: AgentOverviewPane) -> some View {
+        if let onSetOverviewPlacement {
+            Menu {
+                ForEach(AgentOverviewPlacement.allCases, id: \.self) { placement in
+                    Button {
+                        onSetOverviewPlacement(overviewPane, placement)
+                    } label: {
+                        if overviewPane.placement == placement {
+                            Label(placement.menuTitle, systemImage: "checkmark")
+                        } else {
+                            Text(placement.menuTitle)
+                        }
+                    }
+                }
+            } label: {
+                Label("Move Overview", systemImage: "rectangle.2.swap")
+            }
+        }
+        if let onCloseAgentOverview {
+            SwiftUI.Divider()
+            Button {
+                onCloseAgentOverview(overviewPane)
+            } label: {
+                Label("Close Agent Overview", systemImage: "xmark.circle")
+            }
+        }
     }
 
     /// "Show Agent Overview" menu item, offered only for terminal panes that
@@ -407,6 +467,36 @@ struct TrmGridView: View {
                 Label("Show Agent Overview", systemImage: "sparkle.magnifyingglass")
             }
             SwiftUI.Divider()
+        }
+    }
+
+    /// Placeholder for an overview grab-bar drag: highlights the half of the
+    /// terminal cell (left/right/top/bottom) where the overview will land.
+    @ViewBuilder
+    private func overviewPlacementPlaceholder(isVisible: Bool, placement: AgentOverviewPlacement) -> some View {
+        GeometryReader { geo in
+            let inset: CGFloat = 4
+            let w = geo.size.width, h = geo.size.height
+            let rect: CGRect = {
+                switch placement {
+                case .leading: return CGRect(x: inset, y: inset, width: w / 2 - inset * 1.5, height: h - inset * 2)
+                case .trailing: return CGRect(x: w / 2 + inset / 2, y: inset, width: w / 2 - inset * 1.5, height: h - inset * 2)
+                case .above: return CGRect(x: inset, y: inset, width: w - inset * 2, height: h / 2 - inset * 1.5)
+                case .below: return CGRect(x: inset, y: h / 2 + inset / 2, width: w - inset * 2, height: h / 2 - inset * 1.5)
+                }
+            }()
+
+            RoundedRectangle(cornerRadius: TrmBorder.radius - 2, style: .continuous)
+                .fill(Color.accentColor.opacity(0.15))
+                .overlay(
+                    RoundedRectangle(cornerRadius: TrmBorder.radius - 2, style: .continuous)
+                        .strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 2)
+                )
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+                .opacity(isVisible ? 1 : 0)
+                .animation(.spring(duration: 0.3, bounce: 0.1), value: placement)
+                .animation(.spring(duration: 0.3, bounce: 0.1), value: isVisible)
         }
     }
 
@@ -1248,14 +1338,41 @@ struct PaneStackDropDelegate: DropDelegate {
     let onStack: ((GridPane, GridPane, StackDropEdge) -> Void)?
     let onSwap: ((GridPane, GridPane) -> Void)?
     let onTransfer: ((UUID, GridPane, Bool, StackDropEdge) -> Void)?
+    let onPlaceOverview: ((UUID, GridPane, AgentOverviewPlacement) -> Void)?
     @Binding var dropHighlightPaneId: ObjectIdentifier?
     @Binding var dropIsStackMode: Bool
     @Binding var dropEdge: StackDropEdge
+    @Binding var overviewDropPlacement: AgentOverviewPlacement?
 
     func validateDrop(info: DropInfo) -> Bool {
+        if info.hasItemsConforming(to: [.trmAgentOverviewId]) {
+            // An overview may only land on its own terminal pane — the drag
+            // context (set by the grab bar for the drag's duration) tells us
+            // which pane that is without waiting for pasteboard data.
+            guard onPlaceOverview != nil,
+                  let ctx = AgentOverviewDragContext.current else { return false }
+            return targetPane.id == ctx.boundSurfaceID
+        }
         // Accept if we have any callback.
         guard onStack != nil || onSwap != nil || onTransfer != nil else { return false }
         return info.hasItemsConforming(to: [.ghosttySurfaceId])
+    }
+
+    /// Which placement slot of the target cell the cursor is in: dominant
+    /// axis wins (relative distance from the cell's center).
+    private func placement(for info: DropInfo) -> AgentOverviewPlacement {
+        guard targetSize.width > 0, targetSize.height > 0 else { return .trailing }
+        let nx = (info.location.x / targetSize.width) - 0.5
+        let ny = (info.location.y / targetSize.height) - 0.5
+        if abs(nx) >= abs(ny) {
+            return nx < 0 ? .leading : .trailing
+        } else {
+            return ny < 0 ? .above : .below
+        }
+    }
+
+    private var isOverviewDrag: Bool {
+        AgentOverviewDragContext.current != nil
     }
 
     /// Which half of the target cell the cursor is in.
@@ -1267,9 +1384,13 @@ struct PaneStackDropDelegate: DropDelegate {
     func dropEntered(info: DropInfo) {
         withAnimation(.easeInOut(duration: 0.15)) {
             dropHighlightPaneId = targetPane.id
-            // Default is stack mode; Option switches to swap.
-            dropIsStackMode = !NSEvent.modifierFlags.contains(.option)
-            dropEdge = edge(for: info)
+            if isOverviewDrag {
+                overviewDropPlacement = placement(for: info)
+            } else {
+                // Default is stack mode; Option switches to swap.
+                dropIsStackMode = !NSEvent.modifierFlags.contains(.option)
+                dropEdge = edge(for: info)
+            }
         }
     }
 
@@ -1279,10 +1400,27 @@ struct PaneStackDropDelegate: DropDelegate {
                 dropHighlightPaneId = nil
             }
             dropIsStackMode = false
+            overviewDropPlacement = nil
         }
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        if isOverviewDrag {
+            let chosen = placement(for: info)
+            let target = targetPane
+            withAnimation(.easeInOut(duration: 0.15)) {
+                dropHighlightPaneId = nil
+                overviewDropPlacement = nil
+            }
+            guard let ctx = AgentOverviewDragContext.current,
+                  target.id == ctx.boundSurfaceID else { return false }
+            let uuid = ctx.overviewUUID
+            DispatchQueue.main.async {
+                self.onPlaceOverview?(uuid, target, chosen)
+            }
+            return true
+        }
+
         // Default: stack the pane (create sub-pane). Option+drop = swap positions.
         let swapMode = NSEvent.modifierFlags.contains(.option)
         let dropTargetEdge = edge(for: info)
@@ -1322,6 +1460,17 @@ struct PaneStackDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
+        if isOverviewDrag {
+            let newPlacement = placement(for: info)
+            if newPlacement != overviewDropPlacement {
+                DispatchQueue.main.async {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        overviewDropPlacement = newPlacement
+                    }
+                }
+            }
+            return DropProposal(operation: .move)
+        }
         // Stack is default; Option switches to swap. Update live as modifier changes.
         let isStack = !NSEvent.modifierFlags.contains(.option)
         let newEdge = edge(for: info)

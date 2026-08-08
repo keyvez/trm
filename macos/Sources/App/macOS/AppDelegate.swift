@@ -133,7 +133,10 @@ class AppDelegate: NSObject,
     private(set) var hiddenState: ToggleVisibilityState? = nil
 
     /// The observer for the app appearance.
-    private var appearanceObserver: NSKeyValueObservation? = nil
+    private var appearanceObserver: NSKeyValueObservation?
+
+    /// App-lifetime keyboard shortcut monitor (see applicationDidFinishLaunching).
+    private var keyDownMonitor: Any? = nil
 
     /// Signals
     private var signals: [DispatchSourceSignal] = []
@@ -209,8 +212,10 @@ class AppDelegate: NSObject,
         NSApp.servicesMenu = menuServices
 
         // Setup a local event monitor for app-level keyboard shortcuts. See
-        // localEventHandler for more info why.
-        _ = NSEvent.addLocalMonitorForEvents(
+        // localEventHandler for more info why. The token must be retained:
+        // discarding it leaves the observer unreachable (it shows up in
+        // `leaks` as a root leak) with no way to ever remove it.
+        self.keyDownMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown],
             handler: localEventHandler)
 

@@ -9,12 +9,37 @@ import Darwin
 /// polls that pane's transcript on a timer and publishes a parsed
 /// `AgentTranscript` for the view.
 ///
-/// Only Claude Code is supported today. `AgentTranscriptReader` is the single
-/// Claude-specific seam; adding another agent means adding another reader, not
-/// touching this class or the view.
+/// Supports Claude Code and Codex. `AgentSessionLocator` finds the agent
+/// process running in the bound pane and the transcript it holds open, and the
+/// per-agent readers (`AgentTranscriptReader`, `CodexTranscriptReader`) parse
+/// it — this class and the view stay agent-agnostic.
+/// Where an agent overview sits relative to its bound terminal pane. The
+/// overview is always adjacent — beside it in the same row, or in its own
+/// row directly above/below.
+enum AgentOverviewPlacement: String, CaseIterable {
+    case trailing
+    case leading
+    case above
+    case below
+
+    var menuTitle: String {
+        switch self {
+        case .trailing: return "Right of Pane"
+        case .leading: return "Left of Pane"
+        case .above: return "Above Pane"
+        case .below: return "Below Pane"
+        }
+    }
+}
+
 @MainActor
 final class AgentOverviewPane: ObservableObject, Identifiable {
     let id = UUID()
+
+    /// Where this overview sits relative to its terminal pane. Mutated only
+    /// through `BaseTerminalController.setOverviewPlacement`, which also
+    /// applies the matching grid change.
+    var placement: AgentOverviewPlacement = .trailing
 
     /// The terminal surface whose agent this view describes. Weak so the view
     /// pane never keeps a closed terminal alive.
@@ -25,6 +50,9 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     let boundPaneId: Int?
 
     @Published var transcript = AgentTranscript()
+
+    /// Which agent this pane is currently showing. Drives the header title.
+    @Published var agentKind: AgentKind = .claude
 
     /// Whether bionic reading emphasis is applied to prose.
     @Published var bionicEnabled: Bool {
@@ -47,8 +75,15 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     private var lastURL: URL?
     private var lastCwd: String?
 
+    /// The exact agent session located via the pane's process tree, plus the
+    /// agent pid it was resolved from. Re-resolved when the pid dies or on a
+    /// cwd change — process-tree walks are hundreds of syscalls, too heavy to
+    /// repeat every 1.5 s poll.
+    private var locatedSession: AgentSessionLocator.Located?
+    private var locatedAgentPid: pid_t = 0
+
     var title: String {
-        if let boundPaneId { return "Agent · pane \(boundPaneId + 1)" }
+        if let boundPaneId { return "\(agentKind.displayName) · pane \(boundPaneId + 1)" }
         return "Agent Overview"
     }
 
@@ -88,11 +123,43 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             return
         }
 
-        let cachedURL = (cwd == lastCwd) ? lastURL : nil
         let knownMtime = lastMtime
+        let cachedSession = locatedSession
+        let cachedAgentPid = locatedAgentPid
+        let cwdChanged = (cwd != lastCwd)
+        // The pane's shell pid anchors the process-tree walk; read on the main
+        // actor since it goes through the shared Zig handle.
+        let shellPid: pid_t
+        if let paneId = surface.paneId {
+            shellPid = Trm.shared.paneChildPid(paneId: UInt32(paneId))
+        } else {
+            shellPid = 0
+        }
 
         Task.detached(priority: .utility) {
-            let url = cachedURL ?? AgentTranscriptReader.latestJSONL(
+            // Prefer the session bound to the agent process actually running
+            // in this pane — the newest-file-in-cwd fallback shows the wrong
+            // session when several agents share a working directory.
+            var session = cachedSession
+            let cachedPidAlive = cachedAgentPid > 0 && kill(cachedAgentPid, 0) == 0
+            if session == nil || !cachedPidAlive || cwdChanged {
+                if let agent = AgentSessionLocator.agentProcess(underShell: shellPid) {
+                    if let located = AgentSessionLocator.locate(shellPid: shellPid, paneCwd: cwd) {
+                        session = located
+                    }
+                    await MainActor.run { [weak self] in
+                        self?.locatedAgentPid = agent.pid
+                    }
+                } else {
+                    session = nil
+                    await MainActor.run { [weak self] in
+                        self?.locatedAgentPid = 0
+                    }
+                }
+            }
+
+            let kind = session?.kind ?? .claude
+            let url = session?.url ?? AgentTranscriptReader.latestJSONL(
                 in: AgentTranscriptReader.projectDir(forCwd: cwd)
             )
             guard let url else {
@@ -100,8 +167,9 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                     guard let self else { return }
                     self.lastCwd = cwd
                     self.lastURL = nil
+                    self.locatedSession = nil
                     self.statusMessage =
-                        "No Claude Code session found for \((cwd as NSString).lastPathComponent)."
+                        "No coding agent session found for \((cwd as NSString).lastPathComponent)."
                 }
                 return
             }
@@ -109,21 +177,26 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
 
             // Unchanged transcript — nothing to re-parse.
-            if let mtime, let knownMtime, mtime == knownMtime {
+            if let mtime, let knownMtime, mtime == knownMtime, url == cachedSession?.url {
                 await MainActor.run { [weak self] in
                     self?.lastCwd = cwd
                     self?.lastURL = url
+                    self?.locatedSession = session
                 }
                 return
             }
 
-            let parsed = AgentTranscriptReader.parse(url: url)
+            let parsed = kind == .codex
+                ? CodexTranscriptReader.parse(url: url)
+                : AgentTranscriptReader.parse(url: url)
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.lastCwd = cwd
                 self.lastURL = url
                 self.lastMtime = mtime
+                self.locatedSession = session
+                self.agentKind = kind
                 if let parsed, !parsed.isEmpty {
                     self.transcript = parsed
                     self.statusMessage = nil
