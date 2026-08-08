@@ -1,0 +1,402 @@
+<title>trm — Overnight Feature Sprint</title>
+<style>
+  /* trm's own palette (src/termania/config.zig + GitHub-dark canvas).
+     Deliberately single-theme: this page IS a trm window, and trm is dark.
+     Every surface paints explicitly so it holds on any host ground. */
+  :root {
+    --canvas: #0d1117;
+    --pane: #161b22;
+    --pane-deep: #10151c;
+    --border: #30363d;
+    --accent: #58a6ff;          /* border_focused */
+    --accent-dim: rgba(88, 166, 255, 0.14);
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --faint: #484f58;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --kill: #f85149;
+    --mono: "SF Mono", ui-monospace, Menlo, Monaco, "Cascadia Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --radius: 8px;              /* TrmBorder.radius */
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--canvas);
+    color: var(--text);
+    font-family: var(--sans);
+    margin: 0;
+    padding: 28px 20px 60px;
+    line-height: 1.5;
+  }
+  .window {
+    max-width: 1060px;
+    margin: 0 auto;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--pane-deep);
+    overflow: hidden;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+  }
+
+  /* ── Titlebar ───────────────────────────────────────────── */
+  .titlebar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 16px;
+    background: #1c2129;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+  }
+  .lights { display: flex; gap: 7px; }
+  .light { width: 12px; height: 12px; border-radius: 50%; }
+  .light.r { background: #ff5f57; } .light.y { background: #febc2e; } .light.g { background: #28c840; }
+  .titlebar .title { margin-left: 6px; letter-spacing: 0.02em; }
+
+  /* ── Hero prompt ────────────────────────────────────────── */
+  .hero {
+    padding: 34px 34px 26px;
+    font-family: var(--mono);
+    border-bottom: 1px solid var(--border);
+    background:
+      radial-gradient(ellipse 90% 120% at 15% -20%, rgba(88,166,255,0.08), transparent 60%),
+      var(--pane-deep);
+  }
+  .prompt-line { font-size: 14px; color: var(--muted); margin: 0 0 14px; }
+  .prompt-line .ps { color: var(--ok); }
+  .prompt-line .cmd { color: var(--text); }
+  .cursor {
+    display: inline-block; width: 8px; height: 17px;
+    background: var(--accent); vertical-align: text-bottom;
+    animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+  h1 {
+    font-family: var(--mono);
+    font-size: clamp(26px, 4.6vw, 42px);
+    line-height: 1.12;
+    margin: 0 0 10px;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    font-weight: 700;
+  }
+  h1 .hl { color: var(--accent); }
+  .hero p.sub {
+    font-family: var(--sans); font-size: 15px; color: var(--muted);
+    max-width: 62ch; margin: 0;
+  }
+
+  /* ── Stats strip ────────────────────────────────────────── */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    border-bottom: 1px solid var(--border);
+    background: var(--pane-deep);
+  }
+  .stat {
+    padding: 18px 22px;
+    border-right: 1px solid var(--border);
+  }
+  .stat:last-child { border-right: none; }
+  .stat .n {
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
+    font-size: 27px; font-weight: 700; color: var(--text);
+  }
+  .stat .n em { font-style: normal; color: var(--ok); }
+  .stat .l {
+    font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.09em; margin-top: 3px;
+  }
+
+  /* ── Section labels ─────────────────────────────────────── */
+  .section {
+    padding: 30px 34px 8px;
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 0.14em;
+  }
+  .section::before { content: "▸ "; color: var(--faint); }
+
+  /* ── Pane grid (the trm jagged grid, as layout) ─────────── */
+  .grid {
+    display: grid; gap: 12px;
+    padding: 12px 22px 24px;
+  }
+  .row-2 { grid-template-columns: 1fr 1fr; }
+  .row-3 { grid-template-columns: 1fr 1fr 1fr; }
+  @media (max-width: 820px) { .row-2, .row-3 { grid-template-columns: 1fr; } }
+
+  .fpane {
+    position: relative;
+    background: var(--pane);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 18px 16px;
+    overflow: hidden;
+  }
+  .fpane.focused { border-color: var(--accent); }
+  .fpane .wm {
+    position: absolute; right: 6px; bottom: -18px;
+    font-family: var(--mono); font-weight: 700;
+    font-size: 108px; line-height: 1; color: rgba(139, 148, 158, 0.07);
+    user-select: none; pointer-events: none;
+  }
+  .fpane h3 {
+    margin: 0 0 7px; font-size: 15.5px; font-weight: 650;
+    font-family: var(--sans); letter-spacing: -0.01em;
+  }
+  .fpane p { margin: 0; font-size: 13px; color: var(--muted); max-width: 58ch; }
+  .fpane p + p { margin-top: 7px; }
+  .fpane .tag {
+    display: inline-block; font-family: var(--mono); font-size: 10px;
+    color: var(--accent); background: var(--accent-dim);
+    border: 1px solid rgba(88, 166, 255, 0.35);
+    border-radius: 999px; padding: 1px 8px 2px; margin-bottom: 9px;
+    letter-spacing: 0.05em;
+  }
+  .fpane .tag.ok { color: var(--ok); background: rgba(63,185,80,0.1); border-color: rgba(63,185,80,0.35); }
+  .fpane .tag.warn { color: var(--warn); background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.35); }
+  .fpane code {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text);
+    background: var(--pane-deep); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0.5px 5px;
+  }
+
+  /* ── Mini mockups inside panes ──────────────────────────── */
+  .mock { margin: 12px 0 4px; display: flex; gap: 8px; align-items: stretch; }
+  .mock .cell {
+    flex: 1; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--pane-deep); min-height: 64px; position: relative;
+    font-family: var(--mono); font-size: 9px; color: var(--faint);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .mock .cell .slot {
+    position: absolute; left: 4px; right: 4px; height: 26px;
+    border: 1.5px solid var(--accent); border-radius: 4px;
+    background: var(--accent-dim);
+  }
+  .slot.top { top: 4px; } .slot.bottom { bottom: 4px; }
+  .mock .arrow { align-self: center; color: var(--faint); font-family: var(--mono); font-size: 12px; }
+
+  .banner {
+    margin: 12px 0 4px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--pane-deep); padding: 9px 12px;
+    display: flex; gap: 10px; align-items: center;
+    font-family: var(--sans);
+  }
+  .banner .icon {
+    width: 26px; height: 26px; border-radius: 6px; flex: none;
+    background: var(--accent-dim); border: 1px solid rgba(88,166,255,0.4);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--accent); font-family: var(--mono); font-size: 12px;
+  }
+  .banner .bt { font-size: 11.5px; font-weight: 600; }
+  .banner .bb { font-size: 10.5px; color: var(--muted); }
+
+  .ov-mock {
+    margin: 12px 0 4px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--pane-deep); overflow: hidden;
+    font-family: var(--mono); font-size: 9.5px;
+  }
+  .ov-head {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 9px; background: #1c2129; border-bottom: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .ov-head .pill {
+    margin-left: auto; color: var(--warn);
+    background: rgba(210,153,34,0.12); border-radius: 999px; padding: 0 6px;
+  }
+  .ov-head .b { color: var(--accent); font-weight: 700; }
+  .ov-body { padding: 8px 10px; }
+  .ov-label { color: var(--faint); letter-spacing: 0.1em; font-size: 8px; margin: 5px 0 2px; }
+  .ov-line { color: var(--muted); }
+  .ov-line .okc { color: var(--ok); }
+  .ov-line .spin { color: var(--accent); }
+  .ov-code {
+    margin-top: 4px; border: 1px solid var(--border); border-radius: 4px;
+    background: #0a0e13; color: #79c0ff; padding: 4px 7px; overflow-x: auto; white-space: nowrap;
+  }
+
+  /* ── Architecture diagram ───────────────────────────────── */
+  .arch {
+    margin: 12px 34px 26px;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--pane); padding: 22px;
+    overflow-x: auto;
+  }
+  .arch-flow {
+    display: flex; gap: 14px; align-items: stretch; justify-content: space-between;
+    min-width: 640px;
+  }
+  .node {
+    flex: 1; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--pane-deep); padding: 13px 15px;
+  }
+  .node.dying { border-style: dashed; border-color: var(--kill); }
+  .node.live { border-color: var(--ok); }
+  .node h4 {
+    margin: 0 0 5px; font-family: var(--mono); font-size: 12px;
+    letter-spacing: 0.03em;
+  }
+  .node.dying h4 { color: var(--kill); } .node.live h4 { color: var(--ok); }
+  .node p { margin: 0; font-size: 11.5px; color: var(--muted); }
+  .node .mono { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 7px; }
+  .link { align-self: center; font-family: var(--mono); color: var(--faint); font-size: 12px; white-space: nowrap; }
+  .phases { margin: 18px 0 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 12.5px; }
+  .phases li { padding: 3px 0; color: var(--muted); }
+  .phases .ok { color: var(--ok); }
+  .phases .open { color: var(--warn); }
+
+  /* ── Footer git log ─────────────────────────────────────── */
+  .gitlog {
+    padding: 20px 34px 30px;
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    border-top: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .gitlog .h { color: var(--warn); }
+  .gitlog .b { color: var(--accent); }
+  .gitlog div { white-space: nowrap; padding: 1.5px 0; }
+  .foot {
+    max-width: 1060px; margin: 14px auto 0; text-align: center;
+    font-family: var(--mono); font-size: 11px; color: var(--faint);
+  }
+</style>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="lights"><span class="light r"></span><span class="light y"></span><span class="light g"></span></div>
+    <span class="title">trm — feature sprint · Aug 7 → 8, 2026 · branch: agent-overview</span>
+  </div>
+
+  <div class="hero">
+    <p class="prompt-line"><span class="ps">~/dev/trm ›</span> <span class="cmd">trm changelog --since yesterday</span> <span class="cursor"></span></p>
+    <h1>One overnight sprint.<br>An <span class="hl">agent-native terminal</span>, rearchitected.</h1>
+    <p class="sub">Every feature below shipped, tested, and installed between an afternoon request to fix a drag preview and a 4&nbsp;AM proof that the whole UI can be killed without losing a process.</p>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="n">246<em>✓</em></div><div class="l">Swift tests green</div></div>
+    <div class="stat"><div class="n">2</div><div class="l">Agents supported</div></div>
+    <div class="stat"><div class="n">4</div><div class="l">Real bugs caught live</div></div>
+    <div class="stat"><div class="n">clients=2</div><div class="l">UIs on one window</div></div>
+    <div class="stat"><div class="n">kill -9</div><div class="l">Survived, ticks 31→38</div></div>
+  </div>
+
+  <div class="section">Pane system</div>
+  <div class="grid row-2">
+    <div class="fpane">
+      <span class="wm">A</span>
+      <span class="tag">drag &amp; drop</span>
+      <h3>Panes move between windows</h3>
+      <p>Drag any pane onto a pane in another trm window to transfer it — stack it on the target, or hold Option to land it as its own grid cell. Cross-window lookup finds the surface wherever it lives.</p>
+    </div>
+    <div class="fpane">
+      <span class="wm">B</span>
+      <span class="tag">drop preview</span>
+      <h3>The preview follows your cursor</h3>
+      <p>Hover the top half of a pane to stack above it, the bottom half to stack below — the placeholder animates between slots. Previously only the bottom slot was ever offered.</p>
+      <div class="mock">
+        <div class="cell"><div class="slot top"></div>hover top</div>
+        <span class="arrow">⇄</span>
+        <div class="cell"><div class="slot bottom"></div>hover bottom</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">Agent awareness</div>
+  <div class="grid row-2">
+    <div class="fpane focused">
+      <span class="wm">C</span>
+      <span class="tag">new pane type</span>
+      <h3>Agent Overview — a reading pane for your agent</h3>
+      <p>Right-click a pane running an agent (or Cmd+K → “Show Agent Overview”) and a native reading pane pins itself beside it: your last prompt, a live strip of tool calls, and the agent’s last message set for reading — inline markdown, code in its own scrollable blocks, optional bionic reading.</p>
+      <div class="ov-mock">
+        <div class="ov-head">✦ Claude · pane 1 <span class="b">B</span><span class="pill">63% ctx</span></div>
+        <div class="ov-body">
+          <div class="ov-label">YOU ASKED</div>
+          <div class="ov-line">▏run it and test</div>
+          <div class="ov-label">WORKING ON</div>
+          <div class="ov-line"><span class="okc">✓</span> Bash&nbsp;&nbsp;zig build -Doptimize=ReleaseFast</div>
+          <div class="ov-line"><span class="spin">◌</span> Edit&nbsp;&nbsp;AgentOverviewView.swift</div>
+          <div class="ov-label">CLAUDE SAID</div>
+          <div class="ov-line"><b>Cap</b>turing <b>th</b>e <b>fin</b>al <b>sta</b>te…</div>
+          <div class="ov-code">let transcript = AgentTranscriptReader.read(cwd: pwd)</div>
+        </div>
+      </div>
+      <p>Supports <b>Claude Code and Codex</b>. Binds to the agent running in <em>that pane</em> — process-tree walk plus transcript birth-time correlation — so two agents sharing a folder never show each other’s messages. Context-usage pill infers even 1M-token windows. Placement is draggable (left / right / above / below, always adjacent) and the pane survives session save → restore.</p>
+    </div>
+    <div class="fpane">
+      <span class="wm">D</span>
+      <span class="tag ok">click-to-focus</span>
+      <h3>Notifications that know their pane</h3>
+      <p>Agent hooks now send first-class trm notifications carrying <code>$TRM_PANE_ID</code>. Clicking the banner raises the right window and focuses the exact pane — even with several agents running. Banners auto-clear once you look.</p>
+      <div class="banner">
+        <div class="icon">✦</div>
+        <div><div class="bt">Claude Code</div><div class="bb">Agent finished working in pane B — click to focus</div></div>
+      </div>
+      <p>Root cause fixed along the way: the pane used to be guessed from whichever socket client connected first.</p>
+    </div>
+  </div>
+
+  <div class="section">Server-backed architecture — the UI is now disposable</div>
+  <div class="arch">
+    <div class="arch-flow">
+      <div class="node dying">
+        <h4>trm UI (disposable)</h4>
+        <p>GPU-rendered window. Holds no precious state. Kill it — even <b>kill&nbsp;-9</b> — and nothing of yours dies.</p>
+        <div class="mono">relaunch → instant attach, no dialogs</div>
+      </div>
+      <div class="link">⇄ attach<br>⇄ mirror ×N</div>
+      <div class="node live">
+        <h4>zmx session daemons</h4>
+        <p>One per pane. Own the PTYs and processes. Multi-client: every attached UI streams the same live pane.</p>
+        <div class="mono">proof: ticker never skipped a beat</div>
+      </div>
+      <div class="link">⟳ 30s</div>
+      <div class="node">
+        <h4>layout checkpoints</h4>
+        <p>Window shape, stacks, watermarks, overview panes — saved continuously, not just at quit.</p>
+        <div class="mono">session TOML, attach-ready</div>
+      </div>
+    </div>
+    <ul class="phases">
+      <li class="ok">✓ phase 1 — panes server-backed by default; crash-safe checkpoints; instant re-attach</li>
+      <li class="ok">✓ phase 2 — <b>trm mirror</b>: second UI on the same live window (verified clients=2, shared PTY streams)</li>
+      <li class="ok">✓ phase 3 — <b>trm attach-remote &lt;host&gt;</b>: a remote machine’s window, rendered locally, panes over SSH</li>
+      <li class="open">◌ next — live layout sync between attached UIs via the Text Tap socket</li>
+    </ul>
+  </div>
+
+  <div class="section">Hardening</div>
+  <div class="grid row-3">
+    <div class="fpane">
+      <span class="wm">E</span>
+      <span class="tag ok">fixed forever</span>
+      <h3>Permissions survive rebuilds</h3>
+      <p>Ad-hoc signatures orphaned every TCC grant on each rebuild — 12 dead “trm” rows deep. The app now re-signs with a pinned Apple Development identity on every install.</p>
+    </div>
+    <div class="fpane">
+      <span class="wm">F</span>
+      <span class="tag ok">leaks</span>
+      <h3>Leak hunt, fresh build near-zero</h3>
+      <p>Fresh instance: 3.2 KB flagged vs 2.9 MB on the two-week build. Fixed a discarded event-monitor token and pooled the 12&nbsp;MB-per-poll transcript parses.</p>
+    </div>
+    <div class="fpane">
+      <span class="wm">G</span>
+      <span class="tag warn">found live</span>
+      <h3>Bugs testing actually caught</h3>
+      <p>Blank prompts past the tail window; screenshots ballooning transcripts to megabyte lines; image captions shown as prompts; env-noise in activity rows. Each has a regression test now.</p>
+    </div>
+  </div>
+
+  <div class="gitlog">
+    <div><span class="h">80d6986</span> <span class="b">(agent-overview)</span> Server-backed UI phases 2–3: mirror, remote attach, instant config attach</div>
+    <div><span class="h">3870d52</span> Server-backed UI phase 1: disposable trm</div>
+    <div><span class="h">fd91adb</span> Agent Overview: draggable placement, per-pane binding, Codex, context pill, persistence</div>
+    <div><span class="h">d634c7e</span> Agent Overview pane, cross-window transfer, drop preview, pane-attributed notifications</div>
+  </div>
+</div>
+
+<p class="foot">trm · github.com/keyvez/trm · built overnight with Claude Code, verified with screenshots, sockets, and one deliberate kill -9</p>
