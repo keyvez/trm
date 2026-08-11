@@ -30,6 +30,27 @@ class AppDelegate: NSObject,
     /// When true, skip auto-saving sessions on quit (e.g. after "Terminate All & Quit").
     private var skipAutoSaveOnQuit = false
 
+    /// When true, a "Reload Latest UI" handoff is in flight: a successor
+    /// instance has been launched against the same live zmx daemons and this
+    /// process exits as soon as it reports itself on screen. Suppresses the
+    /// confirm-quit dialog — the user already confirmed by choosing reload.
+    private var isReloadingUI = false
+
+    /// Observer for the successor's "I'm on screen" signal.
+    private var reloadHandoffObserver: (any NSObjectProtocol)? = nil
+
+    /// Fallback timer so a successor that never reports can't strand this
+    /// process as a duplicate UI.
+    private var reloadHandoffTimer: Timer? = nil
+
+    /// True once this process has announced itself ready as a reload
+    /// successor, so the announcement can't repeat.
+    private var hasAnnouncedReloadReady = false
+
+    /// True once a reload has been started from this process, so a second
+    /// trigger can't spawn another successor while the first is in flight.
+    private var hasStartedReloadHandoff = false
+
     @IBOutlet private var menuNewWindow: NSMenuItem?
     @IBOutlet private var menuNewTab: NSMenuItem?
     @IBOutlet private var menuClose: NSMenuItem?
@@ -281,6 +302,13 @@ class AppDelegate: NSObject,
         // Start polling for Text Tap notifications (e.g. from Claude Code hooks)
         Trm.shared.startNotificationPolling()
 
+        // Advertise this machine as a trm host and watch for others, so remote
+        // panes can be pointed at a discovered machine instead of a typed
+        // hostname. Bonjour keeps this LAN-scoped; the pane's transport is
+        // still plain SSH.
+        RemoteHostDiscovery.shared.startAdvertising()
+        RemoteHostDiscovery.shared.startBrowsing()
+
         // Checkpoint layouts continuously (lightweight TOML writes) so a
         // non-graceful UI exit still leaves an attachable auto-save.
         autoSaveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
@@ -360,10 +388,47 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
+            // A reload successor is about to be resized to its predecessor's
+            // frame; keep panes from springing out to the new geometry while
+            // that happens. Set before the window is built so no intermediate
+            // layout animates either.
+            let isReloadSuccessor =
+                ProcessInfo.processInfo.environment[Self.reloadSuccessorEnvKey] != nil
+            if isReloadSuccessor {
+                PaneMoveAnimation.suppress()
+                // Open at the predecessor's frame directly. Resizing after the
+                // panes attach would reflow whatever a TUI had already drawn
+                // at the default width, duplicating and interleaving lines.
+                if let cfgPath = launchConfigPath,
+                   let frame = Self.reloadHandoffFrame(fromConfigPath: cfgPath) {
+                    TerminalController.pendingReloadHandoffFrame = frame
+                }
+            }
+
             if TerminalController.all.isEmpty && derivedConfig.initialWindow {
                 undoManager.disableUndoRegistration()
                 MainActor.assumeIsolated { openInitialWindow() }
                 undoManager.enableUndoRegistration()
+            }
+
+            // If this launch is the second half of a reload handoff, tell the
+            // predecessor it can exit now that our windows exist. Deferred a
+            // tick so the surfaces have actually been presented — the whole
+            // point is that something is on screen before the old UI goes.
+            MainActor.assumeIsolated {
+                let hasWindows = !TerminalController.all.isEmpty
+                DispatchQueue.main.async { [weak self] in
+                    guard hasWindows else { return }
+                    // The frame was applied as the window's defaultSize before
+                    // the panes attached, so there is nothing to resize here.
+                    // Verify it landed and correct it only if something else
+                    // overrode it — a late correction still beats a wrong size,
+                    // and normally this is a no-op.
+                    self?.applyReloadHandoffFrameIfNeeded()
+                    // Frame is set; let later layout changes animate normally.
+                    if isReloadSuccessor { PaneMoveAnimation.resume() }
+                    self?.announceReloadSuccessorReadyIfNeeded()
+                }
             }
         }
     }
@@ -549,6 +614,12 @@ class AppDelegate: NSObject,
         // If we've already accepted to install an update, then we don't need to
         // confirm quit. The user is already expecting the update to happen.
         if updateController.isInstalling {
+            return .terminateNow
+        }
+
+        // A reload-latest-UI restart is already user-confirmed and the panes
+        // survive in their session daemons: never prompt.
+        if isReloadingUI {
             return .terminateNow
         }
 
@@ -1507,6 +1578,464 @@ class AppDelegate: NSObject,
 
     @IBAction func reloadConfig(_ sender: Any?) {
         ghostty.reloadConfig()
+    }
+
+    /// Reload the latest installed trm binary with an overlapped handoff: the
+    /// new UI is launched *first* and attaches to the same live zmx daemons,
+    /// and only once it reports itself on screen does this process quit. The
+    /// windows are continuously on screen — no quit-then-wait gap.
+    ///
+    /// This is the server-backed-UI dev loop as a menu item: rebuild +
+    /// reinstall, then Reload Latest UI to be running the new binary with the
+    /// same windows. Without live daemons behind every pane there is nothing
+    /// to re-attach to, so we refuse rather than silently losing panes.
+    ///
+    /// The overlap is safe because zmx is multi-client (this is exactly what
+    /// `trm mirror` does): both UIs render the same PTYs for the ~moment they
+    /// coexist. Two things must not be double-owned during that window, and
+    /// the handoff config handles both — the new UI starts with Text Tap
+    /// disabled (`TextTapServer.start()` unlinks whatever socket file is
+    /// there, so an eager bind would silently steal the socket from this
+    /// still-live process and drop its connected hook clients), and this
+    /// process stops checkpointing so it can't overwrite the handoff state
+    /// while tearing down. The successor rebinds the socket after we exit.
+    @IBAction func reloadLatestUI(_ sender: Any?) {
+        // One handoff at a time. Each successor attaches to the same daemons,
+        // and every redundant process that later tears down closes its panes'
+        // PTYs — which sends EOF to the shells and kills the very sessions the
+        // reload was meant to preserve. (Observed: four processes launched in
+        // nine seconds, three shells exiting on 0x04 right after.)
+        guard !hasStartedReloadHandoff, !isReloadingUI else { return }
+
+        // A successor that hasn't finished its own handoff must not start
+        // another one.
+        guard ProcessInfo.processInfo.environment[Self.reloadSuccessorEnvKey] == nil
+                || hasAnnouncedReloadReady else { return }
+
+        // Mirrors follow a primary's layout and don't own the checkpoint; a
+        // relaunch from one would come back as an unbacked window.
+        guard TerminalController.all.contains(where: { $0.sessionRole == .primary }) else {
+            reloadUIRefusal("Reload runs from a primary window, not a mirror.")
+            return
+        }
+
+        guard ghostty.sessionPersistence, ZmxSessionManager.isAvailable else {
+            reloadUIRefusal(
+                "Reloading the UI requires session persistence, which keeps each "
+                + "pane's process alive in a session daemon while trm restarts."
+            )
+            return
+        }
+
+        guard let appBundleURL = reloadTargetBundleURL() else {
+            reloadUIRefusal("Could not locate the installed trm.app to relaunch.")
+            return
+        }
+
+        // Checkpoint now rather than relying on applicationWillTerminate, so
+        // the state the new UI restores is on disk before anything exits.
+        SessionManager.autoSaveAllWindows()
+
+        // Every terminal pane must be backed by a live daemon, otherwise the
+        // relaunched UI would show a startup dialog (or lose panes outright).
+        guard SessionManager.autoSaveFullyBackedByLiveSessions() else {
+            reloadUIRefusal(
+                "Some panes aren't backed by a running session daemon, so they "
+                + "wouldn't come back. Reload was cancelled and nothing was closed."
+            )
+            return
+        }
+
+        // Build the config the successor opens: the real windows (so it comes
+        // up as a primary owning this layout), with Text Tap disabled until
+        // we're gone.
+        guard let handoffPath = writeReloadHandoffConfig() else {
+            reloadUIRefusal("Could not write the handoff session file.")
+            return
+        }
+
+        // Validate the handoff config itself, not just the autosave. The two
+        // are built separately, so a pane whose daemon has died can pass the
+        // autosave check and still be written into the handoff — where
+        // `zmx attach` exits immediately and the pane closes seconds after the
+        // successor starts. That looked like the layout dropping a row; the
+        // panes were actually dying.
+        let deadSessions = Self.deadSessionsIn(configPath: handoffPath)
+        guard deadSessions.isEmpty else {
+            let listed = deadSessions.prefix(5).joined(separator: ", ")
+            let more = deadSessions.count > 5 ? ", …" : ""
+            reloadUIRefusal(
+                "\(deadSessions.count) pane\(deadSessions.count == 1 ? "" : "s") "
+                + "\(deadSessions.count == 1 ? "is" : "are") no longer backed by a "
+                + "running session daemon (\(listed)\(more)), so \(deadSessions.count == 1 ? "it" : "they") "
+                + "wouldn't survive the reload. Close \(deadSessions.count == 1 ? "that pane" : "those panes") "
+                + "and try again. Nothing was closed."
+            )
+            return
+        }
+
+        // From here on this process is a lame duck: stop checkpointing so the
+        // successor's state (and our own final checkpoint) can't be clobbered
+        // by a timer firing during teardown.
+        isReloadingUI = true
+        hasStartedReloadHandoff = true
+        skipAutoSaveOnQuit = true
+        autoSaveTimer?.invalidate()
+        autoSaveTimer = nil
+
+        // Hand off when the successor says it's on screen; fall back to a
+        // timer so a successor that never reports (crash, refused launch)
+        // can't strand this process as a zombie duplicate.
+        beginReloadHandoffWatch()
+
+        guard launchReloadSuccessor(bundleURL: appBundleURL, configPath: handoffPath) else {
+            cancelReloadHandoff()
+            reloadUIRefusal("Could not launch the new trm instance. Nothing was closed.")
+            return
+        }
+    }
+
+    /// Serialize the current windows into a handoff config for the successor.
+    ///
+    /// Differs from the plain checkpoint in one way: `[text_tap] enabled =
+    /// false`, so the new UI doesn't bind (and thereby unlink) the Text Tap
+    /// socket this process still owns. It is deliberately *not* marked
+    /// `layout_mirror` — the successor replaces this UI and must own the
+    /// layout, not follow it.
+    private func writeReloadHandoffConfig() -> String? {
+        let primaries = TerminalController.all.filter { $0.sessionRole == .primary }
+        guard let controller = primaries.first else { return nil }
+
+        var toml = controller.buildCurrentConfigToml()
+        toml += "\n\n[text_tap]\nenabled = false\n"
+
+        // Carry the window geometry across. buildCurrentConfigToml serializes
+        // the *layout* but not the frame — that normally lives in the autosave
+        // manifest, which only restoreLastSession consults. A TRM_CONFIG
+        // launch never sees it, so without this the successor opened at the
+        // default size instead of replacing the window it took over from.
+        if let frame = controller.window?.frame, frame.width > 0, frame.height > 0 {
+            toml += """
+
+            [window]
+            x = \(Int(frame.origin.x))
+            y = \(Int(frame.origin.y))
+            width = \(Int(frame.size.width))
+            height = \(Int(frame.size.height))
+
+            """
+        }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("trm-reload-\(UUID().uuidString).toml")
+        do {
+            try toml.write(to: url, atomically: true, encoding: .utf8)
+            return url.path
+        } catch {
+            Self.logger.error("Reload handoff config write failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Launch a second instance of the bundle on the handoff config.
+    ///
+    /// `-n` forces a new instance rather than activating this one, and the
+    /// config travels in the child's environment via `--env`.
+    private func launchReloadSuccessor(bundleURL: URL, configPath: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [
+            "-n", bundleURL.path,
+            "--env", "TRM_CONFIG=\(configPath)",
+            "--env", "\(Self.reloadSuccessorEnvKey)=\(getpid())",
+        ]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            return true
+        } catch {
+            Self.logger.error("Reload successor launch failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Env key carrying the predecessor's pid to a reload successor. Its
+    /// presence is what marks a launch as the second half of a handoff.
+    static let reloadSuccessorEnvKey = "TRM_RELOAD_PREDECESSOR_PID"
+
+    /// zmx sessions a config references that have no running daemon.
+    ///
+    /// A pane pointing at a dead session doesn't fail loudly — `zmx attach`
+    /// exits at once and the pane quietly closes, which reads as the layout
+    /// losing a row rather than as processes dying.
+    @MainActor
+    static func deadSessionsIn(configPath: String) -> [String] {
+        guard let content = try? String(contentsOfFile: configPath, encoding: .utf8) else {
+            return []
+        }
+        var dead: [String] = []
+        for rawLine in content.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("zmx_session"), let eq = line.firstIndex(of: "=") else { continue }
+            let name = String(line[line.index(after: eq)...])
+                .trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            guard !name.isEmpty else { continue }
+            if !ZmxSessionManager.sessionExists(name) { dead.append(name) }
+        }
+        return dead
+    }
+
+    /// Read the `[window]` frame a reload handoff config carries, if any.
+    ///
+    /// Only the reload path writes this section, so an ordinary `TRM_CONFIG`
+    /// launch is unaffected.
+    static func reloadHandoffFrame(fromConfigPath path: String) -> NSRect? {
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        var inWindow = false
+        var values: [String: Double] = [:]
+
+        for rawLine in content.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") {
+                inWindow = line.trimmingCharacters(in: CharacterSet(charactersIn: "[]")) == "window"
+                continue
+            }
+            guard inWindow, let eq = line.firstIndex(of: "=") else { continue }
+            let key = String(line[line.startIndex..<eq]).trimmingCharacters(in: .whitespaces)
+            let raw = String(line[line.index(after: eq)...])
+                .trimmingCharacters(in: .whitespaces)
+            if let value = Double(raw) { values[key] = value }
+        }
+
+        guard let x = values["x"], let y = values["y"],
+              let w = values["width"], let h = values["height"],
+              w > 0, h > 0
+        else { return nil }
+        return NSRect(x: x, y: y, width: w, height: h)
+    }
+
+    /// Restore the handoff frame onto the successor's window, so the reloaded
+    /// UI lands exactly where (and at the size) the predecessor was.
+    @MainActor private func applyReloadHandoffFrameIfNeeded() {
+        let env = ProcessInfo.processInfo.environment
+        guard env[Self.reloadSuccessorEnvKey] != nil,
+              let cfgPath = launchConfigPath,
+              let frame = Self.reloadHandoffFrame(fromConfigPath: cfgPath),
+              let window = TerminalController.all.first(where: { $0.sessionRole == .primary })?.window
+        else { return }
+
+        // Normally already applied via defaultSize before the panes attached.
+        // Re-setting an identical frame would still push a resize through to
+        // the PTYs, so only act when it genuinely differs.
+        guard !window.frame.equalTo(frame) else { return }
+
+        // Snap to the frame with no animation. The successor must simply *be*
+        // the window it replaces; easing into position reads as the new UI
+        // resizing itself on screen. `animate: false` alone isn't enough —
+        // the window is set up inside an implicit-animation context, whose
+        // duration AppKit would otherwise inherit.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            window.setFrame(frame, display: true, animate: false)
+        }
+    }
+
+    /// Distributed notification the successor posts once its windows are on
+    /// screen, telling the predecessor it is safe to exit.
+    static let reloadReadyNotification = Notification.Name("app.roj.trm.reloadSuccessorReady")
+
+    /// Longest we'll wait for a successor to report readiness before quitting
+    /// anyway. The successor is already attached to the daemons by then; the
+    /// worst case is a brief flicker rather than a stranded duplicate UI.
+    private static let reloadHandoffTimeout: TimeInterval = 20
+
+    /// Wait for the successor's ready signal, then exit.
+    @MainActor private func beginReloadHandoffWatch() {
+        let center = DistributedNotificationCenter.default()
+        reloadHandoffObserver = center.addObserver(
+            forName: Self.reloadReadyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            // Only accept the signal from the successor we spawned.
+            guard let pid = note.userInfo?["predecessor"] as? String,
+                  pid == String(getpid()) else { return }
+            MainActor.assumeIsolated { self?.finishReloadHandoff() }
+        }
+
+        reloadHandoffTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.reloadHandoffTimeout,
+            repeats: false
+        ) { _ in
+            Task { @MainActor in
+                Self.logger.warning("Reload successor never reported ready; exiting anyway")
+                (NSApp.delegate as? AppDelegate)?.finishReloadHandoff()
+            }
+        }
+    }
+
+    /// Tear down handoff state after a failed launch, leaving this process a
+    /// normal primary again.
+    @MainActor private func cancelReloadHandoff() {
+        clearReloadHandoffWatch()
+        isReloadingUI = false
+        hasStartedReloadHandoff = false
+        skipAutoSaveOnQuit = false
+        // Restore the checkpoint timer we stood down above.
+        autoSaveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+            Task { @MainActor in
+                guard let self = NSApp.delegate as? AppDelegate,
+                      self.ghostty.config.windowSaveState != "never" else { return }
+                SessionManager.autoSaveAllWindows()
+            }
+        }
+    }
+
+    @MainActor private func clearReloadHandoffWatch() {
+        if let observer = reloadHandoffObserver {
+            DistributedNotificationCenter.default().removeObserver(observer)
+            reloadHandoffObserver = nil
+        }
+        reloadHandoffTimer?.invalidate()
+        reloadHandoffTimer = nil
+    }
+
+    /// The successor is up: exit without touching the shared daemons.
+    @MainActor private func finishReloadHandoff() {
+        guard isReloadingUI else { return }
+        clearReloadHandoffWatch()
+        NSApp.terminate(nil)
+    }
+
+    /// If this process is a reload successor, announce readiness so the
+    /// predecessor can exit, then reclaim the Text Tap socket it releases.
+    @MainActor private func announceReloadSuccessorReadyIfNeeded() {
+        let env = ProcessInfo.processInfo.environment
+        guard let predecessorPid = env[Self.reloadSuccessorEnvKey],
+              !predecessorPid.isEmpty else { return }
+
+        // Announce exactly once. This ran from applicationDidBecomeActive,
+        // which fires again whenever the app is reactivated — a second
+        // announcement would tell an already-dead pid to exit and, worse,
+        // leave this process still believing it is mid-handoff.
+        guard !hasAnnouncedReloadReady else { return }
+        hasAnnouncedReloadReady = true
+        // Clear the marker so this process is never mistaken for a successor
+        // again (it is now just a normal primary).
+        unsetenv(Self.reloadSuccessorEnvKey)
+
+        DistributedNotificationCenter.default().postNotificationName(
+            Self.reloadReadyNotification,
+            object: nil,
+            userInfo: ["predecessor": predecessorPid],
+            deliverImmediately: true
+        )
+
+        // Our Text Tap server was disabled so we wouldn't unlink the socket
+        // out from under the predecessor. Once it's gone, take the socket over
+        // so hook clients (agent notifications, context pills) keep working
+        // against the reloaded UI.
+        adoptTextTapAfterPredecessorExits(pid: predecessorPid)
+    }
+
+    /// Poll for the predecessor's exit, then start our Text Tap server.
+    @MainActor private func adoptTextTapAfterPredecessorExits(pid: String) {
+        guard let target = pid_t(pid) else { return }
+        var waited: TimeInterval = 0
+        let interval: TimeInterval = 0.1
+
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { t in
+            // kill(pid, 0) succeeds while the process is alive.
+            let alive = kill(target, 0) == 0
+            waited += interval
+            guard !alive || waited >= Self.reloadHandoffTimeout else { return }
+            t.invalidate()
+            Task { @MainActor in
+                guard let self = NSApp.delegate as? AppDelegate else { return }
+                if !Trm.shared.startTextTapServer() {
+                    Self.logger.warning("Reload successor could not bind the Text Tap socket")
+                }
+                _ = self
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// The installed app bundle to relaunch. Prefers this process's own
+    /// bundle so a reload always picks up whatever was just installed over it.
+    private func reloadTargetBundleURL() -> URL? {
+        let fm = FileManager.default
+        let running = Bundle.main.bundleURL
+        if running.pathExtension == "app", fm.fileExists(atPath: running.path) {
+            return running
+        }
+        // Xcode/`zig build run` launches run the binary outside a bundle;
+        // fall back to the standard install locations.
+        for candidate in [
+            "/Applications/trm.app",
+            (NSHomeDirectory() as NSString).appendingPathComponent("Applications/trm.app"),
+        ] where fm.fileExists(atPath: candidate) {
+            return URL(fileURLWithPath: candidate)
+        }
+        return nil
+    }
+
+    /// Spawn a detached helper that waits for this process to exit and then
+    /// opens the app bundle again.
+    ///
+    /// The wait matters: `open` on a still-running app just activates the
+    /// existing instance instead of starting the new binary. The helper polls
+    /// for our pid to disappear (with a bounded timeout so a stuck quit can't
+    /// strand a process), then launches a fresh instance.
+    private func spawnReloadRelauncher(for bundleURL: URL) -> Bool {
+        let script = """
+        pid=$1
+        app=$2
+        for _ in $(seq 1 100); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        # Give the terminating process a moment to release its resources.
+        sleep 0.3
+        exec /usr/bin/open -n "$app"
+        """
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", script, "sh", String(getpid()), bundleURL.path]
+        // Drop TRM_CONFIG so the relaunched UI takes the plain instant
+        // re-attach path against the checkpoint we just wrote. Inheriting it
+        // would reopen the original config file instead of the live windows.
+        var env = ProcessInfo.processInfo.environment
+        env.removeValue(forKey: "TRM_CONFIG")
+        process.environment = env
+        // Detach from our stdio so the helper outlives us cleanly.
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            return true
+        } catch {
+            Self.logger.error("Reload relaunch failed to start: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Explain why a reload didn't happen. Nothing has been closed at this point.
+    @MainActor private func reloadUIRefusal(_ reason: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Can't reload the UI"
+        alert.informativeText = reason
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     @IBAction func checkForUpdates(_ sender: Any?) {

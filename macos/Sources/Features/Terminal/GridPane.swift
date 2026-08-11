@@ -284,6 +284,29 @@ enum GridPane: Identifiable {
     case agentOverview(AgentOverviewPane)
     case stack([GridPane])
 
+    /// Whether this cell contains the given terminal surface, looking inside
+    /// stacks. `id` reports a stack's first child, so it can't answer this.
+    func containsSurface(_ surfaceID: ObjectIdentifier) -> Bool {
+        switch self {
+        case .terminal(let surface):
+            return ObjectIdentifier(surface) == surfaceID
+        case .stack(let children):
+            return children.contains { $0.containsSurface(surfaceID) }
+        case .webview, .plugin, .agentOverview:
+            return false
+        }
+    }
+
+    /// Whether this pane carries selection through keyboard focus (terminals
+    /// and stacks of them) rather than the separate non-surface selection.
+    var isTerminal: Bool {
+        switch self {
+        case .terminal: return true
+        case .stack(let children): return children.contains { $0.isTerminal }
+        case .webview, .plugin, .agentOverview: return false
+        }
+    }
+
     var id: ObjectIdentifier {
         switch self {
         case .terminal(let surface): return ObjectIdentifier(surface)

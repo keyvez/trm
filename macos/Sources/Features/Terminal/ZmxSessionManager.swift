@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import os
 
@@ -73,6 +74,88 @@ enum ZmxSessionManager {
         var isDir: ObjCBool = false
         let path = zmxDir + "/" + name
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && !isDir.boolValue
+    }
+
+    /// The pid of the shell running inside a session, or nil if not found.
+    ///
+    /// A server-backed pane's child process is the `zmx attach` *client*: it
+    /// has no children and its cwd is wherever trm was launched from, so
+    /// anything that needs the real shell — the working directory, the agent
+    /// process-tree walk behind the Agent Overview — cannot get there from the
+    /// pane's pid. The shell is a child of the process holding the session
+    /// socket, which this finds by asking who has that socket open and taking
+    /// its first child.
+    /// Cache of resolved shell pids. `lsof` is a process spawn — far too
+    /// expensive to repeat on a 1.5 s UI poll — and a session's shell pid is
+    /// stable for the session's life, so it is resolved once and only redone
+    /// when the cached process is gone.
+    private static var shellPidCache: [String: pid_t] = [:]
+
+    /// Cached variant of `serverShellPid`, safe to call from a hot path.
+    ///
+    /// Returns the cached pid while that process is still alive (a `kill(0)`
+    /// check, no spawn). Only a dead or missing entry pays for an `lsof`.
+    static func cachedServerShellPid(session: String) -> pid_t? {
+        if let cached = shellPidCache[session], kill(cached, 0) == 0 {
+            return cached
+        }
+        shellPidCache.removeValue(forKey: session)
+        guard let resolved = serverShellPid(session: session) else { return nil }
+        shellPidCache[session] = resolved
+        return resolved
+    }
+
+    static func serverShellPid(session: String) -> pid_t? {
+        let socketPath = zmxDir + "/" + session
+        guard FileManager.default.fileExists(atPath: socketPath) else { return nil }
+
+        // `lsof -t` prints just the pids holding the socket. The server may
+        // appear more than once (multiple fds), and attached clients hold it
+        // too — the one with a child is the server.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        process.arguments = ["-t", socketPath]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            logger.warning("lsof failed for session \(session): \(error.localizedDescription)")
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        let pids = Set(text.split(whereSeparator: \.isNewline).compactMap { pid_t($0) })
+        guard !pids.isEmpty else { return nil }
+
+        for pid in pids.sorted() {
+            if let child = firstChildPid(of: pid) { return child }
+        }
+        return nil
+    }
+
+    /// First child process of `parent`, if any.
+    private static func firstChildPid(of parent: pid_t) -> pid_t? {
+        let count = proc_listallpids(nil, 0)
+        guard count > 0 else { return nil }
+        var pids = [pid_t](repeating: 0, count: Int(count) + 32)
+        let filled = proc_listallpids(&pids, Int32(pids.count) * Int32(MemoryLayout<pid_t>.size))
+        guard filled > 0 else { return nil }
+
+        for pid in pids.prefix(Int(filled)) where pid > 0 {
+            var info = proc_bsdshortinfo()
+            let ret = proc_pidinfo(
+                pid, PROC_PIDT_SHORTBSDINFO, 0,
+                &info, Int32(MemoryLayout<proc_bsdshortinfo>.size)
+            )
+            guard ret > 0 else { continue }
+            if pid_t(info.pbsi_ppid) == parent { return pid }
+        }
+        return nil
     }
 
     /// All trm-owned session names, from socket files in the zmx dir.

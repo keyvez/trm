@@ -73,6 +73,22 @@ struct GridLayout<ID: Equatable> {
         }
     }
 
+    /// Place `companion` in the same row as `anchor`, sharing the row's width
+    /// rather than claiming a full-width row of its own.
+    ///
+    /// `placeCompanion`'s `rowAbove`/`rowBelow` insert a new row containing
+    /// only the companion, so an above/below overview always spanned the whole
+    /// window. This keeps it in the anchor's row, which is what lets two
+    /// overviews sit side by side.
+    mutating func placeCompanionInRow(_ companion: ID, near anchor: ID, after: Bool) {
+        guard displayOrder.contains(anchor) else { return }
+        removeCell(of: companion)
+        guard let anchorFlat = displayOrder.firstIndex(of: anchor) else { return }
+        let (anchorRow, _) = gridPosition(flatIndex: anchorFlat)
+        displayOrder.insert(companion, at: after ? anchorFlat + 1 : anchorFlat)
+        bumpRow(anchorRow)
+    }
+
     private mutating func bumpRow(_ row: Int) {
         if row < rowCols.count {
             rowCols[row] += 1
@@ -170,6 +186,31 @@ struct GridLayout<ID: Equatable> {
         let insertFlat = flatIndexFor(row: adjustedToRow, col: targetCol)
         let insertPos = min(insertFlat, displayOrder.count)
         displayOrder.insert(paneID, at: insertPos)
+    }
+
+    /// Move a pane into a brand-new row created at `newRowIndex`.
+    ///
+    /// Pushing a pane past the top or bottom edge of the grid creates a row
+    /// for it rather than doing nothing — the pane goes where it was sent, and
+    /// a one-pane row is a normal layout the grid already handles. A no-op
+    /// when the pane is already alone in its row, since extracting it into a
+    /// new row would just rebuild the row it is in.
+    mutating func relocateToNewRow(flatIndex: Int, fromRow: Int, newRowIndex: Int) {
+        guard flatIndex >= 0, flatIndex < displayOrder.count else { return }
+        guard fromRow >= 0, fromRow < rowCols.count else { return }
+        guard rowCols[fromRow] > 1 else { return }
+
+        let paneID = displayOrder[flatIndex]
+        displayOrder.remove(at: flatIndex)
+        rowCols[fromRow] -= 1
+
+        // Creating a row above shifts the source row down, but the insertion
+        // index is expressed in pre-insert terms, so clamp rather than adjust.
+        let rowIdx = max(0, min(newRowIndex, rowCols.count))
+        rowCols.insert(1, at: rowIdx)
+
+        let insertFlat = flatIndexFor(row: rowIdx, col: 0)
+        displayOrder.insert(paneID, at: min(insertFlat, displayOrder.count))
     }
 
     // MARK: - Insertion helpers

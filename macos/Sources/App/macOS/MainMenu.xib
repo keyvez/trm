@@ -103,6 +103,11 @@
                                     <action selector="reloadConfig:" target="bbz-4X-AYv" id="h5x-tu-Izk"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Reload Latest UI" keyEquivalent="R" id="RlU-01-mnu">
+                                <connections>
+                                    <action selector="reloadLatestUI:" target="bbz-4X-AYv" id="RlU-02-act"/>
+                                </connections>
+                            </menuItem>
                             <menuItem title="Secure Keyboard Entry" id="oC6-w4-qI7">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>

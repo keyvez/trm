@@ -53,10 +53,6 @@
 			</array>
 		</dict>
 	</array>
-	<key>TrmBuild</key>
-	<string></string>
-	<key>TrmCommit</key>
-	<string></string>
 	<key>LSEnvironment</key>
 	<dict>
 		<key>GHOSTTY_MAC_LAUNCH_SOURCE</key>
@@ -64,12 +60,16 @@
 	</dict>
 	<key>MDItemKeywords</key>
 	<string>Terminal</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_trm._tcp</string>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>trm needs camera access for web apps like video calls in webview panes.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>trm needs microphone access for web apps like video calls in webview panes.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>trm needs microphone access for web apps like video calls in webview panes.</string>
 	<key>NSServices</key>
 	<array>
 		<dict>
@@ -115,17 +115,33 @@
 	<false/>
 	<key>SUPublicEDKey</key>
 	<string>wsNcGf5hirwtdXMVnYoxRIX/SqZQLMOsYlD3q3imeok=</string>
+	<key>TrmBuild</key>
+	<string></string>
+	<key>TrmCommit</key>
+	<string></string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>app.roj.trmSurfaceId</string>
-			<key>UTTypeDescription</key>
-			<string>trm Surface Identifier</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.data</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>trm Surface Identifier</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.roj.trmSurfaceId</string>
+			<key>UTTypeTagSpecification</key>
+			<dict/>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>trm Agent Overview Identifier</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.roj.trm.agentOverviewId</string>
 			<key>UTTypeTagSpecification</key>
 			<dict/>
 		</dict>

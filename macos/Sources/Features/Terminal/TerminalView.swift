@@ -42,6 +42,14 @@ protocol TerminalViewModel: ObservableObject {
     /// Number of columns in each row of the grid layout.
     var gridRowCols: [Int] { get }
 
+    /// The selected pane when it has no surface (agent overview, webview,
+    /// plugin). Terminals carry selection through keyboard focus instead.
+    var selectedNonSurfacePane: ObjectIdentifier? { get }
+
+    /// True while Cmd+Shift is held: dim pane contents and light up
+    /// watermarks so a pane can be found by its label.
+    var isWatermarkPeeking: Bool { get }
+
     /// Fractional heights for each row (sums to 1.0).
     var gridRowHeightFractions: [CGFloat] { get }
 
@@ -196,9 +204,17 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         onUnstackPane: { pane in
                             (self.delegate as? BaseTerminalController)?.unstackPane(pane)
                         },
+                        onMoveSubPane: { pane, up in
+                            (self.delegate as? BaseTerminalController)?.moveSubPane(pane, up: up)
+                        },
                         onPeekPane: { pane in
                             (self.delegate as? BaseTerminalController)?.peekPane(pane)
                         },
+                        selectedNonSurfacePane: viewModel.selectedNonSurfacePane,
+                        onSelectNonSurfacePane: { id in
+                            (self.delegate as? BaseTerminalController)?.selectNonSurfacePane(id)
+                        },
+                        isWatermarkPeeking: viewModel.isWatermarkPeeking,
                         onDismissPeek: {
                             (self.delegate as? BaseTerminalController)?.dismissPeek()
                         },

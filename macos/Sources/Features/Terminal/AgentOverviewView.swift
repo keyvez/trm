@@ -15,9 +15,13 @@ struct AgentOverviewView: View {
 
     // MARK: - Type scale
 
-    private var proseFont: Font { .system(size: 13.5) }
-    private var proseBoldFont: Font { .system(size: 13.5, weight: .bold) }
-    private let proseLineSpacing: CGFloat = 4.5
+    /// Every size in the view is expressed through this, so the whole scale
+    /// grows and shrinks together rather than only the body text.
+    private func scaled(_ size: CGFloat) -> CGFloat { size * pane.fontScale }
+
+    private var proseFont: Font { .system(size: scaled(13.5)) }
+    private var proseBoldFont: Font { .system(size: scaled(13.5), weight: .bold) }
+    private var proseLineSpacing: CGFloat { 4.5 * pane.fontScale }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,18 +29,35 @@ struct AgentOverviewView: View {
             Divider().opacity(0.5)
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    if let prompt = pane.transcript.lastUserPrompt {
+                    // An empty selection renders nothing, which just looks
+                    // broken — fall back to everything.
+                    let sections = pane.sections.isEmpty ? .all : pane.sections
+                    let errors = pane.transcript.activity.filter(\.isError)
+
+                    if sections.contains(.errors) {
+                        if errors.isEmpty {
+                            Text("No failed tool calls in this turn.")
+                                .font(.system(size: scaled(12)))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            errorSection(errors)
+                        }
+                    }
+                    if sections.contains(.prompt),
+                       let prompt = pane.transcript.lastUserPrompt {
                         promptSection(prompt)
                     }
-                    if !pane.transcript.activity.isEmpty {
+                    if sections.contains(.activity),
+                       !pane.transcript.activity.isEmpty {
                         activitySection
                     }
-                    if !pane.transcript.blocks.isEmpty {
+                    if sections.contains(.reply),
+                       !pane.transcript.blocks.isEmpty {
                         messageSection
                     }
                     if let status = pane.statusMessage {
                         Text(status)
-                            .font(.system(size: 12))
+                            .font(.system(size: scaled(12)))
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -46,25 +67,68 @@ struct AgentOverviewView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        // Darker than the standard text background: the overview sits beside
+        // terminals, and matching their darker ground keeps the eye from
+        // treating it as a bright document panel in a dark workspace.
+        .background(Self.paneBackground)
+    }
+
+    /// The overview's ground colour — a dark slate that reads as part of the
+    /// terminal grid rather than as a light document surface.
+    private static let paneBackground = Color(
+        nsColor: NSColor(name: nil) { appearance in
+            appearance.isDark
+                ? NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.09, alpha: 1.0)
+                : NSColor(calibratedRed: 0.16, green: 0.17, blue: 0.19, alpha: 1.0)
+        }
+    )
+
+    /// Failed tool calls, with the first line of each error.
+    private func errorSection(_ errors: [AgentTranscript.ToolActivity]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            copyableSectionLabel("Errors") {
+                errors.map { item in
+                    let head = [item.name, item.detail].compactMap { $0 }.joined(separator: " ")
+                    return [head, item.errorText].compactMap { $0 }.joined(separator: "\n")
+                }.joined(separator: "\n\n")
+            }
+            ForEach(errors) { item in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                        Text(item.name)
+                            .font(.system(size: scaled(11), weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.primary)
+                        if let detail = item.detail {
+                            Text(detail)
+                                .font(.system(size: scaled(11), design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    if let text = item.errorText {
+                        Text(text)
+                            .font(.system(size: scaled(11), design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 
     // MARK: - Header
 
     private var header: some View {
         HStack(spacing: 8) {
-            // Grab bar: drag onto the bound terminal pane to re-place the
-            // overview left/right/above/below it.
-            AgentOverviewDragBar(pane: pane)
-                .frame(width: 26, height: 16)
-                .overlay(
-                    Image(systemName: "dot.grid.2x3.fill")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                        .allowsHitTesting(false)
-                )
-                .help("Drag onto this overview's terminal pane to move it (left, right, above, below)")
-
+            // No grab bar here: every pane cell now carries the shared
+            // drag/peek bar above its content, so a second handle inside the
+            // overview's own header was redundant.
             Image(systemName: "sparkle")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
@@ -86,6 +150,76 @@ struct AgentOverviewView: View {
             }
 
             Spacer()
+
+            // What the pane shows. A long session holds far more than fits in
+            // a narrow column, and which part matters depends on the moment —
+            // catching up, checking the last answer, watching progress, or
+            // finding what broke.
+            Menu {
+                // Independent toggles: the sections are additive, so watching
+                // the agent's commands while reading its reply is one
+                // selection rather than a choice between two modes.
+                ForEach(AgentOverviewSections.allCases, id: \.rawValue) { section in
+                    Toggle(isOn: Binding(
+                        get: { pane.sections.contains(section) },
+                        set: { isOn in
+                            var next = pane.sections
+                            if isOn { next.insert(section) } else { next.remove(section) }
+                            pane.sections = next
+                        }
+                    )) {
+                        Text("\(section.menuTitle) — \(section.menuSubtitle)")
+                    }
+                }
+                Divider()
+                Button("Show Everything") { pane.sections = .all }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: pane.sections.symbolName)
+                        .font(.system(size: 10))
+                    Text(pane.sections.barLabel)
+                        .font(.system(size: 10))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7, weight: .semibold))
+                }
+                .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Choose what this overview shows")
+
+            // Text size. The overview is a reading surface in a column whose
+            // width the user controls, so the comfortable size varies — and
+            // it's per pane, not global, so a narrow overview and a wide one
+            // can differ. Click the percentage to reset.
+            HStack(spacing: 2) {
+                Button(action: { pane.decreaseFontSize() }) {
+                    Image(systemName: "textformat.size.smaller")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+                .disabled(!pane.canDecreaseFontSize)
+                .help("Smaller text")
+
+                Button(action: { pane.resetFontSize() }) {
+                    Text("\(Int((pane.fontScale * 100).rounded()))%")
+                        .font(.system(size: 9, weight: .medium))
+                        .monospacedDigit()
+                }
+                .buttonStyle(.plain)
+                .help("Reset text size")
+
+                Button(action: { pane.increaseFontSize() }) {
+                    Image(systemName: "textformat.size.larger")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+                .disabled(!pane.canIncreaseFontSize)
+                .help("Larger text")
+            }
+            .foregroundStyle(.secondary)
 
             Button(action: { pane.toggleBionic() }) {
                 Text("B")
@@ -122,6 +256,9 @@ struct AgentOverviewView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
+        // Dragging lives in the shared pane bar above this header now, so the
+        // title row is no longer a drag source — two overlapping drag
+        // surfaces in the same strip only compete for the same mouse-down.
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -129,13 +266,13 @@ struct AgentOverviewView: View {
 
     private func promptSection(_ prompt: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionLabel("You asked")
+            copyableSectionLabel("You asked") { prompt }
             HStack(alignment: .top, spacing: 0) {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(Color.accentColor.opacity(0.55))
                     .frame(width: 3)
                 Text(prompt)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: scaled(12.5)))
                     .lineSpacing(3)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -148,7 +285,13 @@ struct AgentOverviewView: View {
 
     private var activitySection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionLabel(pane.transcript.isWorking ? "Working on" : "Recent activity")
+            copyableSectionLabel(
+                pane.transcript.isWorking ? "Working on" : "Recent activity"
+            ) {
+                pane.transcript.activity
+                    .map { [$0.name, $0.detail].compactMap { $0 }.joined(separator: " ") }
+                    .joined(separator: "\n")
+            }
             VStack(alignment: .leading, spacing: 5) {
                 ForEach(pane.transcript.activity) { item in
                     HStack(alignment: .firstTextBaseline, spacing: 7) {
@@ -158,11 +301,11 @@ struct AgentOverviewView: View {
                                              ? Color.green.opacity(0.55)
                                              : Color.accentColor)
                         Text(item.name)
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .font(.system(size: scaled(11), weight: .semibold, design: .monospaced))
                             .foregroundStyle(.primary.opacity(0.85))
                         if let detail = item.detail {
                             Text(detail)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(size: scaled(11), design: .monospaced))
                                 .foregroundStyle(.tertiary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -182,7 +325,14 @@ struct AgentOverviewView: View {
 
     private var messageSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionLabel("\(pane.agentKind.displayName) said")
+            copyableSectionLabel("\(pane.agentKind.displayName) said") {
+                pane.transcript.blocks.map { block in
+                    switch block {
+                    case .paragraph(let text): return text
+                    case .code(_, let text): return text
+                    }
+                }.joined(separator: "\n\n")
+            }
             ForEach(pane.transcript.blocks) { block in
                 switch block {
                 case .paragraph(let text):
@@ -275,7 +425,7 @@ struct AgentOverviewView: View {
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(text)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.system(size: scaled(12), design: .monospaced))
                     .lineSpacing(2.5)
                     .foregroundStyle(.primary.opacity(0.88))
                     .textSelection(.enabled)
@@ -314,6 +464,59 @@ struct AgentOverviewView: View {
             .foregroundStyle(.tertiary)
             .tracking(0.9)
     }
+
+    /// A section heading that copies that section's text when tapped.
+    ///
+    /// The overview is a reading surface, and the thing you most often want
+    /// from it is the text itself — a prompt to re-run, a command to paste, an
+    /// answer to quote. Selecting inside a narrow scrolling column is fiddly,
+    /// so the heading doubles as a copy button for the whole section.
+    private func copyableSectionLabel(_ text: String, copying content: @escaping () -> String) -> some View {
+        CopyableSectionLabel(title: text, content: content) {
+            sectionLabel(text)
+        }
+    }
+}
+
+/// Section heading that copies its section on tap, confirming in place.
+private struct CopyableSectionLabel<Label: View>: View {
+    let title: String
+    let content: () -> String
+    @ViewBuilder let label: () -> Label
+
+    @State private var didCopy = false
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            label()
+            // The affordance only appears on hover so the heading stays quiet
+            // while reading; the confirmation stays visible briefly after.
+            if isHovering || didCopy {
+                Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 8, weight: .semibold))
+                    // Two concrete Colors: mixing `.tertiary` (a ShapeStyle)
+                    // into a ternary makes the branches disagree on type.
+                    .foregroundStyle(didCopy ? Color.accentColor : Color.secondary.opacity(0.6))
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+        .onTapGesture { copy() }
+        .help("Copy \(title.lowercased())")
+    }
+
+    private func copy() {
+        let text = content()
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        withAnimation(.easeOut(duration: 0.12)) { didCopy = true }
+        Task {
+            try? await Task.sleep(for: .milliseconds(1200))
+            withAnimation(.easeOut(duration: 0.2)) { didCopy = false }
+        }
+    }
 }
 
 // MARK: - Drag support
@@ -330,103 +533,12 @@ enum AgentOverviewDragContext {
     struct Drag {
         let overviewUUID: UUID
         let boundSurfaceID: ObjectIdentifier
+        /// The overview's own cell. Dropping an overview back onto itself is
+        /// the natural way to pick a different side, so its own cell is a
+        /// valid target too — not only its terminal's.
+        let overviewPaneID: ObjectIdentifier
     }
 
     static var current: Drag? = nil
 }
 
-/// A grab bar for the agent overview pane, shown in its header.
-///
-/// Starts an `NSDraggingSession` carrying the overview's UUID under the
-/// `trmAgentOverviewId` pasteboard type. Dropping on the overview's own
-/// terminal pane repositions it (left/right/above/below); anywhere else the
-/// drag simply ends and the overview stays where it was.
-struct AgentOverviewDragBar: NSViewRepresentable {
-    let pane: AgentOverviewPane
-
-    func makeNSView(context: Context) -> OverviewDragBarNSView {
-        let view = OverviewDragBarNSView()
-        view.pane = pane
-        return view
-    }
-
-    func updateNSView(_ nsView: OverviewDragBarNSView, context: Context) {
-        nsView.pane = pane
-    }
-}
-
-final class OverviewDragBarNSView: NSView, NSDraggingSource {
-    weak var pane: AgentOverviewPane?
-    private var dragStart: NSPoint?
-
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .openHand)
-    }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    override func mouseDown(with event: NSEvent) {
-        dragStart = convert(event.locationInWindow, from: nil)
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let pane, let start = dragStart else { return }
-        let location = convert(event.locationInWindow, from: nil)
-        let dx = location.x - start.x, dy = location.y - start.y
-        guard dx * dx + dy * dy > 9 else { return }
-        dragStart = nil
-
-        guard let surface = pane.surface else { return }
-
-        let item = NSPasteboardItem()
-        var uuid = pane.id.uuid
-        let data = withUnsafeBytes(of: &uuid) { Data($0) }
-        item.setData(data, forType: .trmAgentOverviewId)
-
-        let draggingItem = NSDraggingItem(pasteboardWriter: item)
-
-        // A small translucent card as the drag image — the overview itself is
-        // large and text-heavy, and the placement targets matter more than a
-        // faithful preview.
-        let size = NSSize(width: 120, height: 72)
-        let image = NSImage(size: size)
-        image.lockFocus()
-        let rect = NSRect(origin: .zero, size: size)
-        let path = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: 8, yRadius: 8)
-        NSColor.controlAccentColor.withAlphaComponent(0.25).setFill()
-        path.fill()
-        NSColor.controlAccentColor.withAlphaComponent(0.7).setStroke()
-        path.lineWidth = 1.5
-        path.stroke()
-        image.unlockFocus()
-
-        let mouse = convert(event.locationInWindow, from: nil)
-        draggingItem.setDraggingFrame(
-            NSRect(x: mouse.x - size.width / 2, y: mouse.y - size.height / 2,
-                   width: size.width, height: size.height),
-            contents: image
-        )
-
-        AgentOverviewDragContext.current = .init(
-            overviewUUID: pane.id,
-            boundSurfaceID: ObjectIdentifier(surface)
-        )
-
-        let session = beginDraggingSession(with: [draggingItem], event: event, source: self)
-        session.animatesToStartingPositionsOnCancelOrFail = false
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        dragStart = nil
-    }
-
-    // MARK: NSDraggingSource
-
-    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
-        context == .withinApplication ? .move : []
-    }
-
-    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
-        AgentOverviewDragContext.current = nil
-    }
-}

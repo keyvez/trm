@@ -1323,6 +1323,10 @@ uint32_t termania_cmux_socket_path(trm_app_t, char*, uint32_t);
 // Live layout sync (multi-UI attach): primary broadcasts serialized layout
 // snapshots to layout-subscribed clients (mirror UIs)
 uint8_t  termania_text_tap_running(trm_app_t);
+// Deferred Text Tap start (reload handoff): a UI launched to replace a
+// still-running one starts with text_tap disabled, then binds the socket
+// here once its predecessor has exited. Returns 1 if running on return.
+uint8_t  termania_text_tap_start(trm_app_t);
 void     termania_broadcast_layout(trm_app_t, const char*, const char*);
 uint32_t termania_layout_subscriber_count(trm_app_t);
 uint64_t termania_layout_subscribe_generation(trm_app_t);

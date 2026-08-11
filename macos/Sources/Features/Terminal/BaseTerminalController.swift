@@ -49,7 +49,41 @@ class BaseTerminalController: NSWindowController,
 
     /// The currently focused surface.
     var focusedSurface: Ghostty.SurfaceView? = nil {
-        didSet { syncFocusToSurfaceTree() }
+        didSet {
+            syncFocusToSurfaceTree()
+            // Keyboard focus moving to a terminal takes selection away from a
+            // non-surface pane; otherwise two panes would look selected.
+            if focusedSurface != nil { selectedNonSurfacePane = nil }
+        }
+    }
+
+    /// The selected pane when it isn't a terminal (agent overview, webview,
+    /// plugin).
+    ///
+    /// Focus is modelled as `Ghostty.SurfaceView?` throughout, so a pane with
+    /// no surface could never be represented as selected: its border stayed
+    /// unfocused however it was clicked, and clicking it left the previously
+    /// focused terminal still ringed — which read as "the overview can't be
+    /// selected at all". This carries selection for those panes so they can
+    /// show it and act on it.
+    @Published var selectedNonSurfacePane: ObjectIdentifier? = nil
+
+    /// True while Cmd+Shift is held: pane contents dim and watermarks come up
+    /// to full brightness, so a pane can be found by its label alone.
+    @Published var isWatermarkPeeking: Bool = false
+
+    /// Select a pane that has no surface, taking selection away from whatever
+    /// held it — including the focused terminal's ring.
+    func selectNonSurfacePane(_ id: ObjectIdentifier) {
+        guard selectedNonSurfacePane != id else { return }
+        selectedNonSurfacePane = id
+        // Drop terminal keyboard focus so only one pane reads as selected.
+        // Assigning nil goes through the observer above, which would clear the
+        // selection we just set, so restore it afterwards.
+        if focusedSurface != nil {
+            focusedSurface = nil
+            selectedNonSurfacePane = id
+        }
     }
 
     /// The tree of splits within this terminal window.
@@ -863,7 +897,8 @@ class BaseTerminalController: NSWindowController,
         at oldView: Ghostty.SurfaceView,
         direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
         baseConfig config: Ghostty.SurfaceConfiguration? = nil,
-        didReconcile: Bool = false
+        didReconcile: Bool = false,
+        skipPersistenceWrap: Bool = false
     ) -> Ghostty.SurfaceView? {
         guard !isLayoutEditingDisabled else { return nil }
         guard let ghostty_app = ghostty.app else { return nil }
@@ -884,7 +919,12 @@ class BaseTerminalController: NSWindowController,
         let newPaneId = nextAvailablePaneId()
         var newConfig = config ?? Ghostty.SurfaceConfiguration()
         Self.injectCmuxEnvVars(into: &newConfig, paneId: newPaneId)
-        let persist = Self.wrapForPersistence(&newConfig, ghostty: ghostty)
+        // A remote pane already attaches a zmx session — on the remote host.
+        // Wrapping it in a local session too would nest one daemon inside
+        // another and make the pane look locally-backed in checkpoints.
+        let persist = skipPersistenceWrap
+            ? nil
+            : Self.wrapForPersistence(&newConfig, ghostty: ghostty)
         let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: newConfig)
         newView.paneId = newPaneId
         if let persist {
@@ -1040,8 +1080,11 @@ class BaseTerminalController: NSWindowController,
     /// Ensure `gridRowCols` matches the actual pane count.
     /// If they've drifted (e.g. a surface failed to create during session
     /// restore), rebuild `gridRowCols` to reflect the real pane count.
-    private func reconcileGridRowCols() {
-        let actualCount = gridPanes.count
+    /// - Parameter extraPendingPanes: cells that belong to panes not yet
+    ///   created (agent overviews during restore), so their cells aren't
+    ///   trimmed as drift before they exist.
+    private func reconcileGridRowCols(extraPendingPanes: Int = 0) {
+        let actualCount = gridPanes.count + extraPendingPanes
         let totalBefore = gridRowCols.reduce(0, +)
         var layout = GridLayout<ObjectIdentifier>(
             rowCols: gridRowCols,
@@ -1146,10 +1189,23 @@ class BaseTerminalController: NSWindowController,
     /// Move pane in the given direction within the grid.
     enum PaneMoveDirection {
         case left, right, up, down
+
+        /// Where an agent overview lands when moved this way. Overviews are
+        /// positioned relative to their terminal, so a direction names a side
+        /// rather than a grid displacement.
+        var overviewPlacement: AgentOverviewPlacement {
+            switch self {
+            case .left: return .leading
+            case .right: return .trailing
+            case .up: return .above
+            case .down: return .below
+            }
+        }
     }
 
     func movePane(_ pane: GridPane, direction: PaneMoveDirection) {
         guard !isLayoutEditingDisabled else { return }
+
         TrmDiagnostics.log("[close-trace] movePane enter direction=\(direction) gridPanes=\(self.gridPanes.count)")
         defer { TrmDiagnostics.log("[close-trace] movePane exit gridPanes=\(self.gridPanes.count)") }
         ensurePaneDisplayOrder()
@@ -1170,16 +1226,30 @@ class BaseTerminalController: NSWindowController,
             swapPanesInDisplayOrder(panes, flatIndex, flatIndex + 1)
 
         case .up:
-            guard srcRow > 0 else { return }
+            // Past the top edge: give the pane a new first row rather than
+            // refusing the move.
+            guard srcRow > 0 else {
+                relocatePaneToNewRow(flatIndex: flatIndex, fromRow: srcRow, newRowIndex: 0)
+                break
+            }
             relocatePane(panes, flatIndex: flatIndex, fromRow: srcRow, toRow: srcRow - 1)
 
         case .down:
-            guard srcRow < gridRowCols.count - 1 else { return }
+            // Past the bottom edge: append a new last row for it.
+            guard srcRow < gridRowCols.count - 1 else {
+                relocatePaneToNewRow(
+                    flatIndex: flatIndex,
+                    fromRow: srcRow,
+                    newRowIndex: gridRowCols.count
+                )
+                break
+            }
             relocatePane(panes, flatIndex: flatIndex, fromRow: srcRow, toRow: srcRow + 1)
         }
 
-        // Keep each agent overview beside its terminal after the reorder.
-        repinAgentOverviews()
+        // Overviews move like any other pane now; only drop ones whose
+        // terminal has gone away.
+        pruneOrphanedAgentOverviews()
 
         // Flash the moved pane's watermark so the user can track it.
         // Delay slightly so SwiftUI finishes re-laying out the grid before
@@ -1229,11 +1299,56 @@ class BaseTerminalController: NSWindowController,
         paneDisplayOrder = layout.displayOrder
     }
 
+    /// Move a pane into a new row created at `newRowIndex` (used when a move
+    /// pushes it past the top or bottom edge of the grid).
+    private func relocatePaneToNewRow(flatIndex: Int, fromRow: Int, newRowIndex: Int) {
+        var layout = GridLayout<ObjectIdentifier>(
+            rowCols: gridRowCols,
+            displayOrder: paneDisplayOrder
+        )
+        layout.relocateToNewRow(
+            flatIndex: flatIndex,
+            fromRow: fromRow,
+            newRowIndex: newRowIndex
+        )
+        gridRowCols = layout.rowCols
+        paneDisplayOrder = layout.displayOrder
+
+        // Row count changed, so the old height fractions no longer describe
+        // the grid; drop them and let it re-normalise to equal rows.
+        gridRowHeightFractions = []
+        gridColWidthFractions = []
+    }
+
     /// Move the currently focused pane in the given direction.
     func moveFocusedPane(_ direction: PaneMoveDirection) {
+        // A selected non-surface pane (an overview picked with Cmd+N or a
+        // click) is what the user means by "the current pane" — act on it
+        // rather than on whichever terminal still holds keyboard focus.
+        if let selectedID = selectedNonSurfacePane,
+           let pane = gridPanes.first(where: { $0.id == selectedID }) {
+            movePane(pane, direction: direction)
+            return
+        }
         guard let surface = focusedSurface else { return }
         let pane = GridPane.terminal(surface)
         movePane(pane, direction: direction)
+    }
+
+    /// Reposition the focused terminal's agent overview around it.
+    ///
+    /// An overview holds no keyboard focus of its own (it has no surface), so
+    /// the ordinary move shortcuts can never target it — they resolve through
+    /// `focusedSurface` and always land on a terminal. This is the overview's
+    /// keyboard equivalent: it acts on the overview attached to whichever
+    /// terminal is focused, leaving the plain move shortcuts free to move that
+    /// terminal as before.
+    func moveFocusedPaneOverview(_ direction: PaneMoveDirection) {
+        guard !isLayoutEditingDisabled else { return }
+        guard let surface = focusedSurface,
+              let overview = agentOverviewPanes.first(where: { $0.surface === surface })
+        else { return }
+        setOverviewPlacement(overview, direction.overviewPlacement)
     }
 
     // MARK: - Pane Swap (Drag-to-Swap)
@@ -1247,7 +1362,7 @@ class BaseTerminalController: NSWindowController,
         guard let srcIdx = panes.firstIndex(where: { $0.id == source.id }),
               let dstIdx = panes.firstIndex(where: { $0.id == target.id }) else { return }
         swapPanesInDisplayOrder(panes, srcIdx, dstIdx)
-        repinAgentOverviews()
+        pruneOrphanedAgentOverviews()
 
         // Flash the swapped pane so the user can track it.
         if case .terminal(let surface) = source, let pid = surface.paneId {
@@ -1273,8 +1388,14 @@ class BaseTerminalController: NSWindowController,
         let targetID = target.id
         guard sourceID != targetID else { return }
 
-        // Don't stack a pane onto itself or onto its own stack.
-        if let existing = paneStacks[targetID], existing.contains(sourceID) { return }
+        // Dropping a pane onto the stack it is already in is a *reorder*, not
+        // a no-op: it's how you move a sub-pane to the top or bottom of its
+        // own group. This used to return early, so the drop registered (the
+        // preview even showed) and then nothing happened.
+        if let existing = paneStacks[targetID], existing.contains(sourceID) {
+            reorderWithinStack(hostID: targetID, moving: sourceID, edge: edge)
+            return
+        }
 
         ensurePaneDisplayOrder()
 
@@ -1345,8 +1466,7 @@ class BaseTerminalController: NSWindowController,
             paneDisplayOrder[idx] = sourceID
         }
 
-        // Stacking removed a cell; keep overviews beside their terminals.
-        repinAgentOverviews()
+        pruneOrphanedAgentOverviews()
     }
 
     // MARK: - Agent Overview Pane
@@ -1362,7 +1482,11 @@ class BaseTerminalController: NSWindowController,
     /// The view is inserted immediately to the right of its terminal pane,
     /// in the same row, which is the only placement the grid guarantees stays
     /// adjacent. If one is already open for this pane, this is a no-op.
-    func showAgentOverview(for pane: GridPane) {
+    /// - Parameter applyPlacement: when false the overview is created and
+    ///   given a cell, but not positioned relative to its terminal. Restore
+    ///   passes false: the checkpoint's `row_cols` already describes where
+    ///   every pane sits, and re-deriving the position destroys rows.
+    func showAgentOverview(for pane: GridPane, applyPlacement: Bool = true) {
         guard !isLayoutEditingDisabled else { return }
         guard case .terminal(let surface) = pane else { return }
         guard !hasAgentOverview(for: pane) else { return }
@@ -1371,7 +1495,37 @@ class BaseTerminalController: NSWindowController,
 
         let view = AgentOverviewPane(surface: surface)
         agentOverviewPanes.append(view)
-        applyOverviewPlacement(view)
+
+        // Claim a grid cell for the new overview before placing it — but only
+        // when the grid is actually short one.
+        //
+        // Opening an overview interactively needs the claim: appending to
+        // `agentOverviewPanes` grows `gridPanes` by one, so the
+        // `ensurePaneDisplayOrder()` inside `applyOverviewPlacement` sees a
+        // count mismatch and rebuilds the order with the overview already in
+        // it — at which point `placeCompanion` treats it as an existing cell,
+        // removing it from one row and re-inserting it beside its anchor for a
+        // net-zero change to `gridRowCols`, leaving one more pane than cells
+        // and displacing a neighbour.
+        //
+        // Restore must NOT claim: `gridRowCols` was already seeded from the
+        // checkpoint's `row_cols`, which counts the overview's cell. Claiming
+        // again made it 7 cells for 6 panes, and the reconciliation collapsed
+        // a row to compensate — a restored two-row window came back as one.
+        // Comparing against the pane count covers both callers without either
+        // needing to know which case it is.
+        appendToPaneDisplayOrder(ObjectIdentifier(view))
+        let cellCount = gridRowCols.reduce(0, +)
+        let paneCount = gridPanes.count
+        if gridRowCols.isEmpty {
+            gridRowCols = [1]
+        } else if cellCount < paneCount {
+            gridRowCols[gridRowCols.count - 1] += 1
+        }
+
+        if applyPlacement {
+            applyOverviewPlacement(view)
+        }
     }
 
     /// Map an overview placement to grid-layout terms.
@@ -1395,11 +1549,38 @@ class BaseTerminalController: NSWindowController,
             rowCols: gridRowCols,
             displayOrder: paneDisplayOrder
         )
-        layout.placeCompanion(
-            ObjectIdentifier(view),
-            near: ObjectIdentifier(surface),
-            side: Self.companionSide(for: view.placement)
-        )
+        // `rowAbove`/`rowBelow` insert a row containing only the overview, so
+        // an above/below overview spans the entire window — which is why two
+        // overviews could never sit side by side. When the anchor's row holds
+        // other panes, share that row instead: the overview lands next to its
+        // terminal at the row's width, and a second overview can take a slot
+        // in the same row. A full-width row is still right when the anchor is
+        // alone in its row, since sharing would be a no-op there.
+        let anchorID = ObjectIdentifier(surface)
+        let placement = view.placement
+        let anchorRowIsShared: Bool = {
+            guard let flat = paneDisplayOrder.firstIndex(of: anchorID) else { return false }
+            var offset = 0
+            for cols in gridRowCols {
+                if flat < offset + cols { return cols > 1 }
+                offset += cols
+            }
+            return false
+        }()
+
+        if (placement == .above || placement == .below), anchorRowIsShared {
+            layout.placeCompanionInRow(
+                ObjectIdentifier(view),
+                near: anchorID,
+                after: placement == .below
+            )
+        } else {
+            layout.placeCompanion(
+                ObjectIdentifier(view),
+                near: anchorID,
+                side: Self.companionSide(for: placement)
+            )
+        }
         gridRowCols = layout.rowCols
         paneDisplayOrder = layout.displayOrder
 
@@ -1423,9 +1604,15 @@ class BaseTerminalController: NSWindowController,
     func placeOverview(overviewUUID uuid: UUID, onto target: GridPane, placement: AgentOverviewPlacement) {
         guard !isLayoutEditingDisabled else { return }
         guard let view = agentOverviewPanes.first(where: { $0.id == uuid }) else { return }
+        // Accept the drop when the target cell contains this overview's
+        // terminal — including when that terminal is stacked, which the old
+        // `case .terminal` match rejected outright.
+        // Valid targets are the overview's terminal (including when stacked)
+        // and the overview's own cell — dropping onto itself to choose a
+        // different side is the natural gesture.
         guard let surface = view.surface,
-              case .terminal(let targetSurface) = target,
-              targetSurface === surface else { return }
+              target.containsSurface(ObjectIdentifier(surface))
+                || target.id == ObjectIdentifier(view) else { return }
         setOverviewPlacement(view, placement)
     }
 
@@ -1436,16 +1623,23 @@ class BaseTerminalController: NSWindowController,
     /// apart. Calling this after a reorder restores the invariant that an
     /// overview always sits immediately after its agent's pane. Overviews
     /// whose terminal has gone away are closed.
-    func repinAgentOverviews() {
+    /// Close overviews whose terminal has gone away.
+    ///
+    /// This replaces the old `repinAgentOverviews`, which re-derived *every*
+    /// overview's position after any layout change to keep it glued beside its
+    /// terminal. That invariant was the source of most of the overview's
+    /// misbehaviour: it silently reverted drags and shortcut moves (the drop
+    /// applied, then the repin put it back), and with two overviews the repins
+    /// fought each other — each `placeCompanion` inserting a fresh full-width
+    /// row, which is what collapsed restored layouts.
+    ///
+    /// An overview is now an ordinary grid pane: it stacks, swaps, moves, and
+    /// shares rows like any other. The only tie kept to its terminal is
+    /// lifetime — it closes when that terminal does.
+    func pruneOrphanedAgentOverviews() {
         guard !agentOverviewPanes.isEmpty else { return }
-
         for view in agentOverviewPanes where view.surface == nil {
             closeAgentOverview(view)
-        }
-        guard !agentOverviewPanes.isEmpty, !paneDisplayOrder.isEmpty else { return }
-
-        for view in agentOverviewPanes {
-            applyOverviewPlacement(view)
         }
     }
 
@@ -1501,6 +1695,92 @@ class BaseTerminalController: NSWindowController,
 
         // Add the pane back to the grid as its own cell.
         addPaneBackToGrid(paneID)
+    }
+
+    /// Move a sub-pane to the top or bottom of the stack it already belongs
+    /// to, in response to a drop onto its own group.
+    private func reorderWithinStack(
+        hostID: ObjectIdentifier,
+        moving paneID: ObjectIdentifier,
+        edge: StackDropEdge
+    ) {
+        guard var children = paneStacks[hostID],
+              let from = children.firstIndex(of: paneID) else { return }
+
+        children.remove(at: from)
+        // `.top` means "above the existing panes", i.e. become the new host.
+        let to = (edge == .top) ? 0 : children.count
+        children.insert(paneID, at: to)
+        guard children.count >= 2 else { return }
+
+        // Carry the pane's height with it rather than discarding every
+        // fraction: dropping them reset the whole group to equal sizes, so a
+        // reorder silently undid any resizing the user had done.
+        var fractions = stackSubPaneHeightFractions[hostID]
+        if var fracs = fractions, fracs.count > from {
+            let moved = fracs.remove(at: from)
+            fracs.insert(moved, at: min(to, fracs.count))
+            fractions = fracs
+        }
+        stackSubPaneHeightFractions.removeValue(forKey: hostID)
+
+        let newHostID = children[0]
+        if newHostID != hostID {
+            // The host owns the grid cell and keys the stack, so promoting a
+            // pane to the top hands both over.
+            paneStacks.removeValue(forKey: hostID)
+            paneStacks[newHostID] = children
+            if let slot = paneDisplayOrder.firstIndex(of: hostID) {
+                paneDisplayOrder[slot] = newHostID
+            }
+            stackSubPaneHeightFractions[newHostID] = fractions
+        } else {
+            paneStacks[hostID] = children
+            stackSubPaneHeightFractions[hostID] = fractions
+        }
+    }
+
+    /// Move a stacked sub-pane up or down within its stack.
+    ///
+    /// A stack's first element is its *host*: it owns the grid cell and the
+    /// stack is keyed by its ID. Moving a pane into or out of position 0
+    /// therefore transfers that identity, which is why this can't be a plain
+    /// element swap — the `paneStacks` key, the display order slot, and the
+    /// height fractions all follow the host.
+    func moveSubPane(_ pane: GridPane, up: Bool) {
+        guard !isLayoutEditingDisabled else { return }
+        let paneID = pane.id
+        guard let (hostID, index) = findStackEntry(for: paneID),
+              var children = paneStacks[hostID] else { return }
+
+        let target = up ? index - 1 : index + 1
+        guard target >= 0, target < children.count else { return }
+
+        children.swapAt(index, target)
+
+        // Swap the two heights alongside the panes, so each keeps the size it
+        // had. Discarding them reset the whole group to equal heights, which
+        // silently undid the user's resizing on every reorder.
+        var fractions = stackSubPaneHeightFractions[hostID]
+        if var fracs = fractions, fracs.count == children.count {
+            fracs.swapAt(index, target)
+            fractions = fracs
+        }
+        stackSubPaneHeightFractions.removeValue(forKey: hostID)
+
+        if index == 0 || target == 0 {
+            // The host changed. Re-key the stack and hand the grid cell over.
+            let newHostID = children[0]
+            paneStacks.removeValue(forKey: hostID)
+            paneStacks[newHostID] = children
+            if let slot = paneDisplayOrder.firstIndex(of: hostID) {
+                paneDisplayOrder[slot] = newHostID
+            }
+            stackSubPaneHeightFractions[newHostID] = fractions
+        } else {
+            paneStacks[hostID] = children
+            stackSubPaneHeightFractions[hostID] = fractions
+        }
     }
 
     /// Show the peek overlay for a stacked pane.
@@ -2375,16 +2655,35 @@ class BaseTerminalController: NSWindowController,
     /// Returns true if focus was switched.
     @discardableResult
     func focusPaneByIndex(_ index: Int) -> Bool {
-        let surfaces = gridSurfaces
-        guard surfaces.count > 1 else { return false }
-        let targetIdx = min(index - 1, surfaces.count - 1)
+        // Index over the *visual* panes, not just terminals. Indexing
+        // `gridSurfaces` skipped every non-terminal cell, so the numbers ran
+        // past agent overviews, webviews, and plugin panes — Cmd+N could never
+        // land on one, and the counting didn't match what's on screen.
+        let panes = gridPanes
+        guard panes.count > 1 else { return false }
+        let targetIdx = min(index - 1, panes.count - 1)
         guard targetIdx >= 0 else { return false }
-        let target = surfaces[targetIdx]
-        guard target !== focusedSurface else { return true }
 
-        focusedSurface = target
-        window?.makeFirstResponder(target)
-        return true
+        switch panes[targetIdx] {
+        case .terminal(let surface):
+            guard surface !== focusedSurface else { return true }
+            focusedSurface = surface
+            window?.makeFirstResponder(surface)
+            return true
+
+        case .stack(let children):
+            // Focus the stack's visible host.
+            guard case .terminal(let surface)? = children.first else { return false }
+            guard surface !== focusedSurface else { return true }
+            focusedSurface = surface
+            window?.makeFirstResponder(surface)
+            return true
+
+        case .agentOverview, .webview, .plugin:
+            // No surface to focus: these carry selection separately.
+            selectNonSurfacePane(panes[targetIdx].id)
+            return true
+        }
     }
 
     /// Move focus to a surface view.
@@ -3460,9 +3759,27 @@ class BaseTerminalController: NSWindowController,
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let optionOnly = flags == .option
 
+            // Hold Cmd+Option to dim every pane's contents and light up its
+            // watermark: a way to find the pane you want in a busy grid
+            // without reading any of them. Held, not toggled, so it can't be
+            // left on by accident.
+            //
+            // Not Cmd+Shift: that prefixes the pane-move shortcuts
+            // (Cmd+Shift+Arrow) and New Row (Cmd+Shift+T), so the dim flashed
+            // on every one of them. Cmd+Control is taken by the overview move
+            // shortcuts, leaving Cmd+Option as the free chord.
+            let watermarkPeek = flags == [.command, .option]
+            let wasWatermarkPeeking = isWatermarkPeeking
+            if watermarkPeek != isWatermarkPeeking {
+                isWatermarkPeeking = watermarkPeek
+            }
+
             if optionOnly {
-                // Option key was just pressed (alone)
-                optionPressedAlone = true
+                // Option key was just pressed (alone). Not after a Cmd+Option
+                // peek, though: letting go of Cmd first leaves Option held,
+                // which would otherwise arm the double-tap and pop the command
+                // palette when the user was only peeking.
+                optionPressedAlone = !wasWatermarkPeeking
             } else if optionPressedAlone && flags.isEmpty {
                 // Option key was just released (it was pressed alone with no other keys)
                 optionPressedAlone = false
@@ -3712,6 +4029,7 @@ class BaseTerminalController: NSWindowController,
         case clearAutoSave
         case createExtension
         case agentOverview
+        case remotePane(host: String?)
     }
 
     private func handleInternalCommand(_ action: String, on surfaceView: Ghostty.SurfaceView) -> Bool {
@@ -3745,6 +4063,138 @@ class BaseTerminalController: NSWindowController,
         case .agentOverview:
             showAgentOverview(for: .terminal(surfaceView))
             return true
+        case .remotePane(let host):
+            newRemotePane(host: host, at: surfaceView)
+            return true
+        }
+    }
+
+    // MARK: - Remote Panes
+
+    /// Default path to trm's bundled zmx on a remote machine.
+    static let defaultRemoteZmxPath = "/Applications/trm.app/Contents/MacOS/zmx"
+
+    /// Open a new terminal pane whose shell runs on another machine.
+    ///
+    /// The pane's command is `ssh -t <host> <remote-zmx> attach <session>`, so
+    /// the session daemon lives on the *remote* host: the work survives there
+    /// independently of this UI, and the pane can be reattached later (from
+    /// here or from that machine) exactly like a local server-backed pane.
+    /// Rendering stays local — the same arrangement `trm attach-remote` uses
+    /// for whole windows, applied to a single new pane.
+    ///
+    /// New panes only. An existing pane cannot be moved to another host: its
+    /// process is already running under a specific machine's daemon, and
+    /// nothing in the PTY model can migrate that.
+    func newRemotePane(host: String?, at surfaceView: Ghostty.SurfaceView) {
+        guard !isLayoutEditingDisabled else { return }
+
+        guard let host = host?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else {
+            promptForRemoteHost(at: surfaceView)
+            return
+        }
+
+        // The remote session name is generated here so it can be recorded in
+        // the checkpoint and reattached later.
+        let session = ZmxSessionManager.newSessionName()
+        let remoteZmx = Self.defaultRemoteZmxPath
+        let command = Self.remoteAttachCommand(host: host, session: session, zmxPath: remoteZmx)
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = command
+
+        guard let view = newGridPane(
+            at: surfaceView,
+            direction: .right,
+            baseConfig: config,
+            skipPersistenceWrap: true
+        ) else {
+            presentInternalCommandError(
+                title: "Could not Create Remote Pane",
+                message: "Failed to create a pane for \(host)."
+            )
+            return
+        }
+
+        // Record the binding so the pane round-trips through a checkpoint as a
+        // remote pane rather than as a local shell running an ssh command.
+        view.remoteHost = host
+        view.remoteZmxSession = session
+    }
+
+    /// Build the SSH command that attaches a remote zmx session, creating it
+    /// on first connect.
+    ///
+    /// `-t` forces a PTY (zmx needs one); the remote side runs zmx directly so
+    /// the daemon is owned by that machine.
+    static func remoteAttachCommand(host: String, session: String, zmxPath: String) -> String {
+        // The command runs through the local shell, so quote what may contain
+        // spaces. The host is validated before we get here.
+        "ssh -t \(host) \"\(zmxPath)\" attach \(session)"
+    }
+
+    /// Ask which machine the new pane should run on.
+    private func promptForRemoteHost(at surfaceView: Ghostty.SurfaceView) {
+        let alert = NSAlert()
+        alert.messageText = "New Remote Pane"
+        alert.informativeText = """
+        Which machine should this pane run on?
+
+        Requires key-based SSH to the host and trm installed there. \
+        The pane's session runs on that machine and keeps running if this \
+        window closes.
+        """
+        // Offer machines discovered over Bonjour, while still allowing any
+        // destination to be typed — plenty of hosts aren't on this LAN.
+        let discovered = RemoteHostDiscovery.shared.hosts
+        let input: NSTextField
+        if discovered.isEmpty {
+            input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        } else {
+            let combo = NSComboBox(frame: NSRect(x: 0, y: 0, width: 320, height: 26))
+            combo.addItems(withObjectValues: discovered.map(\.sshDestination))
+            combo.completes = true
+            combo.numberOfVisibleItems = 8
+            input = combo
+        }
+        input.placeholderString = "user@host"
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Create Pane")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = input
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let host = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty else { return }
+
+        // Reject anything that could break out of the command we build.
+        guard Self.isValidRemoteHost(host) else {
+            presentInternalCommandError(
+                title: "Invalid Host",
+                message: "'\(host)' isn't a valid SSH destination. Use host or user@host."
+            )
+            return
+        }
+        newRemotePane(host: host, at: surfaceView)
+    }
+
+    /// Whether a string is a plausible SSH destination (`host` or `user@host`,
+    /// optionally with a port suffix handled by ssh config).
+    ///
+    /// This is a command-injection guard as much as a validation: the host is
+    /// interpolated into a shell command, so anything outside this character
+    /// set is refused rather than escaped.
+    static func isValidRemoteHost(_ host: String) -> Bool {
+        guard !host.isEmpty, host.count <= 255 else { return false }
+        let allowed = CharacterSet.alphanumerics
+            .union(CharacterSet(charactersIn: "._-@"))
+        guard host.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return false }
+        // At most one @, and neither side empty when present.
+        let parts = host.split(separator: "@", omittingEmptySubsequences: false)
+        switch parts.count {
+        case 1: return !parts[0].isEmpty
+        case 2: return !parts[0].isEmpty && !parts[1].isEmpty
+        default: return false
         }
     }
 
@@ -3799,6 +4249,20 @@ class BaseTerminalController: NSWindowController,
             let arg = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
             let normalized = normalizeQuotedArgument(arg)
             return .saveToml(pathArg: normalized.isEmpty ? nil : normalized)
+        }
+
+        // trm.remote_pane [user@host] / trm.remote [user@host] — a new pane
+        // whose shell runs on another machine. Bare form prompts for the host.
+        let bareRemoteNames: Set<String> = ["trm.remote_pane", "trm.remote"]
+        if bareRemoteNames.contains(trimmed) {
+            return .remotePane(host: nil)
+        }
+
+        for prefix in ["trm.remote_pane ", "trm.remote "] {
+            guard trimmed.hasPrefix(prefix) else { continue }
+            let arg = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = normalizeQuotedArgument(arg)
+            return .remotePane(host: normalized.isEmpty ? nil : normalized)
         }
 
         // trm.add_pane <type> [arg] / trm.add <type> [arg]
@@ -4226,8 +4690,12 @@ class BaseTerminalController: NSWindowController,
         var saveRowCols = gridRowCols
         let visualPaneCount = visualPanes.count
         if saveRowCols.reduce(0, +) != visualPaneCount, visualPaneCount > 0 {
-            let cfg = activeGridConfig
-            saveRowCols = gridShape(totalPanes: visualPaneCount, rows: max(cfg.rows, 1), cols: max(cfg.cols, 1))
+            // Reconcile against the *live* shape, not activeGridConfig: that
+            // is the launch-time config and goes stale as soon as panes are
+            // added, closed, or rearranged. Using it pivoted layouts on
+            // restore (a 3-across window saved from a rows=3/cols=1 launch
+            // config came back as a 3-tall column).
+            saveRowCols = Self.reconcileRowCols(saveRowCols, toTotal: visualPaneCount)
         }
 
         // [grid] section
@@ -4279,6 +4747,14 @@ class BaseTerminalController: NSWindowController,
                 }
                 if let zmxSession = surface.zmxSessionName {
                     lines.append("zmx_session = \(tomlQuote(zmxSession))")
+                }
+                // Remote panes: the daemon lives on another machine, so record
+                // the destination and its session rather than a local one.
+                if let remoteHost = surface.remoteHost, !remoteHost.isEmpty {
+                    lines.append("remote_host = \(tomlQuote(remoteHost))")
+                    if let remoteSession = surface.remoteZmxSession, !remoteSession.isEmpty {
+                        lines.append("remote_session = \(tomlQuote(remoteSession))")
+                    }
                 }
                 if let pwd = surface.pwd, !pwd.isEmpty {
                     lines.append("cwd = \(tomlQuote(pwd))")
@@ -4378,6 +4854,21 @@ class BaseTerminalController: NSWindowController,
                     lines.append("overview_of = \(anchorIdx)")
                 }
                 lines.append("overview_placement = \(tomlQuote(view.placement.rawValue))")
+                lines.append("overview_mode = \(tomlQuote(view.sections.tomlValue))")
+                if view.fontScale != AgentOverviewPane.defaultFontScale {
+                    lines.append("overview_font_scale = \(String(format: "%.2f", Double(view.fontScale)))")
+                }
+                // Overviews stack like any other pane now, so their stack
+                // membership has to round-trip too. Every other pane type
+                // wrote this; the overview branch didn't, which was harmless
+                // while overviews couldn't be stacked and silently detached
+                // them from their group on reload once they could.
+                if let sg = entry.stackGroup {
+                    lines.append("stack_group = \(tomlQuote(sg))")
+                }
+                if let sf = entry.stackFractions, !sf.isEmpty {
+                    lines.append("stack_fractions = \(tomlQuote(Self.fractionListString(sf)))")
+                }
                 lines.append("")
             case .stack:
                 // Already flattened above — should not appear here.
@@ -4775,7 +5266,7 @@ class BaseTerminalController: NSWindowController,
         let panes = gridPanes
         guard a != b, a >= 0, b >= 0, a < panes.count, b < panes.count else { return }
         swapPanesInDisplayOrder(panes, a, b)
-        repinAgentOverviews()
+        pruneOrphanedAgentOverviews()
     }
 
     private func resolveTomlPath(_ path: String, on surfaceView: Ghostty.SurfaceView) -> String {
@@ -5164,7 +5655,16 @@ class BaseTerminalController: NSWindowController,
             }
         }
         rebuildTerminalSurfaces(terminalConfigsWithPaneId)
-        reconcileGridRowCols()
+        // Agent overviews are created further down (they need their terminals
+        // to exist first), but the seeded `gridRowCols` already counts their
+        // cells. Reconciling here against a pane count that excludes them
+        // trimmed those cells — a saved [5,1] became [5], collapsing the
+        // second row before the overview was ever placed. Hold the pending
+        // overviews' cells so reconcile only fixes genuine drift.
+        let pendingOverviews = paneConfigs.filter {
+            normalizedPaneType($0.paneType) == "agent_overview"
+        }.count
+        reconcileGridRowCols(extraPendingPanes: pendingOverviews)
 
         // Restore pane stacking relationships from stack_group tags.
         if hasStackGroups {
@@ -5184,6 +5684,107 @@ class BaseTerminalController: NSWindowController,
 
         // Recreate agent overview panes once their terminal panes exist.
         restoreAgentOverviews(from: paneConfigs)
+
+        // Stacking ran before the overviews existed, so an overview that was
+        // part of a stack could not join it and came back detached. Add just
+        // those overviews to their groups now.
+        //
+        // Deliberately not a second full `restoreStackGroups` pass: by this
+        // point the overviews are in `paneDisplayOrder`, and re-running the
+        // whole grouping re-stacked panes that were already grouped, sweeping
+        // unrelated panes into the wrong stacks.
+        if hasStackGroups, !agentOverviewPanes.isEmpty {
+            restoreOverviewStackMembership(from: paneConfigs)
+        }
+    }
+
+    /// Add restored agent overviews to the stacks they were saved in.
+    ///
+    /// Only overviews are touched: terminal, webview, and plugin stacking was
+    /// already applied before the overviews existed, and re-applying it would
+    /// disturb groups that are already correct.
+    private func restoreOverviewStackMembership(from paneConfigs: [Trm.TrmPaneConfig]) {
+        // Map each saved stack group to a pane already in it, which is the
+        // target an overview should stack onto.
+        var anchorForGroup: [String: GridPane] = [:]
+        let surfaces = gridSurfaces
+        var termIdx = 0
+        for cfg in paneConfigs where normalizedPaneType(cfg.paneType) == "terminal" {
+            defer { termIdx += 1 }
+            guard let group = cfg.stackGroup, termIdx < surfaces.count else { continue }
+            if anchorForGroup[group] == nil {
+                anchorForGroup[group] = .terminal(surfaces[termIdx])
+            }
+        }
+
+        // Position within each group, as written in the config: an overview
+        // saved above its terminal has to come back above it. `stackPane`
+        // always appends at the bottom, so restoring by that alone silently
+        // reordered every group.
+        var savedIndexInGroup: [ObjectIdentifier: Int] = [:]
+        var seenInGroup: [String: Int] = [:]
+        var ovIdx = 0
+        let overviews = agentOverviewPanes
+        for cfg in paneConfigs {
+            let type = normalizedPaneType(cfg.paneType)
+            guard let group = cfg.stackGroup else {
+                if type == "agent_overview" { ovIdx += 1 }
+                continue
+            }
+            let position = seenInGroup[group, default: 0]
+            seenInGroup[group] = position + 1
+            if type == "agent_overview" {
+                if ovIdx < overviews.count {
+                    savedIndexInGroup[ObjectIdentifier(overviews[ovIdx])] = position
+                }
+                ovIdx += 1
+            }
+        }
+
+        ovIdx = 0
+        for cfg in paneConfigs where normalizedPaneType(cfg.paneType) == "agent_overview" {
+            defer { ovIdx += 1 }
+            guard ovIdx < overviews.count,
+                  let group = cfg.stackGroup,
+                  let anchor = anchorForGroup[group] else { continue }
+            let view = overviews[ovIdx]
+            let overviewPane = GridPane.agentOverview(view)
+            // Already in a stack (nothing to do) or the anchor is missing.
+            guard findStackEntry(for: overviewPane.id) == nil else { continue }
+            stackPane(overviewPane, onto: anchor)
+
+            // Slot it back into its saved position within the group.
+            if let wanted = savedIndexInGroup[ObjectIdentifier(view)] {
+                moveOverviewToIndex(view, index: wanted)
+            }
+        }
+    }
+
+    /// Move an already-stacked overview to a specific index in its stack.
+    private func moveOverviewToIndex(_ view: AgentOverviewPane, index: Int) {
+        let paneID = ObjectIdentifier(view)
+        guard let (hostID, current) = findStackEntry(for: paneID),
+              var children = paneStacks[hostID],
+              index >= 0, index < children.count,
+              index != current else { return }
+
+        children.remove(at: current)
+        children.insert(paneID, at: index)
+
+        let newHostID = children[0]
+        if newHostID != hostID {
+            // Position 0 owns the grid cell and keys the stack.
+            paneStacks.removeValue(forKey: hostID)
+            paneStacks[newHostID] = children
+            if let slot = paneDisplayOrder.firstIndex(of: hostID) {
+                paneDisplayOrder[slot] = newHostID
+            }
+            if let fractions = stackSubPaneHeightFractions.removeValue(forKey: hostID) {
+                stackSubPaneHeightFractions[newHostID] = fractions
+            }
+        } else {
+            paneStacks[hostID] = children
+        }
     }
 
     /// Recreate agent overviews saved in the session config. Each entry names
@@ -5208,12 +5809,30 @@ class BaseTerminalController: NSWindowController,
                   termIdx < surfaces.count else { continue }
             let target = GridPane.terminal(surfaces[termIdx])
             guard !hasAgentOverview(for: target) else { continue }
-            showAgentOverview(for: target)
+
+            // Restore is replaying a layout the checkpoint already describes,
+            // so the overview must be created *without* re-deriving where it
+            // goes. Each placement pass runs `placeCompanion`, whose
+            // `removeCell` deletes a row outright when the overview is the
+            // only pane in it — placing then re-placing turned a saved
+            // [7, 1] into [8] and the last row vanished. (Seen directly in the
+            // [overview-place] log.)
+            showAgentOverview(for: target, applyPlacement: false)
+
+            guard let view = agentOverviewPanes.first(where: { $0.surface === surfaces[termIdx] })
+            else { continue }
+            if let rawMode = cfg.overviewMode {
+                view.sections = AgentOverviewSections(tomlValue: rawMode)
+            }
+            if let scale = cfg.overviewFontScale {
+                view.fontScale = CGFloat(scale)
+            }
+            // Record the saved placement without applying it: the grid shape
+            // comes from row_cols, and this only needs to be right for later
+            // interactive moves.
             if let raw = cfg.overviewPlacement,
-               let placement = AgentOverviewPlacement(rawValue: raw),
-               placement != .trailing,
-               let view = agentOverviewPanes.first(where: { $0.surface === surfaces[termIdx] }) {
-                setOverviewPlacement(view, placement)
+               let placement = AgentOverviewPlacement(rawValue: raw) {
+                view.placement = placement
             }
         }
     }
@@ -5268,8 +5887,13 @@ class BaseTerminalController: NSWindowController,
         let surfaces = gridSurfaces
         let webviews = webviewPanes
         let plugins = pluginPanes
-        var termIdx = 0, webIdx = 0, plugIdx = 0
-        var panesInConfigOrder: [GridPane] = []
+        let overviews = agentOverviewPanes
+        var termIdx = 0, webIdx = 0, plugIdx = 0, ovIdx = 0
+        // Optional per slot: an agent_overview has no pane yet at this point
+        // (they're created later), but its slot must still be counted or every
+        // later pane's index shifts — which is what swept unrelated panes into
+        // the wrong stacks.
+        var panesInConfigOrder: [GridPane?] = []
 
         for config in paneConfigs {
             let paneType = normalizedPaneType(config.paneType)
@@ -5284,6 +5908,16 @@ class BaseTerminalController: NSWindowController,
                     panesInConfigOrder.append(.webview(webviews[webIdx]))
                     webIdx += 1
                 }
+            case "agent_overview":
+                // This pass runs before overviews are created, so there is
+                // nothing to map — but the slot must still be consumed, or
+                // every later pane's index shifts. (Falling through to
+                // `default` counted an overview as a plugin, which is what
+                // pulled unrelated panes into the wrong stacks.) Overviews
+                // join their groups afterwards, in
+                // `restoreOverviewStackMembership`.
+                panesInConfigOrder.append(nil)
+                ovIdx += 1
             default:
                 if plugIdx < plugins.count {
                     panesInConfigOrder.append(.plugin(plugins[plugIdx]))
@@ -5300,7 +5934,9 @@ class BaseTerminalController: NSWindowController,
             if groups[group] == nil {
                 groupOrder.append(group)
             }
-            groups[group, default: []].append(panesInConfigOrder[i])
+            // Skip slots with no pane yet (overviews); they join afterwards.
+            guard let pane = panesInConfigOrder[i] else { continue }
+            groups[group, default: []].append(pane)
         }
 
         for groupName in groupOrder {
@@ -5376,6 +6012,42 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
+    /// Adjust a live `row_cols` shape to hold exactly `total` visual panes,
+    /// preserving the layout's existing orientation.
+    ///
+    /// The checkpoint's shape must survive round-trip: a row of 3 has to come
+    /// back as a row of 3, never as a column. So when `gridRowCols` is stale
+    /// we grow/shrink the shape we actually have — appending to (or trimming
+    /// from) the last row — rather than recomputing it from unrelated
+    /// dimensions, which is what pivoted layouts before.
+    static func reconcileRowCols(_ shape: [Int], toTotal total: Int) -> [Int] {
+        guard total > 0 else { return [1] }
+        var rowCols = shape.filter { $0 > 0 }
+        guard !rowCols.isEmpty else { return [total] }
+
+        var current = rowCols.reduce(0, +)
+
+        // Too few cells: widen the last row (a single row stays a single row).
+        if current < total {
+            rowCols[rowCols.count - 1] += total - current
+            return rowCols
+        }
+
+        // Too many cells: trim from the end, dropping rows that empty out.
+        while current > total, !rowCols.isEmpty {
+            let last = rowCols[rowCols.count - 1]
+            let excess = current - total
+            if last > excess {
+                rowCols[rowCols.count - 1] = last - excess
+                current = total
+            } else {
+                rowCols.removeLast()
+                current -= last
+            }
+        }
+        return rowCols.isEmpty ? [total] : rowCols
+    }
+
     private func gridShape(totalPanes: Int, rows: Int, cols: Int) -> [Int] {
         guard totalPanes > 0 else { return [1] }
         if rows * cols == totalPanes {
@@ -5449,7 +6121,20 @@ class BaseTerminalController: NSWindowController,
             // otherwise start a fresh session.
             var didReattach = false
             var persist: (session: String, logical: String?)? = nil
-            if ghostty.sessionPersistence {
+            // A remote pane's daemon lives on another machine: rebuild the SSH
+            // attach command and skip local wrapping entirely. `zmx attach`
+            // recreates the session if the remote daemon has since died, so
+            // this reconnects whether or not the work is still running.
+            let remoteHost = entry.config.remoteHost
+            if let remoteHost, !remoteHost.isEmpty,
+               Self.isValidRemoteHost(remoteHost) {
+                let session = entry.config.remoteSession ?? ZmxSessionManager.newSessionName()
+                surfaceConfig.command = Self.remoteAttachCommand(
+                    host: remoteHost,
+                    session: session,
+                    zmxPath: Self.defaultRemoteZmxPath
+                )
+            } else if ghostty.sessionPersistence {
                 if let saved = entry.config.zmxSession,
                    ZmxSessionManager.sessionExists(saved) {
                     persist = Self.wrapForPersistence(
@@ -5476,6 +6161,15 @@ class BaseTerminalController: NSWindowController,
             if let persist {
                 view.zmxSessionName = persist.session
                 view.logicalCommand = persist.logical
+            }
+            // Carry the remote binding forward so the next checkpoint still
+            // records this as a remote pane.
+            if let remoteHost, !remoteHost.isEmpty {
+                view.remoteHost = remoteHost
+                view.remoteZmxSession = entry.config.remoteSession
+                // zmx replays the remote session's screen; don't also cat
+                // scrollback or replay initial commands into a live shell.
+                reattachedPaneIds.insert(entry.paneId)
             }
             if didReattach { reattachedPaneIds.insert(entry.paneId) }
             newViews.append(view)

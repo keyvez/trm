@@ -21,6 +21,38 @@ enum TrmBorder {
     static let attentionWidth: CGFloat = 2.5
 }
 
+/// A pane's computed cell geometry, used as an animation key so a pane
+/// slides to its new slot when the layout changes rather than jumping.
+/// Equatable on the frame alone: identity comes from the ForEach pane id.
+private struct PaneSlot: Equatable {
+    let x: CGFloat
+    let y: CGFloat
+    let w: CGFloat
+    let h: CGFloat
+}
+
+/// Process-wide suppression of pane-move animation.
+///
+/// A reload successor is resized to its predecessor's saved frame right after
+/// its window is built. That geometry change would otherwise spring every pane
+/// out to the new size, which reads as the window animating into place — the
+/// successor is supposed to simply *be* the window it replaces. The reload
+/// path holds this down across the swap and releases it once the frame is
+/// applied. A flag rather than per-view state because the suppression has to
+/// span window construction, which the views don't observe.
+enum PaneMoveAnimation {
+    private(set) static var isSuppressed = false
+
+    /// Suppress pane-move animation until `resume()` is called.
+    static func suppress() { isSuppressed = true }
+
+    /// Re-enable animation on the next runloop turn, so the geometry change
+    /// that prompted the suppression has already been applied unanimated.
+    static func resume() {
+        DispatchQueue.main.async { isSuppressed = false }
+    }
+}
+
 /// A grid-based layout for terminal surfaces within a single tab.
 ///
 /// Instead of a binary split tree, this arranges panes in a jagged grid
@@ -101,8 +133,22 @@ struct TrmGridView: View {
     /// Callback to unstack (restore) a pane from its stack.
     var onUnstackPane: ((GridPane) -> Void)? = nil
 
+    /// Reorder a sub-pane within its stack (`true` = move up).
+    var onMoveSubPane: ((GridPane, Bool) -> Void)? = nil
+
     /// Callback to peek (expand) a stacked sub-pane.
     var onPeekPane: ((GridPane) -> Void)? = nil
+
+    /// Selected pane that has no surface (overview/webview/plugin). Terminals
+    /// carry selection through `focusedSurface`; these panes can't.
+    var selectedNonSurfacePane: ObjectIdentifier? = nil
+
+    /// Select a non-surface pane (click anywhere in it).
+    var onSelectNonSurfacePane: ((ObjectIdentifier) -> Void)? = nil
+
+    /// True while Cmd+Shift is held: dim pane contents and show watermarks at
+    /// full brightness so a pane can be picked out by its label.
+    var isWatermarkPeeking: Bool = false
 
     /// Callback to dismiss the peek overlay.
     var onDismissPeek: (() -> Void)? = nil
@@ -149,6 +195,12 @@ struct TrmGridView: View {
     /// During an overview grab-bar drag: the placement slot the cursor is
     /// over on the overview's terminal pane, or nil when not hovering it.
     @State private var overviewDropPlacement: AgentOverviewPlacement? = nil
+
+    /// True while a divider is being dragged. Pane-move animation is
+    /// suppressed during a drag so resizing tracks the cursor exactly instead
+    /// of easing behind it.
+    @State private var isDraggingDivider: Bool = false
+
 
     var body: some View {
         content
@@ -272,6 +324,23 @@ struct TrmGridView: View {
                                 paneCellView(pane, flatIndex: flatIndex, row: rowIdx, col: colIdx, cellSize: CGSize(width: colW, height: rowH))
                                     .frame(width: colW, height: rowH)
                                     .position(x: colX + colW / 2, y: rowY + rowH / 2)
+                                    // Slide panes to their new slot instead of
+                                    // teleporting when the layout changes
+                                    // (reorder, swap, stack/unstack, an
+                                    // overview claiming a cell). Cells are
+                                    // identified by pane id above, so SwiftUI
+                                    // animates the same view between
+                                    // positions. Keyed on the geometry rather
+                                    // than `value: pane` so only real moves
+                                    // animate — live drag-resize still tracks
+                                    // the cursor, since those frames come from
+                                    // fraction changes applied continuously.
+                                    .animation(
+                                        (isDraggingDivider || PaneMoveAnimation.isSuppressed)
+                                            ? nil
+                                            : .spring(duration: 0.28, bounce: 0.08),
+                                        value: PaneSlot(x: colX, y: rowY, w: colW, h: rowH)
+                                    )
                             }
                         }
 
@@ -291,7 +360,11 @@ struct TrmGridView: View {
                                     currentFraction: curFrac,
                                     combinedLength: combinedH,
                                     onDrag: { fraction in
+                                        if !isDraggingDivider { isDraggingDivider = true }
                                         onResizeRow?(rowIdx, fraction)
+                                    },
+                                    onDragEnded: {
+                                        isDraggingDivider = false
                                     }
                                 )
                                 .frame(width: availW, height: divH)
@@ -330,7 +403,11 @@ struct TrmGridView: View {
                                         currentFraction: curFrac,
                                         combinedLength: combinedW,
                                         onDrag: { fraction in
+                                            if !isDraggingDivider { isDraggingDivider = true }
                                             onResizeCol?(rowIdx, colIdx, fraction)
+                                        },
+                                        onDragEnded: {
+                                            isDraggingDivider = false
                                         }
                                     )
                                     .frame(width: divW, height: rowH)
@@ -340,6 +417,13 @@ struct TrmGridView: View {
                             }
                         }
                     }
+                    // Enable pane-move animation only after the grid has laid
+                    // out at a real size. A window that opens and is resized
+                    // straight to its saved frame (reload handoff, session
+                    // restore) would otherwise spring every pane out to the
+                    // new geometry, which looks like the window animating to
+                    // size. Deferred to the next runloop turn so the frame
+                    // change that follows the first layout is still covered.
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -359,8 +443,62 @@ struct TrmGridView: View {
         let existingCount = pane.stackChildren?.count ?? 1
         let needsAttention = paneNeedsAttention(pane)
 
-        paneView(pane, index: flatIndex)
+        // One bar per pane, the same one stacked sub-panes get: drag the pane
+        // elsewhere, tap to peek. A stack draws its own bars per sub-pane, so
+        // it doesn't get another at the cell level.
+        VStack(spacing: 0) {
+            if pane.stackChildren == nil {
+                SubPaneBar(
+                    pane: pane,
+                    canMoveUp: false,
+                    canMoveDown: false,
+                    onMoveUp: {},
+                    onMoveDown: {},
+                    onPeek: {
+                        if peekedPane == pane.id {
+                            onDismissPeek?()
+                        } else {
+                            onPeekPane?(pane)
+                        }
+                    }
+                )
+            }
+            paneView(pane, index: flatIndex)
+        }
             .cornerRadius(TrmBorder.radius)
+            // Dim only the pane's *contents* while peeking. This must wrap the
+            // content view alone: the watermark is drawn as an overlay inside
+            // paneView, so dimming the whole cell faded the watermark along
+            // with everything else — the opposite of the point. A scrim laid
+            // over the content, with the watermark re-drawn above it, keeps
+            // the label at full strength.
+            .overlay(
+                Color.black
+                    .opacity(isWatermarkPeeking ? 0.82 : 0.0)
+                    .cornerRadius(TrmBorder.radius)
+                    .allowsHitTesting(false)
+                    .animation(.easeOut(duration: 0.12), value: isWatermarkPeeking)
+            )
+            .overlay(
+                // The watermark again, above the scrim, only while peeking.
+                Group {
+                    if isWatermarkPeeking, let pid = paneIdForPane(pane) {
+                        watermarkOverlay(forPaneId: pid)
+                    }
+                }
+                .allowsHitTesting(false)
+            )
+            // Clicking a pane with no surface selects it. Terminals get this
+            // from keyboard focus; overviews/webviews/plugins have no surface
+            // to focus, so without this they could never show as selected and
+            // clicking one left the previous terminal still ringed.
+            // `simultaneousGesture` so the pane's own content (links, buttons,
+            // text selection) still receives the click.
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    if !pane.isTerminal { onSelectNonSurfacePane?(pane.id) }
+                }
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
                     .strokeBorder(
@@ -390,6 +528,17 @@ struct TrmGridView: View {
             )
             .contextMenu {
                 if case .agentOverview(let overviewPane) = pane {
+                    // Peeking is about reading a pane's contents, which an
+                    // overview — a wall of text in a narrow cell — benefits
+                    // from as much as any terminal.
+                    if let onPeekPane {
+                        Button {
+                            onPeekPane(pane)
+                        } label: {
+                            Label("Peek Pane", systemImage: "rectangle.expand.vertical")
+                        }
+                        Divider()
+                    }
                     // The overview moves only relative to its terminal pane;
                     // the generic move/stack items don't apply to it.
                     overviewPlacementMenu(overviewPane)
@@ -717,22 +866,47 @@ struct TrmGridView: View {
                     let subY = subYOffsets[idx]
 
                     VStack(spacing: 0) {
-                        // Only the first sub-pane gets a drag bar.
-                        if idx == 0, case .terminal(let surface) = child {
-                            PaneDragBar(surface: surface, onPeek: {
+                        // One bar per sub-pane, doing everything: drag the
+                        // pane out (AppKit drag source — SwiftUI's .onDrag
+                        // loses to the terminal NSView underneath), tap to
+                        // peek, and hover for the reorder buttons.
+                        SubPaneBar(
+                            pane: child,
+                            canMoveUp: idx > 0,
+                            canMoveDown: idx < children.count - 1,
+                            onMoveUp: { onMoveSubPane?(child, true) },
+                            onMoveDown: { onMoveSubPane?(child, false) },
+                            onPeek: {
                                 if peekedPane == child.id {
                                     onDismissPeek?()
                                 } else {
                                     onPeekPane?(child)
                                 }
-                            })
-                            .frame(height: 6)
-                        }
+                            }
+                        )
 
                         stackChildContent(child)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     .contextMenu {
+                        // Reorder within the stack. The first sub-pane is the
+                        // stack's host, so moving to the top is a real
+                        // promotion, not just a visual shuffle.
+                        if idx > 0 {
+                            Button {
+                                onMoveSubPane?(child, true)
+                            } label: {
+                                Label("Move Up", systemImage: "arrow.up")
+                            }
+                        }
+                        if idx < children.count - 1 {
+                            Button {
+                                onMoveSubPane?(child, false)
+                            } label: {
+                                Label("Move Down", systemImage: "arrow.down")
+                            }
+                        }
+                        SwiftUI.Divider()
                         Button {
                             onUnstackPane?(child)
                         } label: {
@@ -835,6 +1009,12 @@ struct TrmGridView: View {
     private func peekOverlay(for peekedID: ObjectIdentifier) -> some View {
         // Find the peeked surface across all panes (including stack children).
         let peekedSurface: Ghostty.SurfaceView? = findSurface(byID: peekedID)
+        // Overviews have no surface of their own, so resolve them separately —
+        // peeking is about reading a pane's contents, and a wall of text in a
+        // narrow cell is exactly what benefits from the expanded view.
+        let peekedOverview: AgentOverviewPane? = peekedSurface == nil
+            ? findOverview(byID: peekedID)
+            : nil
 
         // Background scrim — click to dismiss
         Color.black.opacity(0.3)
@@ -868,11 +1048,48 @@ struct TrmGridView: View {
                             .allowsHitTesting(false)
                     )
                     .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
+                } else if let overview = peekedOverview {
+                    AgentOverviewView(pane: overview, onClose: onCloseAgentOverview)
+                        .contextMenu {
+                            Button {
+                                onDismissPeek?()
+                            } label: {
+                                Label("Put Back", systemImage: "arrow.uturn.backward")
+                            }
+                        }
+                        .frame(width: geo.size.width * 0.5, height: geo.size.height)
+                        .cornerRadius(TrmBorder.radius)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
+                                .strokeBorder(TrmBorder.focusedColor, lineWidth: 2)
+                                .allowsHitTesting(false)
+                        )
+                        .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
                 }
                 Spacer()
             }
         }
         .transition(.opacity)
+    }
+
+    /// Find an agent overview pane by ObjectIdentifier.
+    private func findOverview(byID id: ObjectIdentifier) -> AgentOverviewPane? {
+        for pane in panes {
+            switch pane {
+            case .agentOverview(let overview):
+                if ObjectIdentifier(overview) == id { return overview }
+            case .stack(let children):
+                for child in children {
+                    if case .agentOverview(let overview) = child,
+                       ObjectIdentifier(overview) == id {
+                        return overview
+                    }
+                }
+            default:
+                break
+            }
+        }
+        return nil
     }
 
     /// Find a terminal surface by ObjectIdentifier across all panes and stack children.
@@ -974,7 +1191,7 @@ struct TrmGridView: View {
         // Reference watermarkVersion so SwiftUI re-evaluates when it changes.
         let _ = watermarkVersion
         if let text = Trm.shared.watermark(forPaneId: UInt32(paneId)), !text.isEmpty {
-            WatermarkView(text: text, cellHeight: 14, paneId: paneId)
+            WatermarkView(text: text, cellHeight: 14, paneId: paneId, isPeeking: isWatermarkPeeking)
         }
     }
 
@@ -1025,6 +1242,11 @@ struct TrmGridView: View {
                 return paneIdForPane(first)
             }
             return nil
+        case .agentOverview(let overview):
+            // An overview borrows its terminal's pane ID so it shows that
+            // pane's watermark. With overviews now free to move anywhere in
+            // the grid, the shared label is what ties the two together.
+            return overview.boundPaneId
         default:
             return nil
         }
@@ -1072,6 +1294,10 @@ struct TrmGridView: View {
             }
             return TrmBorder.color
         case .webview, .plugin, .agentOverview:
+            // These have no surface, so they carry selection separately.
+            if selectedNonSurfacePane == pane.id {
+                return TrmBorder.focusedColor
+            }
             return TrmBorder.color
         }
     }
@@ -1120,10 +1346,193 @@ struct TrmGridView: View {
     }
 }
 
-// MARK: - Notification Ring
+// MARK: - Pane Bar
 
-/// An animated blue glow ring around panes that need user attention.
-/// Mimics cmux's notification ring: a subtle pulsing border glow.
+/// The single bar above each pane.
+///
+/// One bar does all of it: drag the pane out to another cell or window, tap to
+/// peek, and hover to reveal the reorder buttons. The drag is an AppKit
+/// `NSDraggingSource` underneath (SwiftUI's `.onDrag` loses to the terminal
+/// NSView beneath it), with the buttons layered on top so they still take
+/// their own clicks.
+///
+/// It stays thin so it costs almost no vertical space, then grows to a
+/// comfortable grab target on hover — a 14pt strip is a hard thing to catch
+/// with the mouse.
+private struct SubPaneBar: View {
+    /// Resting height: thin enough to be almost invisible in the layout.
+    static let restingHeight: CGFloat = 14
+    /// Hovered height: 2× the resting height — enough to grab comfortably
+    /// without the bar taking over the top of the pane.
+    static let hoveredHeight: CGFloat = restingHeight * 2
+
+    let pane: GridPane
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
+    let onPeek: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        ZStack {
+            // Drag surface + tap-to-peek, behind the buttons.
+            SubPaneDragBar(pane: pane, onPeek: onPeek)
+
+            HStack(spacing: 6) {
+                Spacer()
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 7, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .allowsHitTesting(false)
+                Spacer()
+
+                if isHovering {
+                    if canMoveUp {
+                        Button(action: onMoveUp) {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 8, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Move up in this group")
+                    }
+                    if canMoveDown {
+                        Button(action: onMoveDown) {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 8, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Move down in this group")
+                    }
+                }
+            }
+            .padding(.horizontal, 6)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: isHovering ? Self.hoveredHeight : Self.restingHeight)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(isHovering ? 0.9 : 0.5))
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) { isHovering = hovering }
+        }
+    }
+}
+
+/// AppKit drag source for a stacked sub-pane of any type.
+///
+/// Terminals carry the surface id; overviews carry the overview pasteboard
+/// type and set the drag context the drop delegate reads during hover.
+private struct SubPaneDragBar: NSViewRepresentable {
+    let pane: GridPane
+    var onPeek: (() -> Void)? = nil
+
+    func makeNSView(context: Context) -> SubPaneDragBarNSView {
+        let view = SubPaneDragBarNSView()
+        view.pane = pane
+        view.onPeek = onPeek
+        return view
+    }
+
+    func updateNSView(_ nsView: SubPaneDragBarNSView, context: Context) {
+        nsView.pane = pane
+        nsView.onPeek = onPeek
+    }
+}
+
+final class SubPaneDragBarNSView: NSView, NSDraggingSource {
+    var pane: GridPane?
+    var onPeek: (() -> Void)?
+
+    private var dragStart: NSPoint?
+    private var didDrag = false
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        dragStart = convert(event.locationInWindow, from: nil)
+        didDrag = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let pane, let start = dragStart else { return }
+        let location = convert(event.locationInWindow, from: nil)
+        let dx = location.x - start.x, dy = location.y - start.y
+        guard dx * dx + dy * dy > 9 else { return }
+        dragStart = nil
+        didDrag = true
+
+        let item = NSPasteboardItem()
+        switch pane {
+        case .terminal(let surface):
+            var uuid = surface.id.uuid
+            item.setData(withUnsafeBytes(of: &uuid) { Data($0) }, forType: .ghosttySurfaceId)
+        case .agentOverview(let overview):
+            if let surface = overview.surface {
+                AgentOverviewDragContext.current = .init(
+                    overviewUUID: overview.id,
+                    boundSurfaceID: ObjectIdentifier(surface),
+                    overviewPaneID: ObjectIdentifier(overview)
+                )
+            }
+            var uuid = overview.id.uuid
+            item.setData(withUnsafeBytes(of: &uuid) { Data($0) }, forType: .trmAgentOverviewId)
+        default:
+            return
+        }
+
+        let draggingItem = NSDraggingItem(pasteboardWriter: item)
+        let size = NSSize(width: 120, height: 48)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let rect = NSRect(origin: .zero, size: size)
+        let path = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: 8, yRadius: 8)
+        NSColor.controlAccentColor.withAlphaComponent(0.35).setFill()
+        path.fill()
+        NSColor.controlAccentColor.setStroke()
+        path.stroke()
+        image.unlockFocus()
+        draggingItem.setDraggingFrame(
+            NSRect(origin: convert(event.locationInWindow, from: nil), size: size),
+            contents: image
+        )
+
+        PaneMoveAnimation.suppress()
+        let session = beginDraggingSession(with: [draggingItem], event: event, source: self)
+        session.animatesToStartingPositionsOnCancelOrFail = false
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        // A click that never became a drag is a tap: peek the pane.
+        if event.clickCount == 1, !didDrag, dragStart != nil {
+            onPeek?()
+        }
+        dragStart = nil
+        didDrag = false
+    }
+
+    // MARK: NSDraggingSource
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        context == .withinApplication ? .move : []
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        endedAt screenPoint: NSPoint,
+        operation: NSDragOperation
+    ) {
+        AgentOverviewDragContext.current = nil
+        PaneMoveAnimation.resume()
+    }
+}
+
 private struct NotificationRingView: View {
     let isActive: Bool
 
@@ -1181,150 +1590,6 @@ private struct StackDragBar: View {
 /// Uses an AppKit NSView underneath so that drag initiation works reliably
 /// next to GPU-rendered terminal surfaces (SwiftUI `.draggable` gets
 /// swallowed by the NSView-backed surface).
-private struct PaneDragBar: NSViewRepresentable {
-    let surface: Ghostty.SurfaceView
-    var onPeek: (() -> Void)? = nil
-
-    func makeNSView(context: Context) -> DragBarNSView {
-        let view = DragBarNSView()
-        view.surface = surface
-        view.onPeek = onPeek
-        return view
-    }
-
-    func updateNSView(_ nsView: DragBarNSView, context: Context) {
-        nsView.surface = surface
-        nsView.onPeek = onPeek
-    }
-}
-
-/// AppKit view that renders grip dots and initiates an NSDraggingSession on drag.
-private final class DragBarNSView: NSView, NSDraggingSource {
-    var surface: Ghostty.SurfaceView?
-    var onPeek: (() -> Void)?
-    private var isHovering = false
-    private var dragStart: NSPoint?
-
-    override var isFlipped: Bool { true }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override var acceptsFirstResponder: Bool { true }
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        setupTrackingArea()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupTrackingArea()
-    }
-
-    private func setupTrackingArea() {
-        let area = NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
-            owner: self
-        )
-        addTrackingArea(area)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let dotAlpha: CGFloat = isHovering ? 0.6 : 0.3
-        let dotColor = NSColor.secondaryLabelColor.withAlphaComponent(dotAlpha)
-        let dotSize: CGFloat = 3
-        let spacing: CGFloat = 3
-        let totalWidth = dotSize * 3 + spacing * 2
-        var x = (bounds.width - totalWidth) / 2
-        let y = (bounds.height - dotSize) / 2
-
-        for _ in 0..<3 {
-            let rect = NSRect(x: x, y: y, width: dotSize, height: dotSize)
-            dotColor.setFill()
-            NSBezierPath(ovalIn: rect).fill()
-            x += dotSize + spacing
-        }
-    }
-
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: 6)
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHovering = true
-        NSCursor.openHand.set()
-        needsDisplay = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovering = false
-        NSCursor.arrow.set()
-        needsDisplay = true
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            dragStart = nil
-            onPeek?()
-            return
-        }
-        didDrag = false
-        dragStart = convert(event.locationInWindow, from: nil)
-    }
-
-    /// True once a drag has actually begun, so the click-to-peek in `mouseUp`
-    /// fires only on a tap (mouse down + up with no drag past the threshold).
-    private var didDrag = false
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let surface, let start = dragStart else { return }
-        let current = convert(event.locationInWindow, from: nil)
-        let dx = current.x - start.x
-        let dy = current.y - start.y
-        guard dx * dx + dy * dy > 9 else { return } // 3pt threshold
-
-        dragStart = nil
-        didDrag = true
-
-        guard let item = surface.pasteboardItem() else { return }
-        let draggingItem = NSDraggingItem(pasteboardWriter: item)
-        draggingItem.setDraggingFrame(
-            NSRect(x: 0, y: 0, width: 120, height: 80),
-            contents: NSImage(size: NSSize(width: 120, height: 80), flipped: false) { rect in
-                NSColor.windowBackgroundColor.setFill()
-                NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
-                NSColor.separatorColor.setStroke()
-                let path = NSBezierPath(roundedRect: rect.insetBy(dx: 0.75, dy: 0.75), xRadius: 8, yRadius: 8)
-                path.lineWidth = 1.5
-                path.stroke()
-                return true
-            }
-        )
-
-        beginDraggingSession(with: [draggingItem], event: event, source: self)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        // A single click that never turned into a drag is a "tap" — expand
-        // (peek) the pane so the user can see more of its contents. A real
-        // drag clears dragStart in mouseDragged and sets didDrag, so this
-        // only fires on a tap. Double-clicks are already handled in mouseDown.
-        if event.clickCount == 1, !didDrag, dragStart != nil {
-            onPeek?()
-        }
-        dragStart = nil
-        didDrag = false
-    }
-
-    // MARK: NSDraggingSource
-
-    func draggingSession(
-        _ session: NSDraggingSession,
-        sourceOperationMaskFor context: NSDraggingContext
-    ) -> NSDragOperation {
-        .move
-    }
-}
-
 // MARK: - Pane Stack Drop Delegate
 
 /// Drop delegate that handles stacking a dragged terminal pane onto a target cell.
@@ -1346,12 +1611,16 @@ struct PaneStackDropDelegate: DropDelegate {
 
     func validateDrop(info: DropInfo) -> Bool {
         if info.hasItemsConforming(to: [.trmAgentOverviewId]) {
-            // An overview may only land on its own terminal pane — the drag
-            // context (set by the grab bar for the drag's duration) tells us
-            // which pane that is without waiting for pasteboard data.
-            guard onPlaceOverview != nil,
-                  let ctx = AgentOverviewDragContext.current else { return false }
-            return targetPane.id == ctx.boundSurfaceID
+            // The drag context (set by the grab bar for the drag's duration)
+            // identifies the overview being dragged without waiting for
+            // pasteboard data, which is only readable at drop time.
+            //
+            // An overview is an ordinary pane now, so it can land on any cell
+            // — stacking into it or placing beside it — exactly like a
+            // terminal. It used to be accepted only on its own anchor, which
+            // is why it could never become a sub-pane of the agent's pane.
+            guard let ctx = AgentOverviewDragContext.current else { return false }
+            return targetPane.id != ctx.overviewPaneID
         }
         // Accept if we have any callback.
         guard onStack != nil || onSwap != nil || onTransfer != nil else { return false }
@@ -1384,13 +1653,10 @@ struct PaneStackDropDelegate: DropDelegate {
     func dropEntered(info: DropInfo) {
         withAnimation(.easeInOut(duration: 0.15)) {
             dropHighlightPaneId = targetPane.id
-            if isOverviewDrag {
-                overviewDropPlacement = placement(for: info)
-            } else {
-                // Default is stack mode; Option switches to swap.
-                dropIsStackMode = !NSEvent.modifierFlags.contains(.option)
-                dropEdge = edge(for: info)
-            }
+            // Overviews use the same preview as any pane: stack by default,
+            // Option to swap. They are no longer placed by side.
+            dropIsStackMode = !NSEvent.modifierFlags.contains(.option)
+            dropEdge = edge(for: info)
         }
     }
 
@@ -1405,18 +1671,44 @@ struct PaneStackDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        // An overview drops like any other pane: stack into the target by
+        // default, Option to swap. The old path placed it on a *side* of its
+        // own terminal and nowhere else, which is why it could never become a
+        // sub-pane of the agent's pane.
         if isOverviewDrag {
-            let chosen = placement(for: info)
             let target = targetPane
+            let swap = NSEvent.modifierFlags.contains(.option)
+            let dropTargetEdge = edge(for: info)
             withAnimation(.easeInOut(duration: 0.15)) {
                 dropHighlightPaneId = nil
+                dropIsStackMode = false
                 overviewDropPlacement = nil
             }
+            // Search inside stacks too. `allPanes` lists top-level cells, so a
+            // stacked overview isn't in it — the lookup failed and the drop
+            // was rejected, which is why an overview couldn't be moved out of
+            // one group into another.
+            func findPane(_ id: ObjectIdentifier, in panes: [GridPane]) -> GridPane? {
+                for pane in panes {
+                    if case .stack(let children) = pane {
+                        if let hit = findPane(id, in: children) { return hit }
+                    } else if pane.id == id {
+                        return pane
+                    }
+                }
+                return nil
+            }
             guard let ctx = AgentOverviewDragContext.current,
-                  target.id == ctx.boundSurfaceID else { return false }
-            let uuid = ctx.overviewUUID
+                  target.id != ctx.overviewPaneID,
+                  let source = findPane(ctx.overviewPaneID, in: allPanes)
+            else { return false }
+
             DispatchQueue.main.async {
-                self.onPlaceOverview?(uuid, target, chosen)
+                if swap {
+                    self.onSwap?(source, target)
+                } else {
+                    self.onStack?(source, target, dropTargetEdge)
+                }
             }
             return true
         }

@@ -1761,6 +1761,24 @@ export fn termania_text_tap_running(handle: ?*anyopaque) u8 {
     return if (app.text_tap.running) 1 else 0;
 }
 
+/// Start the Text Tap server if it isn't already running. Returns 1 if the
+/// server is running on return, 0 if the bind failed.
+///
+/// Used by the reload handoff: a UI launched to replace a still-running one
+/// starts with `[text_tap] enabled = false` so it doesn't unlink the socket
+/// out from under its predecessor (`TextTapServer.start` removes any existing
+/// socket file), then calls this once the predecessor has exited to take the
+/// socket over. `start` is a no-op when already running.
+export fn termania_text_tap_start(handle: ?*anyopaque) u8 {
+    const app = getApp(handle) orelse return 0;
+    if (app.text_tap.running) return 1;
+    app.text_tap.start() catch |err| {
+        std.log.err("text_tap: failed to start server: {}", .{err});
+        return 0;
+    };
+    return 1;
+}
+
 /// Broadcast a layout update line to layout-subscribed Text Tap clients.
 /// `window` selects which window's subscribers receive it (clients that
 /// subscribed without a window filter receive all windows). The line is

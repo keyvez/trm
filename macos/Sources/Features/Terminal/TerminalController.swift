@@ -1714,8 +1714,26 @@ extension TerminalController {
         }
     }
 
+    /// Frame a reload successor's first window should open at, consumed once.
+    ///
+    /// The reload handoff must not open at the default size and resize
+    /// afterwards: the panes attach to their zmx daemons as soon as the window
+    /// exists, so a TUI mid-render (an agent's prompt, a pager, a full-screen
+    /// editor) would paint at the wrong width and then be reflowed by the
+    /// resize, leaving duplicated and interleaved lines. Applying it as the
+    /// window's `defaultSize` means it is correct before the first byte is
+    /// drawn, so no resize reaches the PTY at all.
+    ///
+    /// Set before the successor's window is built and cleared on first read,
+    /// so only that window uses it.
+    static var pendingReloadHandoffFrame: NSRect? = nil
+
     private var defaultSize: DefaultSize? {
-        if derivedConfig.maximize, let screen = window?.screen ?? NSScreen.main {
+        if let handoff = Self.pendingReloadHandoffFrame {
+            // Consume it: later windows size normally.
+            Self.pendingReloadHandoffFrame = nil
+            return .frame(handoff)
+        } else if derivedConfig.maximize, let screen = window?.screen ?? NSScreen.main {
             // Maximize takes priority, we take up the full screen we're on.
             return .frame(screen.visibleFrame)
         } else if focusedSurface?.initialSize != nil {

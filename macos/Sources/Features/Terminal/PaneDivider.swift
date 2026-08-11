@@ -23,6 +23,10 @@ struct PaneDivider: NSViewRepresentable {
     /// Called continuously while dragging with the proposed new fraction [0.05, 0.95].
     var onDrag: ((CGFloat) -> Void)?
 
+    /// Called when the drag ends. Lets the grid re-enable pane-move animation,
+    /// which is suppressed during a drag so resizing tracks the cursor exactly.
+    var onDragEnded: (() -> Void)?
+
     enum Axis {
         /// Horizontal divider — sits between two rows, drag up/down changes row heights.
         case horizontal
@@ -36,6 +40,7 @@ struct PaneDivider: NSViewRepresentable {
         v.currentFraction = currentFraction
         v.combinedLength = combinedLength
         v.onDrag = onDrag
+        v.onDragEnded = onDragEnded
         return v
     }
 
@@ -48,6 +53,7 @@ struct PaneDivider: NSViewRepresentable {
         }
         nsView.combinedLength = combinedLength
         nsView.onDrag = onDrag
+        nsView.onDragEnded = onDragEnded
     }
 }
 
@@ -58,6 +64,7 @@ final class DividerNSView: NSView {
     var currentFraction: CGFloat = 0.5
     var combinedLength: CGFloat = 0
     var onDrag: ((CGFloat) -> Void)?
+    var onDragEnded: (() -> Void)?
 
     private var isHovering = false
     private(set) var isDragging = false
@@ -144,6 +151,7 @@ final class DividerNSView: NSView {
         if !isHovering {
             NSCursor.pop()
         }
+        onDragEnded?()
     }
 
     // MARK: - Drawing (invisible hit area)

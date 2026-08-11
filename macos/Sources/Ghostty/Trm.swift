@@ -294,6 +294,18 @@ final class Trm {
         return termania_text_tap_running(h) != 0
     }
 
+    /// Start the Text Tap server if it isn't already running, returning true
+    /// if it's bound on return.
+    ///
+    /// Used by the reload handoff: the successor UI launches with the tap
+    /// disabled (so it can't unlink the socket its predecessor still owns)
+    /// and calls this once the predecessor exits.
+    @discardableResult
+    func startTextTapServer() -> Bool {
+        guard let h = handle else { return false }
+        return termania_text_tap_start(h) != 0
+    }
+
     /// This instance's Text Tap socket path (from config).
     var textTapSocketPath: String? {
         guard let h = handle else { return nil }
@@ -758,12 +770,25 @@ final class Trm {
         /// zmx session name backing this pane (session persistence); restore
         /// reattaches to it when the session daemon is still alive.
         var zmxSession: String?
+        /// SSH destination when this pane's shell runs on another machine.
+        /// Its zmx daemon lives on that host, so restore reconnects over SSH
+        /// rather than looking for a local session.
+        var remoteHost: String?
+        /// The remote host's zmx session name for a remote pane.
+        var remoteSession: String?
         /// For pane_type "agent_overview": index (in this pane list) of the
         /// terminal pane the overview is bound to.
         var overviewOf: Int?
         /// For pane_type "agent_overview": placement relative to its terminal
         /// ("trailing", "leading", "above", "below").
         var overviewPlacement: String?
+        /// For pane_type "agent_overview": which view mode the overview shows
+        /// ("fullHistory", "whatIAsked", "recentActivity", "whatClaudeSaid",
+        /// "errorsOnly").
+        var overviewMode: String?
+        /// For pane_type "agent_overview": multiplier on the reading type
+        /// scale, absent when at the default.
+        var overviewFontScale: Double?
         /// For stack host panes: sub-pane height fractions of the stack cell.
         var stackFractions: [Double]?
     }
@@ -817,11 +842,23 @@ final class Trm {
             if let zs = extras[i].zmxSession {
                 config.panes[i].zmxSession = zs
             }
+            if let rh = extras[i].remoteHost {
+                config.panes[i].remoteHost = rh
+            }
+            if let rs = extras[i].remoteSession {
+                config.panes[i].remoteSession = rs
+            }
             if let of = extras[i].overviewOf {
                 config.panes[i].overviewOf = of
             }
             if let op = extras[i].overviewPlacement {
                 config.panes[i].overviewPlacement = op
+            }
+            if let om = extras[i].overviewMode {
+                config.panes[i].overviewMode = om
+            }
+            if let ofs = extras[i].overviewFontScale {
+                config.panes[i].overviewFontScale = ofs
             }
             if let sf = extras[i].stackFractions {
                 config.panes[i].stackFractions = sf
@@ -984,7 +1021,11 @@ final class Trm {
         var zmxSession: String?
         var overviewOf: Int?
         var overviewPlacement: String?
+        var overviewMode: String?
+        var overviewFontScale: Double?
         var stackFractions: [Double]?
+        var remoteHost: String?
+        var remoteSession: String?
     }
 
     /// Parse stack_group values from a TOML file.
@@ -1023,6 +1064,14 @@ final class Trm {
                 if let value = parseTomlStringValue(trimmed) {
                     current?.zmxSession = value
                 }
+            } else if trimmed.hasPrefix("remote_host") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.remoteHost = value
+                }
+            } else if trimmed.hasPrefix("remote_session") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.remoteSession = value
+                }
             } else if trimmed.hasPrefix("overview_of") {
                 if let eqIdx = trimmed.firstIndex(of: "=") {
                     let raw = trimmed[trimmed.index(after: eqIdx)...].trimmingCharacters(in: .whitespaces)
@@ -1031,6 +1080,16 @@ final class Trm {
             } else if trimmed.hasPrefix("overview_placement") {
                 if let value = parseTomlStringValue(trimmed) {
                     current?.overviewPlacement = value
+                }
+            } else if trimmed.hasPrefix("overview_mode") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.overviewMode = value
+                }
+            } else if trimmed.hasPrefix("overview_font_scale") {
+                if let eqIdx = trimmed.firstIndex(of: "=") {
+                    let raw = trimmed[trimmed.index(after: eqIdx)...]
+                        .trimmingCharacters(in: .whitespaces)
+                    current?.overviewFontScale = Double(raw)
                 }
             } else if trimmed.hasPrefix("stack_fractions") {
                 if let value = parseTomlStringValue(trimmed) {

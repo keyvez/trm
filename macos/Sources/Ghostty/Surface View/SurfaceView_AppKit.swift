@@ -153,6 +153,15 @@ extension Ghostty {
         /// persisted so autosave TOML never leaks the zmx wrapper.
         var logicalCommand: String?
 
+        /// SSH destination when this pane's shell runs on another machine
+        /// (`user@host`). Set only for remote panes; nil means local.
+        var remoteHost: String?
+
+        /// The zmx session name on the remote host backing a remote pane.
+        /// Distinct from `zmxSessionName`, which names a *local* daemon —
+        /// a remote pane has no local session to reattach.
+        var remoteZmxSession: String?
+
         /// True when the surface should show a highlight effect (e.g., when presented via goto_split).
         @Published private(set) var highlighted: Bool = false
 
@@ -1346,6 +1355,32 @@ extension Ghostty {
                 if let controller = self.window?.windowController as? BaseTerminalController {
                     controller.newRow(nil)
                     return true
+                }
+            }
+
+            // Cmd+Ctrl+Arrow → Move this pane's agent overview around it.
+            // The overview has no surface and so never holds focus, which is
+            // why the plain move shortcuts can't reach it: they resolve
+            // through focusedSurface and always land on a terminal.
+            if event.modifierFlags.contains([.command, .control]),
+               !event.modifierFlags.contains(.shift) {
+                if let controller = self.window?.windowController as? BaseTerminalController {
+                    switch event.keyCode {
+                    case 0x7B: // Left arrow
+                        controller.moveFocusedPaneOverview(.left)
+                        return true
+                    case 0x7C: // Right arrow
+                        controller.moveFocusedPaneOverview(.right)
+                        return true
+                    case 0x7D: // Down arrow
+                        controller.moveFocusedPaneOverview(.down)
+                        return true
+                    case 0x7E: // Up arrow
+                        controller.moveFocusedPaneOverview(.up)
+                        return true
+                    default:
+                        break
+                    }
                 }
             }
 

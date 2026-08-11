@@ -10,10 +10,21 @@ struct WatermarkView: View {
     let cellHeight: CGFloat
     let paneId: Int
 
+    /// True while Cmd+Shift is held. The watermark normally sits at 0.07 —
+    /// a background texture — so peeking has to override it outright rather
+    /// than nudge it.
+    var isPeeking: Bool = false
+
     private static let baselineOpacity: Double = 0.07
     private static let highlightOpacity: Double = 0.80
+    private static let peekOpacity: Double = 0.95
 
     @State private var opacity: Double = baselineOpacity
+
+    /// Opacity to draw at: peek wins over the transient highlight animation.
+    private var effectiveOpacity: Double {
+        isPeeking ? Self.peekOpacity : opacity
+    }
 
     var body: some View {
         if !text.isEmpty {
@@ -23,7 +34,8 @@ struct WatermarkView: View {
                     weight: .bold,
                     design: .monospaced
                 ))
-                .foregroundColor(.primary.opacity(opacity))
+                .foregroundColor(.primary.opacity(effectiveOpacity))
+                .animation(.easeOut(duration: 0.12), value: isPeeking)
                 .allowsHitTesting(false)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onReceive(NotificationCenter.default.publisher(for: Trm.highlightPane)) { notification in

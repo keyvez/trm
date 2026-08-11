@@ -76,12 +76,140 @@ struct AgentTranscript: Equatable {
         let detail: String?
         /// False while the call has no matching tool_result yet.
         let finished: Bool
+        /// True when the tool returned an error (`is_error` on the result).
+        /// Errors are a needle-in-a-haystack in a long session — a few among
+        /// hundreds of calls — so they get their own view.
+        var isError: Bool = false
+        /// First line of the error text, when this call failed.
+        var errorText: String? = nil
+    }
+}
+
+/// Which sections an agent overview shows.
+///
+/// The sections are independent and additive, not alternatives: watching the
+/// commands an agent is running while also reading its reply is the normal
+/// case, so this is a set rather than a single choice. An empty set falls back
+/// to showing everything — a pane that renders nothing would just look broken.
+struct AgentOverviewSections: OptionSet, Hashable {
+    let rawValue: Int
+
+    /// The human's last prompt.
+    static let prompt = AgentOverviewSections(rawValue: 1 << 0)
+    /// Tool calls — the commands the agent is running.
+    static let activity = AgentOverviewSections(rawValue: 1 << 1)
+    /// The agent's prose reply.
+    static let reply = AgentOverviewSections(rawValue: 1 << 2)
+    /// Tool calls that failed.
+    static let errors = AgentOverviewSections(rawValue: 1 << 3)
+
+    static let all: AgentOverviewSections = [.prompt, .activity, .reply, .errors]
+    /// What a new overview shows: everything except the errors list, which is
+    /// noise until something actually fails.
+    static let `default`: AgentOverviewSections = [.prompt, .activity, .reply]
+
+    /// The individual sections, in display order, for building menus.
+    static let allCases: [AgentOverviewSections] = [.prompt, .activity, .reply, .errors]
+
+    var menuTitle: String {
+        switch self {
+        case .prompt: return "What I Asked"
+        case .activity: return "Recent Activity"
+        case .reply: return "What Claude Said"
+        case .errors: return "Errors Only"
+        default: return "Sections"
+        }
+    }
+
+    var menuSubtitle: String {
+        switch self {
+        case .prompt: return "Your last prompt"
+        case .activity: return "Commands the agent is running"
+        case .reply: return "The agent's reply"
+        case .errors: return "Tool calls that failed"
+        default: return ""
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .prompt: return "person.bubble"
+        case .activity: return "terminal"
+        case .reply: return "sparkle"
+        case .errors: return "exclamationmark.triangle"
+        default: return "list.bullet.rectangle"
+        }
+    }
+
+    /// Short label for the header bar, naming the selection at a glance.
+    var barLabel: String {
+        if self == Self.all { return "Everything" }
+        if isEmpty { return "Everything" }
+        let names = Self.allCases.filter { contains($0) }
+        if names.count == 1 { return names[0].menuTitle }
+        return "\(names.count) sections"
+    }
+
+    /// Serialised for the session TOML as a stable comma-separated list, so a
+    /// checkpoint stays readable and survives reordering of the flags.
+    var tomlValue: String {
+        let tokens: [String] = Self.allCases.compactMap { section in
+            guard contains(section) else { return nil }
+            switch section {
+            case .prompt: return "prompt"
+            case .activity: return "activity"
+            case .reply: return "reply"
+            case .errors: return "errors"
+            default: return nil
+            }
+        }
+        return tokens.joined(separator: ",")
+    }
+
+    init(rawValue: Int) { self.rawValue = rawValue }
+
+    /// Parse the TOML form. Unknown tokens are ignored; an empty or
+    /// unparseable value means "everything", matching the render fallback.
+    init(tomlValue: String) {
+        var result: AgentOverviewSections = []
+        for token in tomlValue.split(separator: ",") {
+            switch token.trimmingCharacters(in: .whitespaces) {
+            case "prompt": result.insert(.prompt)
+            case "activity": result.insert(.activity)
+            case "reply": result.insert(.reply)
+            case "errors": result.insert(.errors)
+            default: break
+            }
+        }
+        self = result.isEmpty ? Self.default : result
     }
 }
 
 // MARK: - Reader
 
 enum AgentTranscriptReader {
+
+    /// First non-empty line of a `tool_result` block's content.
+    ///
+    /// The content is either a plain string or an array of typed parts, so
+    /// both shapes are handled. Truncated because this renders in a narrow
+    /// pane — the first line carries the actual error nearly every time.
+    static func firstLine(ofToolResult block: [String: Any]) -> String? {
+        var text: String? = nil
+        if let s = block["content"] as? String {
+            text = s
+        } else if let parts = block["content"] as? [[String: Any]] {
+            text = parts.compactMap { $0["text"] as? String }.first
+        }
+        guard let raw = text else { return nil }
+        let line = raw
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first(where: { !$0.isEmpty })
+        guard let line, !line.isEmpty else { return nil }
+        return line.count > 300 ? String(line.prefix(300)) + "…" : line
+    }
+
     /// Bytes read from the end of the transcript. Claude transcripts grow to
     /// many megabytes over a long session; the last turn is always at the tail,
     /// so reading the whole file would be wasted I/O on every poll.
@@ -241,11 +369,18 @@ enum AgentTranscriptReader {
                             sawToolResult = true
                             if let id = block["tool_use_id"] as? String,
                                let existing = tools[id] {
+                                // `is_error` marks a failed call. Capture the
+                                // first line of the message so the errors view
+                                // can say what went wrong without re-reading
+                                // the transcript.
+                                let failed = (block["is_error"] as? Bool) ?? false
                                 tools[id] = .init(
                                     id: existing.id,
                                     name: existing.name,
                                     detail: existing.detail,
-                                    finished: true
+                                    finished: true,
+                                    isError: failed,
+                                    errorText: failed ? Self.firstLine(ofToolResult: block) : nil
                                 )
                             }
                         case "text":
