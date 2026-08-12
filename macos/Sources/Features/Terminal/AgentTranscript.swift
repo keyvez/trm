@@ -178,6 +178,11 @@ struct AgentOverviewSections: OptionSet, Hashable {
             case "activity": result.insert(.activity)
             case "reply": result.insert(.reply)
             case "errors": result.insert(.errors)
+            // Older checkpoints wrote a single mode name rather than a token
+            // list. "fullHistory" meant every section; without this it fell
+            // through to `default` and the saved mode was silently replaced
+            // by `.default` on every restore.
+            case "fullHistory": result.formUnion(.all)
             default: break
             }
         }

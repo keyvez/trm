@@ -6375,6 +6375,10 @@ class BaseTerminalController: NSWindowController,
         liveSummaryManager.toggle()
     }
 
+    @IBAction func showSessionBrowser(_ sender: Any?) {
+        SessionBrowserController.shared.show(ghostty: ghostty)
+    }
+
     @IBAction func newRow(_ sender: Any?) {
         guard let surface = focusedSurface?.surface else { return }
         ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_DOWN)

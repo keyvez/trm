@@ -27,7 +27,7 @@ enum ZmxSessionManager {
 
     /// Path to the bundled zmx binary. In debug builds falls back to the
     /// repo's zig-out so `zig build` output works without a full app bundle.
-    static var zmxPath: String? {
+    nonisolated static var zmxPath: String? {
         if let bundled = Bundle.main.path(forAuxiliaryExecutable: "zmx") {
             return bundled
         }
@@ -41,7 +41,7 @@ enum ZmxSessionManager {
     /// Directory holding zmx session sockets. Deliberately short and stable:
     /// Unix socket paths are capped at ~104 bytes on macOS, and the default
     /// /tmp location is wiped on reboot which would strand session bookkeeping.
-    static var zmxDir: String {
+    nonisolated static var zmxDir: String {
         let dir = NSHomeDirectory() + "/.trm/zmx"
         if !FileManager.default.fileExists(atPath: dir) {
             try? FileManager.default.createDirectory(
@@ -139,7 +139,7 @@ enum ZmxSessionManager {
     }
 
     /// First child process of `parent`, if any.
-    private static func firstChildPid(of parent: pid_t) -> pid_t? {
+    nonisolated private static func firstChildPid(of parent: pid_t) -> pid_t? {
         let count = proc_listallpids(nil, 0)
         guard count > 0 else { return nil }
         var pids = [pid_t](repeating: 0, count: Int(count) + 32)
@@ -197,9 +197,253 @@ enum ZmxSessionManager {
         return listSessions().filter { !referenced.contains($0) }
     }
 
+    /// One saved window: the TOML that describes it and the sessions it owns,
+    /// in pane order. This is the grouping the session browser displays —
+    /// sessions belong to windows, and showing them flat loses which panes
+    /// were arranged together.
+    struct SessionGroup: Identifiable, Sendable {
+        /// Display name: the session file's base name (`recovered`,
+        /// `_autosave_0`), or a synthetic label for ungrouped sessions.
+        let name: String
+        /// Path to the session TOML, or nil for the orphan group.
+        let path: String?
+        /// Session names this window references, in pane order.
+        let sessionNames: [String]
+        /// Watermark per session name, where the window's TOML set one. This
+        /// is the pane's own label ("trm", "gooshi"), so it identifies a pane
+        /// far better than its scrollback does.
+        let watermarks: [String: String]
+        /// True for the synthetic group holding sessions no TOML references.
+        let isOrphanGroup: Bool
+
+        var id: String { path ?? "__orphans__" }
+    }
+
+    /// Map every saved session TOML to the sessions it references, in pane
+    /// order, keeping only sessions whose daemon is still alive. Any live
+    /// session left over lands in a trailing orphan group.
+    static func sessionGroups() -> [SessionGroup] {
+        let fm = FileManager.default
+        let dir = SessionManager.sessionsDirectory
+        let live = Set(listSessions())
+
+        var groups: [SessionGroup] = []
+        var claimed: Set<String> = []
+
+        let files = ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? [])
+            .filter { $0.hasSuffix(".toml") }
+            .sorted()
+
+        for file in files {
+            let url = dir.appendingPathComponent(file)
+            guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
+
+            // Pane order matters, so collect in document order rather than
+            // using the Set-based referencedSessions(). `watermark` and
+            // `zmx_session` are separate keys in the same [[panes]] block and
+            // can appear in either order, so both are buffered per block and
+            // paired when the block ends.
+            var names: [String] = []
+            var marks: [String: String] = [:]
+            var blockSession: String?
+            var blockMark: String?
+
+            func flushBlock() {
+                guard let session = blockSession, live.contains(session) else {
+                    blockSession = nil
+                    blockMark = nil
+                    return
+                }
+                names.append(session)
+                claimed.insert(session)
+                if let mark = blockMark, !mark.isEmpty { marks[session] = mark }
+                blockSession = nil
+                blockMark = nil
+            }
+
+            func unquoted(_ line: String) -> String? {
+                guard let eq = line.firstIndex(of: "=") else { return nil }
+                var value = String(line[line.index(after: eq)...])
+                    .trimmingCharacters(in: .whitespaces)
+                if value.hasPrefix("\"") && value.hasSuffix("\"") && value.count >= 2 {
+                    value = String(value.dropFirst().dropLast())
+                }
+                return value.isEmpty ? nil : value
+            }
+
+            for line in content.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed == "[[panes]]" {
+                    // A window can reference a session whose daemon has since
+                    // died (that is what blocks Reload Latest UI); flushBlock
+                    // drops those so the browser only lists what can open.
+                    flushBlock()
+                } else if trimmed.hasPrefix("zmx_session") {
+                    blockSession = unquoted(trimmed)
+                } else if trimmed.hasPrefix("watermark") {
+                    blockMark = unquoted(trimmed)
+                }
+            }
+            flushBlock()
+
+            guard !names.isEmpty else { continue }
+            groups.append(SessionGroup(
+                name: String(file.dropLast(5)),
+                path: url.path,
+                sessionNames: names,
+                watermarks: marks,
+                isOrphanGroup: false
+            ))
+        }
+
+        let orphans = listSessions().filter { !claimed.contains($0) }
+        if !orphans.isEmpty {
+            groups.append(SessionGroup(
+                name: "Ungrouped",
+                path: nil,
+                sessionNames: orphans,
+                watermarks: [:],
+                isOrphanGroup: true
+            ))
+        }
+        return groups
+    }
+
     /// Kill one session (its daemon and child process) via `zmx kill`.
     static func killSession(_ name: String) {
         runZmx(["kill", name])
+    }
+
+    // MARK: - Introspection (Session Browser)
+
+    /// Everything the session browser needs to describe one live session.
+    struct SessionInfo: Identifiable, Sendable {
+        let name: String
+        /// Trailing scrollback lines, as the session last rendered them.
+        /// Working directory of the session's shell, if resolvable.
+        let cwd: String?
+        /// Foreground command running in the session (e.g. `claude`, `ssh mini`).
+        let command: String?
+        /// Whether any UI client is currently attached.
+        let attached: Bool
+        /// Whether a saved session TOML references this session.
+        let referenced: Bool
+        /// The pane's watermark from its window's TOML, when it has one.
+        var watermark: String?
+
+        var id: String { name }
+
+        /// Short label for the cwd: last two path components.
+        var shortCwd: String? {
+            guard let cwd, cwd != "/" else { return nil }
+            let parts = cwd.split(separator: "/").suffix(2)
+            return parts.isEmpty ? nil : parts.joined(separator: "/")
+        }
+    }
+
+    /// Working directory of a process.
+    nonisolated private static func cwd(ofPid pid: pid_t) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+        return withUnsafePointer(to: &info.pvi_cdir.vip_path) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                String(cString: $0)
+            }
+        }
+    }
+
+    /// The most interesting command in a session: the shell's first child
+    /// (`claude`, `ssh`, …), or nil for a bare shell.
+    nonisolated private static func command(ofShellPid shellPid: pid_t) -> String? {
+        guard let childPid = firstChildPid(of: shellPid) else { return nil }
+        var buf = [CChar](repeating: 0, count: Int(4 * MAXPATHLEN))
+        guard proc_pidpath(childPid, &buf, UInt32(buf.count)) > 0 else { return nil }
+        let base = (String(cString: buf) as NSString).lastPathComponent
+        return base.isEmpty ? nil : base
+    }
+
+    /// Whether a session currently has an attached client. `zmx list` reports
+    /// a `clients=N` field per session; N > 0 means some UI owns it.
+    static func attachedSessions() -> Set<String> {
+        guard let text = runZmxCapturing(["list"]) else { return [] }
+        var result: Set<String> = []
+        for line in text.components(separatedBy: .newlines) {
+            guard let name = field(in: line, key: "name="),
+                  let clients = field(in: line, key: "clients="),
+                  let count = Int(clients), count > 0 else { continue }
+            result.insert(name)
+        }
+        return result
+    }
+
+    /// Extract a whitespace-delimited `key=value` field from a `zmx list` line.
+    nonisolated private static func field(in line: String, key: String) -> String? {
+        for token in line.split(whereSeparator: { $0 == " " || $0 == "\t" }) {
+            if token.hasPrefix(key) { return String(token.dropFirst(key.count)) }
+        }
+        return nil
+    }
+
+    /// Build the full session list for the browser.
+    ///
+    /// Every entry costs several process spawns (`zmx history`, and `lsof` for
+    /// an uncached shell pid). Done serially across a few dozen sessions that
+    /// runs into seconds, so the per-session work is fanned out across a
+    /// concurrent queue and only the assembled result is returned.
+    ///
+    /// Callers must invoke this off the main actor.
+    nonisolated static func allSessionInfoConcurrently(
+        names: [String],
+        referenced: Set<String>,
+        attached: Set<String>,
+        shellPids: [String: pid_t]
+    ) -> [SessionInfo] {
+        var results = [SessionInfo?](repeating: nil, count: names.count)
+        let lock = NSLock()
+
+        DispatchQueue.concurrentPerform(iterations: names.count) { index in
+            let name = names[index]
+            let pid = shellPids[name]
+            let info = SessionInfo(
+                name: name,
+                cwd: pid.flatMap { cwd(ofPid: $0) },
+                command: pid.flatMap { command(ofShellPid: $0) },
+                attached: attached.contains(name),
+                referenced: referenced.contains(name)
+            )
+            lock.lock()
+            results[index] = info
+            lock.unlock()
+        }
+
+        return results.compactMap { $0 }
+    }
+
+    /// Run zmx and return stdout as a string. Used by the browser's
+    /// introspection helpers; never used for attach.
+    nonisolated private static func runZmxCapturing(_ args: [String]) -> String? {
+        guard let zmx = zmxPath else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: zmx)
+        process.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["ZMX_DIR"] = zmxDir
+        process.environment = env
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            logger.error("zmx \(args.joined(separator: " ")) failed: \(error.localizedDescription)")
+            return nil
+        }
+        // Read before waiting: a large history would otherwise fill the pipe
+        // buffer and deadlock against waitUntilExit().
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(data: data, encoding: .utf8)
     }
 
     /// Kill every trm-owned session. Used by "Terminate All & Quit".

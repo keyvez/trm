@@ -340,6 +340,7 @@ class AppDelegate: NSObject,
         // Setup our menu
         setupMenuImages()
         setupSplitBrowserMenuItem()
+        setupSessionBrowserMenuItem()
 
         // Setup signal handlers
         setupSignals()
@@ -1046,6 +1047,28 @@ class AppDelegate: NSObject,
         )
         item.keyEquivalentModifierMask = [.command, .shift]
         item.setImageIfDesired(systemSymbolName: "globe")
+        viewMenu.addItem(item)
+    }
+
+    /// Add "Session Browser" to the View menu with Cmd+Shift+S.
+    ///
+    /// Added in code rather than the XIB for the same reason as Open Browser
+    /// above: the action lives on the terminal controller (the first
+    /// responder), and items wired that way from MainMenu.xib do not survive
+    /// nib loading here.
+    private func setupSessionBrowserMenuItem() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        guard let viewMenuItem = mainMenu.items.first(where: { $0.title == "View" }),
+              let viewMenu = viewMenuItem.submenu else { return }
+
+        viewMenu.addItem(NSMenuItem.separator())
+        let item = NSMenuItem(
+            title: "Session Browser",
+            action: #selector(BaseTerminalController.showSessionBrowser(_:)),
+            keyEquivalent: "s"
+        )
+        item.keyEquivalentModifierMask = [.command, .shift]
+        item.setImageIfDesired(systemSymbolName: "rectangle.stack")
         viewMenu.addItem(item)
     }
 

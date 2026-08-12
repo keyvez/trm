@@ -14,6 +14,15 @@ Local patches (record every deviation from upstream here):
     the daemon on a state-tracking failure)
   - src/main.zig Daemon.handleOutput (~1165): `try`
   - src/util.zig test helpers/tests (13 sites): `try`
+- src/main.zig client accept (~2571): claim leadership on connect when the
+  session has none (`if (daemon.leader_client_fd == null) setLeader`).
+  Upstream promotes a leader only on *user input* (Daemon.handleInput), and
+  only the leader may resize the pty (Daemon.handleResize). A pane restored
+  into a session whose previous client disconnected therefore sent its
+  geometry to a leaderless daemon, had the resize dropped, and rendered at
+  the stale size — unresponsive until someone typed into it, which read as
+  trm freezing on restore. Input-based promotion still overrides, so an
+  active window reclaims leadership normally.
 
 To update: clone upstream at a new commit, copy src/*.zig + LICENSE over,
 re-apply the patches listed above, update this file, and run

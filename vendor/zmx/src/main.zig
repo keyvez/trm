@@ -2568,6 +2568,16 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                 "client connected fd={d} total={d}",
                 .{ client_fd, daemon.clients.items.len },
             );
+            // A session left without a leader (its previous client
+            // disconnected) otherwise waits for *input* to promote one, and
+            // only the leader may resize the pty. A restored pane sends its
+            // geometry immediately but no keystrokes, so its resize was
+            // dropped and the pane rendered at stale size, unresponsive until
+            // typed into. Claiming the vacant leadership on connect makes
+            // that first resize land.
+            if (daemon.leader_client_fd == null) {
+                try daemon.setLeader(client);
+            }
         }
 
         const inp_flags = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL;

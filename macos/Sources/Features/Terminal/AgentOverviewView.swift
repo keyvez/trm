@@ -28,7 +28,11 @@ struct AgentOverviewView: View {
             header
             Divider().opacity(0.5)
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                // Lazy so a long message only lays out the blocks actually on
+                // screen. A plain VStack sized every block up front, which a
+                // window full of overview panes pays for all at once on
+                // restore.
+                LazyVStack(alignment: .leading, spacing: 20) {
                     // An empty selection renders nothing, which just looks
                     // broken — fall back to everything.
                     let sections = pane.sections.isEmpty ? .all : pane.sections
@@ -410,6 +414,21 @@ struct AgentOverviewView: View {
 
     // MARK: - Code
 
+    /// Height of a code block's scrolling area.
+    ///
+    /// A GeometryReader fills whatever it is offered vertically instead of
+    /// sizing to its content, so the block needs a definite height. Deriving it
+    /// from the line count keeps the block exactly as tall as its code, which
+    /// is what the previous self-sizing layout produced.
+    private func codeBlockHeight(_ text: String) -> CGFloat {
+        let lines = text.components(separatedBy: "\n").count
+        let lineHeight = scaled(12) * 1.2 + 2.5
+        // Cap tall blocks so one long listing can't push everything else out
+        // of view; the block scrolls vertically with the message when clipped.
+        let contentHeight = min(CGFloat(lines), 40) * lineHeight
+        return contentHeight + 18
+    }
+
     /// Code renders monospaced in its own tinted block. It scrolls horizontally
     /// on its own so a long line never widens the whole pane.
     private func codeBlock(language: String?, text: String) -> some View {
@@ -423,16 +442,36 @@ struct AgentOverviewView: View {
                     .padding(.top, 8)
                     .padding(.bottom, 2)
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(text)
-                    .font(.system(size: scaled(12), design: .monospaced))
-                    .lineSpacing(2.5)
-                    .foregroundStyle(.primary.opacity(0.88))
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 9)
-                    .padding(.top, language == nil ? 9 : 2)
+            // The width here must come from the parent and nothing else.
+            //
+            // A horizontal ScrollView reports its *ideal* (unbounded) width to
+            // its parent, while the `.frame(maxWidth: .infinity)` below wants
+            // the parent's width — each answer changed the other's proposal, so
+            // SwiftUI's layout never reached a fixed point. With several
+            // overview panes on screen it re-ran sizing every frame and pinned
+            // a core at 100% (visible in a sample as ScrollViewLayoutComputer →
+            // sizeChildrenIdeally → TextLayoutEngine, with ViewSizeCache
+            // missing every time).
+            //
+            // Reading the available width from the enclosing geometry and
+            // pinning the scroll view to it breaks the cycle: the proposal now
+            // flows one way, parent to child. The long-line behaviour the block
+            // is here for is unchanged — the text still scrolls inside this
+            // fixed width instead of widening the pane.
+            GeometryReader { geo in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(text)
+                        .font(.system(size: scaled(12), design: .monospaced))
+                        .lineSpacing(2.5)
+                        .foregroundStyle(.primary.opacity(0.88))
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 9)
+                        .padding(.top, language == nil ? 9 : 2)
+                }
+                .frame(width: geo.size.width)
             }
+            .frame(height: codeBlockHeight(text))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
