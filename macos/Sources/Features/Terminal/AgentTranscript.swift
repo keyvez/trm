@@ -224,7 +224,15 @@ enum AgentTranscriptReader {
     /// one 2 MB PNG becomes a ~2.7 MB line. A small tail window can land
     /// entirely inside one such line and parse to nothing — observed live as
     /// the overview going blank the moment screenshots entered the session.
-    private static let tailBytes: UInt64 = 12 * 1024 * 1024
+    ///
+    /// The window is re-read and re-parsed on every 1.5 s poll of every
+    /// overview pane, so its size is a recurring per-pane cost, not a one-off.
+    /// Measured against a real 69 MB transcript, a 12 MB window cost ~156 ms to
+    /// read and JSON-parse: six overview panes therefore spent ~0.94 s of every
+    /// 1.5 s tick on this alone — most of a core, permanently, plus the
+    /// transient Foundation objects to match. 3 MB still clears a ~2.7 MB
+    /// base64 screenshot line while cutting that cost by four.
+    private static let tailBytes: UInt64 = 3 * 1024 * 1024
 
     /// Bytes scanned when the tail window contained no human prompt.
     ///
@@ -596,9 +604,9 @@ enum AgentTranscriptReader {
 /// `custom_tool_call`/`function_call` and their `*_output` twins matched by
 /// `call_id`, and `session_meta` (whose `cwd` supports pane matching).
 enum CodexTranscriptReader {
-    /// Same sizing rationale as AgentTranscriptReader: single lines can be
-    /// large, and a turn spans many entries.
-    private static let tailBytes: UInt64 = 12 * 1024 * 1024
+    /// Same sizing rationale as AgentTranscriptReader, including the polling
+    /// cost that motivates keeping this window small.
+    private static let tailBytes: UInt64 = 3 * 1024 * 1024
 
     private static let maxActivity = 12
 

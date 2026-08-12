@@ -711,7 +711,13 @@ struct TrmGridView: View {
         case .plugin(let pluginPane):
             return AnyView(pluginPaneView(pluginPane))
         case .agentOverview(let agentPane):
-            return AnyView(AgentOverviewView(pane: agentPane, onClose: onCloseAgentOverview))
+            // Sized to fill its cell. The cell already proposes a definite
+            // size, so this only stops a short message from leaving the pane
+            // partly empty.
+            return AnyView(
+                AgentOverviewView(pane: agentPane, onClose: onCloseAgentOverview)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            )
         case .stack(let children):
             return AnyView(stackedPaneView(children, stackID: pane.id))
         }
@@ -997,7 +1003,10 @@ struct TrmGridView: View {
         case .plugin(let pluginPane):
             return AnyView(pluginPaneView(pluginPane))
         case .agentOverview(let agentPane):
-            return AnyView(AgentOverviewView(pane: agentPane, onClose: onCloseAgentOverview))
+            return AnyView(
+                AgentOverviewView(pane: agentPane, onClose: onCloseAgentOverview)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            )
         case .stack:
             // Nested stacks not supported — flatten would have happened at model level
             return AnyView(EmptyView())

@@ -154,9 +154,29 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             self.fontScale = min(max(CGFloat(saved), Self.minFontScale), Self.maxFontScale)
         }
         refresh()
+        // Stagger the polls across panes rather than firing them together.
+        //
+        // Restoring a saved window creates every overview in the same runloop
+        // turn, so their timers all landed on the same 1.5 s boundary: six
+        // panes would each read and parse a multi-megabyte transcript tail at
+        // the same instant, then again 1.5 s later. Spreading the phase evenly
+        // over the interval keeps the same per-pane refresh rate while turning
+        // one large synchronised burst into small separated ones.
+        let phase = Self.nextPollPhase()
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
+        timer?.fireDate = Date().addingTimeInterval(phase)
+    }
+
+    /// Rotating phase offset handed to each new overview pane, so panes created
+    /// together do not share a tick.
+    private static var pollPhaseCounter: Int = 0
+    private static func nextPollPhase() -> TimeInterval {
+        // Six slots across the 1.5 s interval: 0, 0.25, 0.5, … 1.25.
+        let slot = pollPhaseCounter % 6
+        pollPhaseCounter += 1
+        return 1.5 * (Double(slot) / 6.0)
     }
 
     deinit {

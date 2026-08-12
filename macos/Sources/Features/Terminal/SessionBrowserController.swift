@@ -175,8 +175,21 @@ final class SessionBrowserModel: ObservableObject {
             withConfigPath: path
         )
 
-        // The session now has a client; reflect that in the list.
-        reload()
+        // Dismiss rather than reload. Reloading kept the browser on screen and
+        // re-laid-out its whole session list at the moment the new terminal
+        // window was being built, so two SwiftUI graphs fought for the same
+        // layout pass and the app pinned a core. The browser has done its job
+        // once the window is open, and closing it also tears down the hosted
+        // view (see `windowWillClose`), so a list refresh isn't needed either.
+        dismissAfterOpening()
+    }
+
+    /// Close the browser once it has opened a window.
+    ///
+    /// The model reaches its window through `hostWindow` — the controller owns
+    /// the actual `window` property.
+    private func dismissAfterOpening() {
+        hostWindow?.performClose(nil)
     }
 
     /// Quote and escape a string for use as a TOML basic-string value.
@@ -283,10 +296,10 @@ final class SessionBrowserModel: ObservableObject {
             return
         }
 
-        // A group whose panes are all still on screen is the common case for the
-        // autosave of the *current* window. Restoring it would attach a second
-        // client to every one of those live sessions and hang them, so reveal
-        // the existing window instead.
+        // A group whose panes are all still on screen is the common case for
+        // the autosave of the *current* window. Restoring it would build a
+        // second window onto the same sessions, so reveal the one already
+        // showing them instead.
         let live = group.sessions.filter { existingController(for: $0.name) != nil }
         if live.count == group.sessions.count, let first = live.first {
             revealExisting(first.name)
@@ -317,7 +330,9 @@ final class SessionBrowserModel: ObservableObject {
             withGridConfig: config,
             withConfigPath: path
         )
-        reload()
+        // See `open`: dismiss instead of reloading, so the browser's list isn't
+        // re-laid-out while the new window is being built.
+        dismissAfterOpening()
     }
 
     /// Confirm, then terminate every session in a window.
@@ -422,12 +437,6 @@ final class SessionBrowserController: NSWindowController, NSWindowDelegate {
         window.center()
         super.init(window: window)
         window.delegate = self
-
-        let hosting = NSHostingView(rootView: SessionBrowserView(model: model))
-        window.contentView = hosting
-        // Give the hosting view first responder so its buttons are live as
-        // soon as the window appears, rather than after a stray click.
-        window.initialFirstResponder = hosting
         model.hostWindow = window
     }
 
@@ -435,14 +444,43 @@ final class SessionBrowserController: NSWindowController, NSWindowDelegate {
         fatalError("init(coder:) is not supported")
     }
 
+    /// Install the SwiftUI content. Deferred to `show` rather than done once in
+    /// `init` so that closing the browser can tear it down again — see
+    /// `windowWillClose`.
+    private func installContentView() {
+        guard let window, !(window.contentView is NSHostingView<SessionBrowserView>) else { return }
+        let hosting = NSHostingView(rootView: SessionBrowserView(model: model))
+        window.contentView = hosting
+        // Give the hosting view first responder so its buttons are live as
+        // soon as the window appears, rather than after a stray click.
+        window.initialFirstResponder = hosting
+    }
+
     /// Show the browser, refreshing its contents each time it is summoned.
     func show(ghostty: Ghostty.App?) {
+        installContentView()
         model.ghostty = ghostty
         model.reload()
         // Activate first, then key the window: ordering it front while the app
         // is still inactive can leave it visible but not accepting clicks.
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Drop the hosted SwiftUI content when the browser is dismissed.
+    ///
+    /// The window is a singleton kept alive across shows
+    /// (`isReleasedWhenClosed = false`), so without this its NSHostingView —
+    /// and the whole SwiftUI view graph behind it, including the session list's
+    /// LazyVStack — stayed resident after the window was closed. It kept
+    /// participating in the app's layout passes: every window resize drove
+    /// AppKit's `_layoutSubtreeWithOldSize:` into `NSHostingView.layout()` for
+    /// this invisible view, which re-ran `LazyStack.measureEstimates` over the
+    /// session tiles and pinned a core for as long as the resize continued.
+    /// Tearing the content down on close means a dismissed browser costs
+    /// nothing; `show` rebuilds it.
+    func windowWillClose(_ notification: Notification) {
+        window?.contentView = nil
     }
 
     // This is called when "escape" is pressed.

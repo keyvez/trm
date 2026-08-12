@@ -56,7 +56,18 @@ struct SessionBrowserView: View {
             emptyState
         } else {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 20) {
+                // Deliberately a plain VStack, not a LazyVStack.
+                //
+                // Each group renders a LazyVGrid of tiles, and nesting one lazy
+                // container in another makes each one's size estimate depend on
+                // the other's: the outer stack asks for a height the grid can
+                // only give once it knows its width, which the outer stack is
+                // still deciding. SwiftUI churned text metrics through that
+                // cycle and pinned a core whenever the browser was open.
+                //
+                // A window list is a handful of groups, so laying them out
+                // eagerly costs nothing and removes the negotiation entirely.
+                VStack(alignment: .leading, spacing: 20) {
                     ForEach(model.groups) { group in
                         GroupSection(
                             group: group,
@@ -106,14 +117,6 @@ private struct GroupSection: View {
 
     /// Up to three columns, but never more columns than panes — a two-pane
     /// window shouldn't leave a third of the row empty.
-    private var gridColumns: [GridItem] {
-        let count = min(3, max(1, group.sessions.count))
-        return Array(
-            repeating: GridItem(.flexible(minimum: 180), spacing: 10, alignment: .top),
-            count: count
-        )
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -146,13 +149,39 @@ private struct GroupSection: View {
             // Panes lay out as a grid, mirroring how they actually sit in the
             // window. A full-width row per pane wastes horizontal space on
             // short previews and pushes later panes off screen.
-            LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 10) {
-                ForEach(group.sessions) { session in
-                    SessionTile(
-                        session: session,
-                        onOpen: { onOpen(session) },
-                        onTerminate: { onTerminate(session) }
-                    )
+            //
+            // Built from plain stacks rather than LazyVGrid: inside a
+            // ScrollView the lazy grid (a lazy V of lazy H rows) has to
+            // estimate the size of tiles it has not built, while
+            // `ScrollViewUtilities.contentFrame` feeds those estimates back as
+            // the proposal. Opening a window from the browser drove that cycle
+            // without converging and pinned a core
+            // (LazyVStackLayout/LazyHStackLayout → measureEstimates in a
+            // sample). A window's panes are a handful of tiles, so laying them
+            // out eagerly is cheap and always terminates.
+            let columns = min(3, max(1, group.sessions.count))
+            let rows = stride(from: 0, to: group.sessions.count, by: columns).map { start in
+                Array(group.sessions[start..<min(start + columns, group.sessions.count)])
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(alignment: .top, spacing: 10) {
+                        ForEach(row) { session in
+                            SessionTile(
+                                session: session,
+                                onOpen: { onOpen(session) },
+                                onTerminate: { onTerminate(session) }
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
+                        // Keep a short final row's tiles the same width as a
+                        // full row's instead of stretching them.
+                        if row.count < columns {
+                            ForEach(0..<(columns - row.count), id: \.self) { _ in
+                                Color.clear.frame(maxWidth: .infinity)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -259,12 +288,39 @@ private struct PaneWatermark: View {
     let text: String
     var height: CGFloat = 132
 
+    /// Point size for the watermark, chosen from the label's length instead of
+    /// by `minimumScaleFactor`.
+    ///
+    /// `minimumScaleFactor` makes the text's size depend on the width it is
+    /// offered, while `.frame(maxWidth: .infinity)` makes the width depend on
+    /// the layout — so SwiftUI searched for a scale that satisfied both and
+    /// re-ran text metrics for every candidate, per tile, inside the grid's
+    /// lazy stack. With a browser full of sessions that never converged and
+    /// pinned a core (sampled as _FlexFrameLayout → _FixedSizeLayout →
+    /// StyledTextLayoutEngine → NSAttributedString.MetricsCache).
+    ///
+    /// Watermarks are short labels ("trm", "gooshi", "fasmac2"), so picking the
+    /// size from the character count gives the same visual result with a single
+    /// measurement and no feedback between size and width.
+    private var fontSize: CGFloat {
+        switch text.count {
+        case 0...4: return 34
+        case 5...7: return 26
+        case 8...11: return 20
+        case 12...16: return 15
+        default: return 12
+        }
+    }
+
     var body: some View {
         Text(text)
-            .font(.system(size: 34, weight: .bold, design: .monospaced))
+            .font(.system(size: fontSize, weight: .bold, design: .monospaced))
             .foregroundStyle(.primary.opacity(0.22))
             .lineLimit(1)
-            .minimumScaleFactor(0.35)
+            // Truncation rather than scaling: the size is already chosen above,
+            // so an unusually long label clips instead of reopening the
+            // width-versus-size negotiation.
+            .truncationMode(.tail)
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity)
             .frame(height: height)

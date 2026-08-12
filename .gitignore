@@ -25,3 +25,6 @@ glad.zip
 
 vgcore.*
 trm-*.zip
+
+# Investigation sample dumps (large, regenerable with `sample <pid>`)
+.trm-debug/*.txt
