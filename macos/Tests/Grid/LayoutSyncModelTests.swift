@@ -79,6 +79,30 @@ struct LayoutSyncModelTests {
         let stacks = LayoutSyncModel.paneStacks(flatIDs: ["a"], stackGroups: [[0, 5]])
         #expect(stacks.isEmpty)
     }
+
+    @Test func overviewFirstStackKeepsSerializedOrderAndVisualShape() {
+        // Real Reload Latest UI regression: the overview is the stack host and
+        // therefore appears before its terminal in the flat TOML. Initial
+        // restore used to create all terminals first and overviews last,
+        // turning the saved visual rows [3, 2, 1] into [4, 1, 1].
+        let ids = ["overview-fasmac", "gooshi", "fasmac", "tow", "overview-tow", "overview-gooshi", "mini"]
+        let tags: [String?] = ["s0", "s0", nil, nil, nil, nil, nil]
+        let groups = LayoutSyncModel.stackGroups(forTags: tags)
+
+        #expect(groups == [[0, 1]])
+        #expect(LayoutSyncModel.paneStacks(flatIDs: ids, stackGroups: groups) == [
+            "overview-fasmac": ["overview-fasmac", "gooshi"]
+        ])
+        #expect(LayoutSyncModel.targetRowCols(
+            visualCount: LayoutSyncModel.visualCellCount(
+                flatCount: ids.count,
+                stackGroups: groups
+            ),
+            configRowCols: [3, 2, 1],
+            rows: 3,
+            cols: 3
+        ) == [3, 2, 1])
+    }
 }
 
 /// Tests for the layout-sync TOML extras scanner (top-level window identity

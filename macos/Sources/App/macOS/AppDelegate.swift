@@ -1167,6 +1167,29 @@ class AppDelegate: NSObject,
             return nil
         }
 
+        // Terminal panes intercept Cmd+Shift+Arrow in SurfaceView's
+        // performKeyEquivalent. Overview/webview/plugin panes have no terminal
+        // NSView to become first responder, so the same shortcut previously
+        // stopped working as soon as one of them was selected. Route it to the
+        // owning controller here; moveFocusedPane already prefers the selected
+        // non-surface pane and uses the exact same grid movement path.
+        if event.modifierFlags.contains([.command, .shift]),
+           let controller = (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController
+                as? BaseTerminalController,
+           controller.selectedNonSurfacePane != nil {
+            let direction: BaseTerminalController.PaneMoveDirection? = switch event.keyCode {
+            case 0x7B: .left
+            case 0x7C: .right
+            case 0x7D: .down
+            case 0x7E: .up
+            default: nil
+            }
+            if let direction {
+                controller.moveFocusedPane(direction)
+                return nil
+            }
+        }
+
         // If we have a main window then we don't process any of the keys
         // because we let it capture and propagate.
         guard NSApp.mainWindow == nil else { return event }

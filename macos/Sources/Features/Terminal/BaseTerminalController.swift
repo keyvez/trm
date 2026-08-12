@@ -5576,6 +5576,7 @@ class BaseTerminalController: NSWindowController,
 
         paneDisplayOrder = []
         paneStacks = [:]
+        stackSubPaneHeightFractions = [:]
 
         let paneConfigs: [Trm.TrmPaneConfig] = {
             if !config.panes.isEmpty {
@@ -5666,11 +5667,6 @@ class BaseTerminalController: NSWindowController,
         }.count
         reconcileGridRowCols(extraPendingPanes: pendingOverviews)
 
-        // Restore pane stacking relationships from stack_group tags.
-        if hasStackGroups {
-            restoreStackGroups(from: paneConfigs)
-        }
-
         // Assign default letter watermarks (A, B, C, …) to every pane.
         for surface in gridSurfaces {
             if let pid = surface.paneId {
@@ -5685,17 +5681,125 @@ class BaseTerminalController: NSWindowController,
         // Recreate agent overview panes once their terminal panes exist.
         restoreAgentOverviews(from: paneConfigs)
 
-        // Stacking ran before the overviews existed, so an overview that was
-        // part of a stack could not join it and came back detached. Add just
-        // those overviews to their groups now.
-        //
-        // Deliberately not a second full `restoreStackGroups` pass: by this
-        // point the overviews are in `paneDisplayOrder`, and re-running the
-        // whole grouping re-stacked panes that were already grouped, sweeping
-        // unrelated panes into the wrong stacks.
-        if hasStackGroups, !agentOverviewPanes.isEmpty {
-            restoreOverviewStackMembership(from: paneConfigs)
+        // All pane types now exist. Rebuild display order, stacks, and every
+        // size fraction directly from the serialized flat pane list. Doing
+        // this piecemeal used to create terminals first and overviews last,
+        // then mutate that type-grouped order with stackPane(). A handoff such
+        // as [overview+terminal stack, terminal, terminal] consequently came
+        // back [stack, terminal, terminal, ...] with different row breaks.
+        // stackPane() also initializes equal sub-pane heights, discarding the
+        // serialized stack_fractions. One final state assignment preserves the
+        // exact visual order and sizing written by buildCurrentConfigToml().
+        restoreSerializedGridState(from: config, paneConfigs: paneConfigs)
+    }
+
+    /// Restore the serialized flat pane order and collapse tagged members into
+    /// visual stack cells after every concrete pane object has been created.
+    private func restoreSerializedGridState(
+        from config: Trm.TrmGridConfig,
+        paneConfigs: [Trm.TrmPaneConfig]
+    ) {
+        let surfaces = gridSurfaces
+        let webviews = webviewPanes
+        let plugins = pluginPanes
+        let overviews = agentOverviewPanes
+
+        var resolvedByConfigIndex: [Int: GridPane] = [:]
+        var termIdx = 0
+        var webIdx = 0
+        var pluginIdx = 0
+
+        // Resolve concrete panes that are created directly from their config
+        // entries. Agent overviews are resolved in a second pass because their
+        // identity is tied to an already-resolved terminal entry.
+        for (i, paneConfig) in paneConfigs.enumerated() {
+            let type = normalizedPaneType(paneConfig.paneType)
+            switch type {
+            case "terminal":
+                if termIdx < surfaces.count {
+                    resolvedByConfigIndex[i] = .terminal(surfaces[termIdx])
+                    termIdx += 1
+                }
+            case "webview":
+                if webIdx < webviews.count {
+                    resolvedByConfigIndex[i] = .webview(webviews[webIdx])
+                    webIdx += 1
+                }
+            case "agent_overview":
+                continue
+            default:
+                guard PluginPaneKind.fromPaneType(type) != nil else { continue }
+                if pluginIdx < plugins.count {
+                    resolvedByConfigIndex[i] = .plugin(plugins[pluginIdx])
+                    pluginIdx += 1
+                }
+            }
         }
+
+        for (i, paneConfig) in paneConfigs.enumerated()
+        where normalizedPaneType(paneConfig.paneType) == "agent_overview" {
+            guard let anchorIndex = paneConfig.overviewOf,
+                  case .terminal(let anchor)? = resolvedByConfigIndex[anchorIndex],
+                  let overview = overviews.first(where: { $0.surface === anchor })
+            else { continue }
+            resolvedByConfigIndex[i] = .agentOverview(overview)
+        }
+
+        var flatIDs: [ObjectIdentifier] = []
+        var stackTags: [String?] = []
+        var stackFractionsByTag: [String: [CGFloat]] = [:]
+        for (i, paneConfig) in paneConfigs.enumerated() {
+            guard let pane = resolvedByConfigIndex[i] else { continue }
+            flatIDs.append(pane.id)
+            stackTags.append(paneConfig.stackGroup)
+            if let tag = paneConfig.stackGroup,
+               let fractions = paneConfig.stackFractions,
+               stackFractionsByTag[tag] == nil {
+                stackFractionsByTag[tag] = fractions.map { CGFloat($0) }
+            }
+        }
+        guard !flatIDs.isEmpty else { return }
+
+        let groups = LayoutSyncModel.stackGroups(forTags: stackTags)
+        paneDisplayOrder = flatIDs
+        paneStacks = LayoutSyncModel.paneStacks(flatIDs: flatIDs, stackGroups: groups)
+
+        let visualCount = LayoutSyncModel.visualCellCount(
+            flatCount: flatIDs.count,
+            stackGroups: groups
+        )
+        let rowCols = LayoutSyncModel.targetRowCols(
+            visualCount: visualCount,
+            configRowCols: config.rowCols,
+            rows: config.rows,
+            cols: config.cols
+        )
+        gridRowCols = rowCols
+
+        if config.rowFractions.count == rowCols.count {
+            gridRowHeightFractions = config.rowFractions.map { CGFloat($0) }
+        } else {
+            gridRowHeightFractions = []
+        }
+        if config.colFractions.count == rowCols.count,
+           zip(rowCols, config.colFractions).allSatisfy({ $0 == $1.count }) {
+            gridColWidthFractions = config.colFractions.map { row in
+                row.map { CGFloat($0) }
+            }
+        } else {
+            gridColWidthFractions = []
+        }
+
+        var restoredStackFractions: [ObjectIdentifier: [CGFloat]] = [:]
+        for group in groups {
+            guard let first = group.first,
+                  first < flatIDs.count,
+                  let tag = stackTags[first],
+                  let fractions = stackFractionsByTag[tag],
+                  fractions.count == group.count else { continue }
+            restoredStackFractions[flatIDs[first]] = fractions
+        }
+        stackSubPaneHeightFractions = restoredStackFractions
     }
 
     /// Add restored agent overviews to the stacks they were saved in.
