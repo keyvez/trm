@@ -111,6 +111,28 @@ struct AgentTranscriptTests {
         #expect(t.lastUserPrompt == "real question")
     }
 
+    @Test func injectedSkillDocumentIsNotAPrompt() {
+        // Observed live: Claude records a selected skill's entire document as
+        // a user message. One bundled skill was 923 KB, and rendering it as
+        // "You asked" sent restored overview panes into a CoreText layout spin.
+        let lines = [
+            userLine("build the image editor"),
+            userLine("Base directory for this skill: /tmp/bundled-skills/imagegen\n# Skill\nInjected instructions"),
+        ]
+        let t = AgentTranscriptReader.parse(lines: lines)
+        #expect(t.lastUserPrompt == "build the image editor")
+    }
+
+    @Test func hugeHumanPromptIsBoundedForOverviewRendering() throws {
+        let prompt = String(repeating: "x", count: 50_000)
+        let t = AgentTranscriptReader.parse(lines: [userLine(prompt)])
+        let rendered = try #require(t.lastUserPrompt)
+
+        #expect(rendered.hasPrefix(String(repeating: "x", count: AgentTranscriptReader.maxPromptCharacters)))
+        #expect(rendered.hasSuffix("… [prompt truncated in overview]"))
+        #expect(rendered.count < prompt.count)
+    }
+
     @Test func malformedLinesAreSkipped() {
         let lines = ["not json at all", "", userLine("hello"), "{\"broken\":"]
         let t = AgentTranscriptReader.parse(lines: lines)

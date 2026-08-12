@@ -3,8 +3,34 @@
 **Date:** 2026-08-12
 **Branch:** `agent-overview` (HEAD `32e25f8b5`)
 **Build under test:** trm 0.3.0 (14431), macOS 26.5.1, arm64
-**Status:** partially fixed. The Session Browser bugs are fixed and verified. The
-core layout spin is **NOT fixed** and its cause is still unknown.
+**Status:** resolved in the current working tree on 2026-08-12. The Session
+Browser fixes remain valid; the core layout spin was caused by an unbounded
+synthetic prompt reaching CoreText (details below).
+
+## 0. Resolution
+
+The deterministic `recovered.toml` reproduction contained an Agent Overview
+whose selected Claude transcript ended with a synthetic `user` record beginning
+`Base directory for this skill:`. That record was a 922,927-character,
+15,948-line injected skill document. `AgentTranscriptReader.isSyntheticPrompt`
+did not recognize it, so the overview rendered the whole document under “You
+asked”. A narrow restored pane then remained inside CoreText/SwiftUI text
+measurement indefinitely.
+
+The fix in `AgentTranscript.swift` filters that known injection and bounds every
+Claude and Codex prompt presented by an overview to 16K characters. A second fix
+in `AgentOverviewPane.swift` compares an unchanged transcript against the pane's
+actual cached URL; fallback-bound panes previously compared against a nil located
+session and reparsed the same multi-megabyte transcript every 1.5 seconds.
+
+Validation used the exact six-session attachment guard from this report. Before
+the fix, the window remained at ~100% CPU and every sampled main-thread frame was
+inside the layout recursion. After the fix, idle CPU held around 2–6%; 2,950 of
+2,972 main-thread samples were idle, with no hot `StyledTextLayoutEngine` or
+`GeometryReaderLayout.placeSubviews` stack. RSS no longer showed runaway growth
+and remained stable between sampling/window-resize events.
+`recovered.toml` has no `scrollback_file` entries, so scrollback cannot be the
+cause of this deterministic reproducer.
 
 ---
 

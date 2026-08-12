@@ -194,6 +194,28 @@ struct AgentOverviewSections: OptionSet, Hashable {
 
 enum AgentTranscriptReader {
 
+    /// Maximum human-prompt text retained by the overview model.
+    ///
+    /// Transcript `user` records are not inherently bounded. In particular,
+    /// Claude writes injected skill documents as user messages; one observed
+    /// record was 923 KB / 16K lines. Letting a payload of that size reach a
+    /// SwiftUI `Text` inside each restored overview can trap CoreText in a
+    /// layout/re-measure loop and grow the process by gigabytes. The overview
+    /// is a glanceable reading surface, so keep a generous prefix while the
+    /// complete prompt remains available in the source transcript.
+    static let maxPromptCharacters = 16 * 1024
+
+    static func boundedPrompt(_ text: String) -> String {
+        guard let end = text.index(
+            text.startIndex,
+            offsetBy: maxPromptCharacters,
+            limitedBy: text.endIndex
+        ), end != text.endIndex else {
+            return text
+        }
+        return String(text[..<end]) + "\n\n… [prompt truncated in overview]"
+    }
+
     /// First non-empty line of a `tool_result` block's content.
     ///
     /// The content is either a plain string or an array of typed parts, so
@@ -368,7 +390,7 @@ enum AgentTranscriptReader {
                 if let str = message["content"] as? String {
                     let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty, !isSyntheticPrompt(trimmed) {
-                        result.lastUserPrompt = trimmed
+                        result.lastUserPrompt = boundedPrompt(trimmed)
                         // A new human turn supersedes the previous turn's activity.
                         toolOrder.removeAll()
                         tools.removeAll()
@@ -400,7 +422,7 @@ enum AgentTranscriptReader {
                             if let t = block["text"] as? String {
                                 let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
                                 if !trimmed.isEmpty, !isSyntheticPrompt(trimmed) {
-                                    result.lastUserPrompt = trimmed
+                                    result.lastUserPrompt = boundedPrompt(trimmed)
                                 }
                             }
                         default:
@@ -484,7 +506,11 @@ enum AgentTranscriptReader {
         text.hasPrefix("<") ||
         text.hasPrefix("Caveat:") ||
         text.hasPrefix("[Request interrupted") ||
-        text.hasPrefix("[Image")
+        text.hasPrefix("[Image") ||
+        // Claude injects the selected skill's full SKILL.md (and sometimes
+        // its bundled references) as a user record immediately after the
+        // real prompt. It is harness context, not something the human asked.
+        text.hasPrefix("Base directory for this skill:")
     }
 
     /// A short subject line for a tool call, chosen per tool so the strip reads
@@ -706,7 +732,7 @@ enum CodexTranscriptReader {
                         guard let text = block["text"] as? String else { continue }
                         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !trimmed.isEmpty, !isSynthetic(trimmed) {
-                            result.lastUserPrompt = trimmed
+                            result.lastUserPrompt = AgentTranscriptReader.boundedPrompt(trimmed)
                             toolOrder.removeAll()
                             tools.removeAll()
                             latestBlocks.removeAll()

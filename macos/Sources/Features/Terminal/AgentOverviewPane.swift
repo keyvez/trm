@@ -206,6 +206,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         }
 
         let knownMtime = lastMtime
+        let knownURL = lastURL
         let cachedSession = locatedSession
         let cachedAgentPid = locatedAgentPid
         let cwdChanged = (cwd != lastCwd)
@@ -265,7 +266,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
 
             // Unchanged transcript — nothing to re-parse.
-            if let mtime, let knownMtime, mtime == knownMtime, url == cachedSession?.url {
+            if let mtime, let knownMtime, mtime == knownMtime, url == knownURL {
                 await MainActor.run { [weak self] in
                     self?.lastCwd = cwd
                     self?.lastURL = url
