@@ -145,6 +145,26 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     cwd_of() { lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1; }
     newest_jsonl() { ls -t "$1"/*.jsonl 2>/dev/null | head -1; }
 
+    # First .jsonl in $1 born after process $2 started (30 s slack) — the
+    # session THAT agent created, which newest-by-mtime gets wrong whenever
+    # several agents share a working directory. Falls back to newest.
+    born_after() {
+      dir="$1"; apid="$2"
+      et="$(ps -o etime= -p "$apid" 2>/dev/null | tr -d ' ')"
+      [ -n "$et" ] || { newest_jsonl "$dir"; return; }
+      secs="$(printf %s "$et" | awk -F'[-:]' '{ if (NF==4) print $1*86400+$2*3600+$3*60+$4; else if (NF==3) print $1*3600+$2*60+$3; else if (NF==2) print $1*60+$2; else print $1 }')"
+      started=$(( $(date +%s) - secs - 30 ))
+      best=""; bestb=0
+      for f in "$dir"/*.jsonl; do
+        [ -e "$f" ] || continue
+        b="$(stat -f %B "$f" 2>/dev/null)" || continue
+        if [ "$b" -ge "$started" ] && { [ -z "$best" ] || [ "$b" -lt "$bestb" ]; }; then
+          best="$f"; bestb="$b"
+        fi
+      done
+      if [ -n "$best" ]; then printf '%s\n' "$best"; else newest_jsonl "$dir"; fi
+    }
+
     if [ -n "$AGENT_PID" ]; then
       case "$AGENT_KIND" in
         claude) pat='/\\.claude/projects/.*\\.jsonl$' ;;
@@ -155,7 +175,7 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
       CWD="$(cwd_of "$AGENT_PID")"
       if [ "$AGENT_KIND" = claude ] && [ -n "$CWD" ]; then
         ENC="$(printf %s "$CWD" | tr / -)"
-        P="$(newest_jsonl "$HOME/.claude/projects/$ENC")"
+        P="$(born_after "$HOME/.claude/projects/$ENC" "$AGENT_PID")"
         [ -n "$P" ] && { echo "OK claude $P"; exit 0; }
       fi
       if [ "$AGENT_KIND" = codex ]; then

@@ -142,9 +142,44 @@ enum AgentSessionLocator {
             if let name = names[pid], let kind = kind(forProcessName: name) {
                 return AgentProcess(pid: pid, kind: kind)
             }
+            // p_comm is the executable's name, and Claude's versioned
+            // installer runs a binary literally named after its version
+            // ("2.1.226") — matching on it finds nothing, the locator gives
+            // up, and the overview falls back to newest-transcript-in-cwd,
+            // which binds the WRONG session when several agents share a
+            // folder. The stable identity is argv[0], which the launcher
+            // sets to "claude". Only descendants of the pane's shell reach
+            // this, so the extra sysctl stays cheap.
+            if let arg0 = argv0(pid: pid),
+               let kind = kind(forProcessName: (arg0 as NSString).lastPathComponent) {
+                return AgentProcess(pid: pid, kind: kind)
+            }
             queue.append(contentsOf: children[pid] ?? [])
         }
         return nil
+    }
+
+    /// argv[0] of a process via KERN_PROCARGS2 (same-user processes only).
+    ///
+    /// Layout: `int argc`, the exec path, NUL padding, then argv[0].
+    static func argv0(pid: pid_t) -> String? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else {
+            return nil
+        }
+        var buf = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0 else { return nil }
+
+        let argc = buf.withUnsafeBytes { $0.load(as: Int32.self) }
+        guard argc > 0 else { return nil }
+        var i = MemoryLayout<Int32>.size
+        while i < size, buf[i] != 0 { i += 1 }  // exec path
+        while i < size, buf[i] == 0 { i += 1 }  // padding
+        guard i < size else { return nil }
+        let start = i
+        while i < size, buf[i] != 0 { i += 1 }
+        return String(decoding: buf[start..<i], as: UTF8.self)
     }
 
     /// Match a process basename to an agent kind. Exposed for testing.
