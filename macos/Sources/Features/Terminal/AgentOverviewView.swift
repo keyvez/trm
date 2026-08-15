@@ -284,15 +284,53 @@ struct AgentOverviewView: View {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(Color.accentColor.opacity(0.55))
                     .frame(width: 3)
-                Text(prompt)
-                    .font(.system(size: scaled(12.5)))
-                    .lineSpacing(3)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                // Blocks give fenced code the same monospaced treatment the
+                // reply gets, and show attached images inline; the plain
+                // string remains the fallback (and what copy yields).
+                VStack(alignment: .leading, spacing: 8) {
+                    if pane.transcript.promptBlocks.isEmpty {
+                        promptText(prompt)
+                    } else {
+                        ForEach(pane.transcript.promptBlocks) { block in
+                            switch block {
+                            case .paragraph(let text):
+                                promptText(text)
+                            case .code(let language, let text):
+                                codeBlock(language: language, text: text)
+                            case .image(let data):
+                                inlineImage(data)
+                            }
+                        }
+                    }
+                }
+                .padding(.leading, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+    }
+
+    private func promptText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: scaled(12.5)))
+            .lineSpacing(3)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// An attached image, shown as a bounded inline thumbnail.
+    @ViewBuilder
+    private func inlineImage(_ data: Data) -> some View {
+        if let image = NSImage(data: data) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: .infinity, maxHeight: 240, alignment: .leading)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 1)
+                )
         }
     }
 
@@ -343,6 +381,7 @@ struct AgentOverviewView: View {
                     switch block {
                     case .paragraph(let text): return text
                     case .code(_, let text): return text
+                    case .image: return "[image]"
                     }
                 }.joined(separator: "\n\n")
             }
@@ -352,6 +391,8 @@ struct AgentOverviewView: View {
                     paragraphView(text)
                 case .code(let language, let text):
                     codeBlock(language: language, text: text)
+                case .image(let data):
+                    inlineImage(data)
                 }
             }
         }

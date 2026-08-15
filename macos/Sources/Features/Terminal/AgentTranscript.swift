@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 /// Which coding agent produced a transcript. Each kind knows where its
 /// sessions live and how to parse them; everything downstream (the overview
@@ -35,6 +36,11 @@ struct AgentTranscript: Equatable {
     /// The last thing the human asked, for context at the top of the view.
     var lastUserPrompt: String? = nil
 
+    /// The prompt in renderable form: prose, fenced code (laid out like the
+    /// reply's code blocks), and attached-image thumbnails. `lastUserPrompt`
+    /// stays the plain-text form for copying and compact contexts.
+    var promptBlocks: [Block] = []
+
     /// True when the agent appears to still be working: the newest transcript
     /// entry is a tool call that never received a result.
     var isWorking: Bool = false
@@ -58,11 +64,16 @@ struct AgentTranscript: Equatable {
     enum Block: Equatable, Identifiable {
         case paragraph(String)
         case code(language: String?, text: String)
+        /// A small JPEG thumbnail, re-encoded at parse time — the transcript
+        /// embeds full-resolution attachments as base64, far too large to
+        /// keep in the model or decode per render.
+        case image(Data)
 
         var id: String {
             switch self {
             case .paragraph(let t): return "p:\(t.hashValue)"
             case .code(let lang, let t): return "c:\(lang ?? "")\(t.hashValue)"
+            case .image(let data): return "i:\(data.count):\(data.prefix(64).hashValue)"
             }
         }
     }
@@ -236,6 +247,12 @@ enum AgentTranscriptReader {
             if head.count > pasteCollapseKeptChars {
                 head = String(head.prefix(pasteCollapseKeptChars)) + "…"
             }
+            // If the cut landed inside a fenced code block, close the fence
+            // so the paste badge renders as prose, not as code.
+            let fences = head.components(separatedBy: "\n")
+                .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("```") }
+                .count
+            if fences % 2 != 0 { head += "\n```" }
             return head + "\n[Pasted text +\(lines.count - pasteCollapseKeptLines) lines]"
         }
         if text.count > pasteCollapseCharThreshold {
@@ -243,6 +260,39 @@ enum AgentTranscriptReader {
             return kept + "… [Pasted text +\(text.count - pasteCollapseKeptChars) chars]"
         }
         return text
+    }
+
+    /// Cap on images decoded per prompt, and the thumbnail's longest side.
+    static let maxPromptImages = 4
+    static let promptImageMaxDimension: CGFloat = 700
+
+    /// Decode a transcript-embedded base64 image into a small JPEG thumbnail.
+    ///
+    /// Full-resolution screenshots arrive as multi-megabyte base64 payloads;
+    /// re-encoding a bounded thumbnail once at parse time (off the main
+    /// actor) keeps the model small and per-render work trivial.
+    static func imageThumbnail(fromBase64 b64: String) -> Data? {
+        guard let raw = Data(base64Encoded: b64, options: .ignoreUnknownCharacters),
+              let image = NSImage(data: raw) else { return nil }
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        let scale = min(1, promptImageMaxDimension / max(size.width, size.height))
+        let target = NSSize(width: max(1, size.width * scale), height: max(1, size.height * scale))
+
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(target.width), pixelsHigh: Int(target.height),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else { return nil }
+        rep.size = target
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(origin: .zero, size: target))
+        NSGraphicsContext.restoreGraphicsState()
+
+        return rep.representation(using: .jpeg, properties: [.compressionFactor: 0.72])
     }
 
     /// First non-empty line of a `tool_result` block's content.
@@ -419,7 +469,9 @@ enum AgentTranscriptReader {
                 if let str = message["content"] as? String {
                     let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty, !isSyntheticPrompt(trimmed) {
-                        result.lastUserPrompt = boundedPrompt(collapsedPrompt(trimmed))
+                        let collapsed = collapsedPrompt(trimmed)
+                        result.lastUserPrompt = boundedPrompt(collapsed)
+                        result.promptBlocks = splitProseAndCode(collapsed)
                         // A new human turn supersedes the previous turn's activity.
                         toolOrder.removeAll()
                         tools.removeAll()
@@ -429,6 +481,7 @@ enum AgentTranscriptReader {
                     var sawToolResult = false
                     var textPrompt: String? = nil
                     var imageCount = 0
+                    var imageThumbnails: [Data] = []
                     for block in arr {
                         switch block["type"] as? String {
                         case "tool_result":
@@ -459,8 +512,16 @@ enum AgentTranscriptReader {
                         case "image":
                             // A human-attached image. The CLI shows it as an
                             // [Image #N] chip; the transcript embeds the raw
-                            // base64, useless as prose.
+                            // base64, useless as prose. A bounded thumbnail
+                            // is decoded so the overview can show it inline.
                             imageCount += 1
+                            if imageThumbnails.count < maxPromptImages,
+                               let src = block["source"] as? [String: Any],
+                               (src["type"] as? String) == "base64",
+                               let b64 = src["data"] as? String,
+                               let thumb = imageThumbnail(fromBase64: b64) {
+                                imageThumbnails.append(thumb)
+                            }
                         default:
                             break
                         }
@@ -468,12 +529,20 @@ enum AgentTranscriptReader {
                     // Images inside a tool_result entry are results (e.g.
                     // screenshots coming back), not something the human
                     // attached to a prompt.
-                    if sawToolResult { imageCount = 0 }
+                    if sawToolResult {
+                        imageCount = 0
+                        imageThumbnails.removeAll()
+                    }
                     if textPrompt != nil || imageCount > 0 {
+                        let collapsed = textPrompt.map { collapsedPrompt($0) }
                         var parts: [String] = []
-                        if let textPrompt { parts.append(collapsedPrompt(textPrompt)) }
+                        if let collapsed { parts.append(collapsed) }
                         parts.append(contentsOf: (0..<imageCount).map { "[Image #\($0 + 1)]" })
                         result.lastUserPrompt = boundedPrompt(parts.joined(separator: "\n"))
+
+                        var pblocks = collapsed.map { splitProseAndCode($0) } ?? []
+                        pblocks.append(contentsOf: imageThumbnails.map { .image($0) })
+                        result.promptBlocks = pblocks
                     }
                     // A pure tool_result entry is the harness replying to the
                     // agent, not a new human turn, so it must not reset state.
@@ -778,8 +847,9 @@ enum CodexTranscriptReader {
                         guard let text = block["text"] as? String else { continue }
                         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !trimmed.isEmpty, !isSynthetic(trimmed) {
-                            result.lastUserPrompt = AgentTranscriptReader.boundedPrompt(
-                                AgentTranscriptReader.collapsedPrompt(trimmed))
+                            let collapsed = AgentTranscriptReader.collapsedPrompt(trimmed)
+                            result.lastUserPrompt = AgentTranscriptReader.boundedPrompt(collapsed)
+                            result.promptBlocks = AgentTranscriptReader.splitProseAndCode(collapsed)
                             toolOrder.removeAll()
                             tools.removeAll()
                             latestBlocks.removeAll()

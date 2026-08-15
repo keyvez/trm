@@ -176,6 +176,51 @@ struct AgentTranscriptTests {
         #expect(t.lastUserPrompt == "[Image #1]")
     }
 
+    @Test func promptFencedCodeBecomesACodeBlock() throws {
+        let prompt = "fix this function\n```swift\nfunc broken() {}\n```"
+        let t = AgentTranscriptReader.parse(lines: [userLine(prompt)])
+        #expect(t.promptBlocks.count == 2)
+        guard case .code(let lang, let code) = try #require(t.promptBlocks.last) else {
+            Issue.record("expected code block, got \(String(describing: t.promptBlocks.last))")
+            return
+        }
+        #expect(lang == "swift")
+        #expect(code == "func broken() {}")
+    }
+
+    @Test func collapseClosesACutFenceSoTheBadgeStaysProse() throws {
+        // A paste collapsed mid-code-block must not leave the fence open —
+        // the badge would render as code.
+        let code = (1...40).map { "let x\($0) = \($0)" }.joined(separator: "\n")
+        let prompt = "review:\n```swift\n\(code)\n```"
+        let t = AgentTranscriptReader.parse(lines: [userLine(prompt)])
+        guard case .paragraph(let tail) = try #require(t.promptBlocks.last) else {
+            Issue.record("badge should be prose, got \(String(describing: t.promptBlocks.last))")
+            return
+        }
+        #expect(tail.contains("[Pasted text +"))
+    }
+
+    /// 1×1 transparent PNG.
+    private static let tinyPNG =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+    @Test func attachedImagesProduceInlineThumbnailBlocks() throws {
+        let obj: [String: Any] = ["type": "user", "message": ["content": [
+            ["type": "text", "text": "what is this"],
+            ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": Self.tinyPNG]],
+        ]]]
+        let line = String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+        let t = AgentTranscriptReader.parse(lines: [line])
+
+        #expect(t.lastUserPrompt == "what is this\n[Image #1]")
+        guard case .image(let data) = try #require(t.promptBlocks.last) else {
+            Issue.record("expected image block, got \(String(describing: t.promptBlocks.last))")
+            return
+        }
+        #expect(!data.isEmpty)
+    }
+
     @Test func imagesInsideToolResultsAreNotPromptChips() {
         // A screenshot coming back in a tool_result is a result, not
         // something the human attached.
