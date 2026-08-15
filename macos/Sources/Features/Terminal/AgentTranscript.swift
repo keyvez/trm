@@ -262,6 +262,89 @@ enum AgentTranscriptReader {
         return text
     }
 
+    /// Split prompt text into blocks, honoring markdown fences first and
+    /// then detecting UNFENCED code: pasted HTML/CSS/JS arrives with no
+    /// ``` markers but should still read as code. Deliberately conservative
+    /// — only a contiguous run of at least two code-looking lines converts,
+    /// so prose can't be miscast from one odd line. Prompt-only: assistant
+    /// replies fence their code properly and are left alone.
+    static func splitDetectingUnfencedCode(_ text: String) -> [AgentTranscript.Block] {
+        splitProseAndCode(text).flatMap { block -> [AgentTranscript.Block] in
+            guard case .paragraph(let para) = block else { return [block] }
+            return autoFence(paragraph: para)
+        }
+    }
+
+    /// Whether a single line reads as code rather than prose. Syntax-shaped
+    /// signals only — indentation is NOT one (chat text is often indented,
+    /// and `splitProseAndCode` made the same call for fenceless input).
+    static func codeLikeLine(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return false }
+        // HTML/XML: a tag, a closing tag, or a comment marker.
+        if t.hasPrefix("<"), t.contains(">") { return true }
+        if t.hasPrefix("<!--") || t.hasSuffix("-->") { return true }
+        // Statement/block shapes.
+        if t.hasSuffix("{") || t == "}" || t.hasSuffix("}") && t.count <= 3 { return true }
+        if t.hasSuffix(";") { return true }
+        // Common declaration openers.
+        let keywords = [
+            "function ", "const ", "let ", "var ", "import ", "export ",
+            "#include", "def ", "class ", "return ", "if (", "for (", "while (",
+        ]
+        return keywords.contains { t.hasPrefix($0) }
+    }
+
+    /// Convert contiguous code-looking runs inside a prose paragraph into
+    /// code blocks. Blank lines join a run only when code continues after
+    /// them; runs need ≥ 2 non-blank code lines to convert.
+    private static func autoFence(paragraph: String) -> [AgentTranscript.Block] {
+        let lines = paragraph.components(separatedBy: "\n")
+        var out: [AgentTranscript.Block] = []
+        var prose: [String] = []
+        var code: [String] = []
+
+        func flushProse() {
+            let joined = prose.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !joined.isEmpty { out.append(.paragraph(joined)) }
+            prose = []
+        }
+        func flushCode() {
+            let nonBlank = code.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            if nonBlank.count >= 2 {
+                flushProse()
+                let htmlish = nonBlank.filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("<") }
+                let language = htmlish.count * 2 >= nonBlank.count ? "html" : nil
+                out.append(.code(language: language, text: code.joined(separator: "\n")))
+            } else {
+                // Too short to be sure — keep it as prose.
+                prose.append(contentsOf: code)
+            }
+            code = []
+        }
+
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            let blank = line.trimmingCharacters(in: .whitespaces).isEmpty
+            if codeLikeLine(line) {
+                code.append(line)
+            } else if blank, !code.isEmpty,
+                      lines[index...].first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+                          .map(codeLikeLine) == true {
+                // Blank line inside a code run with more code following.
+                code.append(line)
+            } else {
+                flushCode()
+                prose.append(line)
+            }
+            index += 1
+        }
+        flushCode()
+        flushProse()
+        return out
+    }
+
     /// Cap on images decoded per prompt, and the thumbnail's longest side.
     static let maxPromptImages = 4
     static let promptImageMaxDimension: CGFloat = 700
@@ -471,7 +554,7 @@ enum AgentTranscriptReader {
                     if !trimmed.isEmpty, !isSyntheticPrompt(trimmed) {
                         let collapsed = collapsedPrompt(trimmed)
                         result.lastUserPrompt = boundedPrompt(collapsed)
-                        result.promptBlocks = splitProseAndCode(collapsed)
+                        result.promptBlocks = splitDetectingUnfencedCode(collapsed)
                         // A new human turn supersedes the previous turn's activity.
                         toolOrder.removeAll()
                         tools.removeAll()
@@ -540,7 +623,7 @@ enum AgentTranscriptReader {
                         parts.append(contentsOf: (0..<imageCount).map { "[Image #\($0 + 1)]" })
                         result.lastUserPrompt = boundedPrompt(parts.joined(separator: "\n"))
 
-                        var pblocks = collapsed.map { splitProseAndCode($0) } ?? []
+                        var pblocks = collapsed.map { splitDetectingUnfencedCode($0) } ?? []
                         pblocks.append(contentsOf: imageThumbnails.map { .image($0) })
                         result.promptBlocks = pblocks
                     }
@@ -849,7 +932,7 @@ enum CodexTranscriptReader {
                         if !trimmed.isEmpty, !isSynthetic(trimmed) {
                             let collapsed = AgentTranscriptReader.collapsedPrompt(trimmed)
                             result.lastUserPrompt = AgentTranscriptReader.boundedPrompt(collapsed)
-                            result.promptBlocks = AgentTranscriptReader.splitProseAndCode(collapsed)
+                            result.promptBlocks = AgentTranscriptReader.splitDetectingUnfencedCode(collapsed)
                             toolOrder.removeAll()
                             tools.removeAll()
                             latestBlocks.removeAll()

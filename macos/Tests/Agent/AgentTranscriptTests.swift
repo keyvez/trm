@@ -201,6 +201,57 @@ struct AgentTranscriptTests {
         #expect(tail.contains("[Pasted text +"))
     }
 
+    @Test func pastedHTMLWithoutFencesIsDetectedAsCode() throws {
+        let prompt = """
+        why does this render wrong?
+        <div class="card">
+          <span>hello</span>
+        </div>
+        """
+        let t = AgentTranscriptReader.parse(lines: [userLine(prompt)])
+        #expect(t.promptBlocks.count == 2)
+        guard case .code(let lang, let code) = try #require(t.promptBlocks.last) else {
+            Issue.record("expected detected code block, got \(String(describing: t.promptBlocks.last))")
+            return
+        }
+        #expect(lang == "html")
+        #expect(code.contains("<span>hello</span>"))
+        if case .paragraph(let intro) = try #require(t.promptBlocks.first) {
+            #expect(intro == "why does this render wrong?")
+        }
+    }
+
+    @Test func pastedJSWithoutFencesIsDetectedAsCode() throws {
+        let prompt = "review this\nconst x = load();\nreturn x.map(f);"
+        let t = AgentTranscriptReader.parse(lines: [userLine(prompt)])
+        guard case .code(let lang, _) = try #require(t.promptBlocks.last) else {
+            Issue.record("expected detected code block")
+            return
+        }
+        #expect(lang == nil)
+    }
+
+    @Test func aSingleCodeLookingLineStaysProse() {
+        // One odd line is not enough evidence — prose must not be miscast.
+        let prompt = "the fix was adding a semicolon;\nthanks for the help"
+        let t = AgentTranscriptReader.parse(lines: [userLine(prompt)])
+        #expect(t.promptBlocks.count == 1)
+        if case .code = t.promptBlocks[0] {
+            Issue.record("single line must not convert to code")
+        }
+    }
+
+    @Test func collapsedHTMLPasteKeepsBadgeAsProse() throws {
+        let html = (1...40).map { "<li>item \($0)</li>" }.joined(separator: "\n")
+        let t = AgentTranscriptReader.parse(lines: [userLine("check this list\n" + html)])
+        guard case .paragraph(let tail) = try #require(t.promptBlocks.last) else {
+            Issue.record("badge should be prose, got \(String(describing: t.promptBlocks.last))")
+            return
+        }
+        #expect(tail.contains("[Pasted text +"))
+        #expect(t.promptBlocks.contains { if case .code(let l, _) = $0 { return l == "html" } else { return false } })
+    }
+
     /// 1×1 transparent PNG.
     private static let tinyPNG =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
