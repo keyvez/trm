@@ -185,6 +185,11 @@ class BaseTerminalController: NSWindowController,
     /// are standalone grid cells.
     @Published var paneStacks: [ObjectIdentifier: [ObjectIdentifier]] = [:]
 
+    /// Pane ids of remote panes whose SSH link has died. The grid shows a
+    /// centered Reconnect button over these; reconnecting reattaches the
+    /// SAME remote session, so nothing is lost.
+    @Published var disconnectedRemotePaneIds: Set<Int> = []
+
     /// The currently peeked sub-pane (expanded overlay), or `nil` if no peek.
     @Published var peekedPane: ObjectIdentifier? = nil
 
@@ -625,8 +630,26 @@ class BaseTerminalController: NSWindowController,
             name: .ghosttyCommandDidFinish,
             object: nil)
 
+        // A pane's command exiting is how a remote pane's SSH link reports
+        // it died — surface a reconnect affordance instead of a dead pane.
+        center.addObserver(
+            self,
+            selector: #selector(ghosttyChildDidExit(_:)),
+            name: .ghosttyChildDidExit,
+            object: nil)
+
+        // Sleep almost always kills SSH transports; on wake, tear down the
+        // remote panes' links promptly so the reconnect button appears at
+        // once rather than after the keepalive timeout.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(workspaceDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil)
+
         // Listen for local events that we need to know of outside of
-        // single surface handlers.
+        // single surface handlers. (Cmd+Shift+Arrow for a selected
+        // non-surface pane is routed by AppDelegate's monitor, not here.)
         self.eventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.flagsChanged]
         ) { [weak self] event in self?.localEventHandler(event) }
@@ -3054,6 +3077,12 @@ class BaseTerminalController: NSWindowController,
 
             cleanupStacksForClosedPane(paneID)
 
+            // Pane ids are reused; a lingering disconnected flag would put a
+            // reconnect button over an unrelated future pane.
+            if let pid = view.paneId {
+                disconnectedRemotePaneIds.remove(pid)
+            }
+
             // An agent overview only describes this surface, so it goes with it.
             closeAgentOverviews(forSurface: view)
 
@@ -3200,6 +3229,60 @@ class BaseTerminalController: NSWindowController,
         guard let index = gridSurfaces.firstIndex(where: { $0 === surfaceView }) else { return }
         let paneId = surfaceView.paneId ?? index
         terminalOutputScanner.notifyCommandDidFinish(paneId: paneId)
+    }
+
+    @objc private func ghosttyChildDidExit(_ notification: Notification) {
+        guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
+        // Only remote panes get the reconnect treatment: a local pane's
+        // command exiting means the shell is done, not that a link dropped.
+        guard surfaceView.remoteHost != nil, let paneId = surfaceView.paneId else { return }
+        guard surfaceTree.contains(where: { $0 === surfaceView }) else { return }
+        disconnectedRemotePaneIds.insert(paneId)
+    }
+
+    /// On wake, kill each remote pane's SSH client outright. A slept
+    /// machine's TCP flows are almost always dead anyway (NAT/DHCP churn,
+    /// different network), but a half-dead ssh sits inside the TCP timeout
+    /// looking frozen — killing it makes the child-exit fire now, so the
+    /// reconnect button is there when the user looks, not 30 s later. The
+    /// remote session daemon is untouched; reconnecting resumes it.
+    @objc private func workspaceDidWake(_ notification: Notification) {
+        // Small delay so this doesn't race the wake itself.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self else { return }
+            for view in self.surfaceTree where view.remoteHost != nil {
+                guard let paneId = view.paneId else { continue }
+                let childPid = Trm.shared.paneChildPid(paneId: UInt32(paneId))
+                if childPid > 0 {
+                    kill(childPid, SIGTERM)
+                }
+            }
+        }
+    }
+
+    /// Reconnect a remote pane whose SSH link died: swap in a fresh surface
+    /// running the same `ssh … zmx attach <session>` against the SAME remote
+    /// session, so the work picks up where it was.
+    func reconnectRemotePane(_ pane: GridPane) {
+        guard case .terminal(let view) = pane else { return }
+        guard let host = view.remoteHost,
+              let session = view.remoteZmxSession,
+              Self.isValidRemoteHost(host) else { return }
+
+        let command = Self.remoteAttachCommand(
+            host: host, session: session, zmxPath: Self.defaultRemoteZmxPath
+        )
+        guard let newView = replacePaneSurface(
+            at: view,
+            command: command,
+            errorTitle: "Could not Reconnect",
+            undoAction: "Reconnect Remote Pane"
+        ) else { return }
+        newView.remoteHost = host
+        newView.remoteZmxSession = session
+        if let paneId = newView.paneId {
+            disconnectedRemotePaneIds.remove(paneId)
+        }
     }
 
     // MARK: Notifications
@@ -4030,6 +4113,7 @@ class BaseTerminalController: NSWindowController,
         case createExtension
         case agentOverview
         case remotePane(host: String?)
+        case switchPaneRemote(host: String?)
     }
 
     private func handleInternalCommand(_ action: String, on surfaceView: Ghostty.SurfaceView) -> Bool {
@@ -4066,6 +4150,9 @@ class BaseTerminalController: NSWindowController,
         case .remotePane(let host):
             newRemotePane(host: host, at: surfaceView)
             return true
+        case .switchPaneRemote(let host):
+            switchPaneToRemote(host: host, at: surfaceView)
+            return true
         }
     }
 
@@ -4083,9 +4170,8 @@ class BaseTerminalController: NSWindowController,
     /// Rendering stays local — the same arrangement `trm attach-remote` uses
     /// for whole windows, applied to a single new pane.
     ///
-    /// New panes only. An existing pane cannot be moved to another host: its
-    /// process is already running under a specific machine's daemon, and
-    /// nothing in the PTY model can migrate that.
+    /// This creates a NEW pane; to re-point an existing pane at another
+    /// machine, see `switchPaneToRemote` (`trm.switch_remote`).
     func newRemotePane(host: String?, at surfaceView: Ghostty.SurfaceView) {
         guard !isLayoutEditingDisabled else { return }
 
@@ -4093,6 +4179,7 @@ class BaseTerminalController: NSWindowController,
             promptForRemoteHost(at: surfaceView)
             return
         }
+        guard validateRemoteHostOrPresentError(host) else { return }
 
         // The remote session name is generated here so it can be recorded in
         // the checkpoint and reattached later.
@@ -4128,24 +4215,63 @@ class BaseTerminalController: NSWindowController,
     /// `-t` forces a PTY (zmx needs one); the remote side runs zmx directly so
     /// the daemon is owned by that machine.
     static func remoteAttachCommand(host: String, session: String, zmxPath: String) -> String {
-        // The command runs through the local shell, so quote what may contain
-        // spaces. The host is validated before we get here.
-        "ssh -t \(host) \"\(zmxPath)\" attach \(session)"
+        // The host and session are validated before we get here. Keepalives
+        // so a dead link exits (surfacing the reconnect button) within ~20 s
+        // instead of sitting frozen inside the TCP timeout.
+        //
+        // The remote side pins ZMX_DIR to trm's standard socket directory
+        // (~/.trm/zmx) so the session is visible to the remote machine's
+        // Session Browser, `trm sessions`, and the overview's SSH probe —
+        // without it zmx defaults to a per-user tmp directory that macOS
+        // periodically cleans. Sessions that already live in that default
+        // dir (created before ZMX_DIR was pinned) are attached where they
+        // are, mirroring zmx's own fallback order. The script is single-
+        // quoted so $HOME/$TMPDIR expand on the REMOTE machine — the two
+        // machines' usernames need not match.
+        // The tmp fallback requires a LIVE daemon (lsof), not just a socket
+        // file: a stale socket must not pin the session to the tmp dir
+        // forever — a dead session migrates to the pinned dir on reconnect.
+        // TMPDIR's trailing slash is trimmed because lsof's name matching
+        // (unlike the -S file test) fails on the double slash.
+        let remoteScript = "S=\(session); D=\"$HOME/.trm/zmx\"; "
+            + "T=\"${TMPDIR:-/tmp}\"; T=\"${T%/}/zmx-$(id -u)\"; "
+            + "if [ ! -S \"$D/$S\" ]; then "
+            + "if [ -n \"$XDG_RUNTIME_DIR\" ] && [ -n \"$(lsof -t \"$XDG_RUNTIME_DIR/zmx/$S\" 2>/dev/null)\" ]; then D=\"$XDG_RUNTIME_DIR/zmx\"; "
+            + "elif [ -n \"$(lsof -t \"$T/$S\" 2>/dev/null)\" ]; then D=\"$T\"; fi; fi; "
+            + "mkdir -p \"$D\"; ZMX_DIR=\"$D\" exec \"\(zmxPath)\" attach \"$S\""
+        return "ssh -t -o ServerAliveInterval=10 -o ServerAliveCountMax=2 -o ConnectTimeout=10 "
+            + "\(host) '\(remoteScript)'"
     }
 
     /// Ask which machine the new pane should run on.
     private func promptForRemoteHost(at surfaceView: Ghostty.SurfaceView) {
-        let alert = NSAlert()
-        alert.messageText = "New Remote Pane"
-        alert.informativeText = """
-        Which machine should this pane run on?
+        let host = promptForRemoteHost(
+            messageText: "New Remote Pane",
+            informativeText: """
+            Which machine should this pane run on?
 
-        Requires key-based SSH to the host and trm installed there. \
-        The pane's session runs on that machine and keeps running if this \
-        window closes.
-        """
-        // Offer machines discovered over Bonjour, while still allowing any
-        // destination to be typed — plenty of hosts aren't on this LAN.
+            Requires key-based SSH to the host and trm installed there. \
+            The pane's session runs on that machine and keeps running if this \
+            window closes.
+            """,
+            buttonTitle: "Create Pane"
+        )
+        guard let host else { return }
+        newRemotePane(host: host, at: surfaceView)
+    }
+
+    /// Run the shared remote-host picker: a prompt offering Bonjour-discovered
+    /// trm machines while still allowing any destination to be typed — plenty
+    /// of hosts aren't on this LAN. Returns a validated SSH destination, or
+    /// nil if the user cancelled or the input was rejected.
+    private func promptForRemoteHost(
+        messageText: String,
+        informativeText: String,
+        buttonTitle: String
+    ) -> String? {
+        let alert = NSAlert()
+        alert.messageText = messageText
+        alert.informativeText = informativeText
         let discovered = RemoteHostDiscovery.shared.hosts
         let input: NSTextField
         if discovered.isEmpty {
@@ -4159,23 +4285,212 @@ class BaseTerminalController: NSWindowController,
         }
         input.placeholderString = "user@host"
         alert.accessoryView = input
-        alert.addButton(withTitle: "Create Pane")
+        alert.addButton(withTitle: buttonTitle)
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = input
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         let host = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !host.isEmpty else { return }
+        guard !host.isEmpty else { return nil }
+        guard validateRemoteHostOrPresentError(host) else { return nil }
+        return host
+    }
 
-        // Reject anything that could break out of the command we build.
+    /// Reject anything that could break out of the command we build, telling
+    /// the user why.
+    private func validateRemoteHostOrPresentError(_ host: String) -> Bool {
         guard Self.isValidRemoteHost(host) else {
             presentInternalCommandError(
                 title: "Invalid Host",
                 message: "'\(host)' isn't a valid SSH destination. Use host or user@host."
             )
+            return false
+        }
+        return true
+    }
+
+    /// Re-point an existing pane at another machine (`trm.switch_remote`).
+    ///
+    /// A pane's running process can't migrate — it lives under a specific
+    /// machine's zmx daemon — so "switching" swaps the pane's surface in
+    /// place: the local session detaches (its daemon keeps running, and it
+    /// stays reattachable from the Session Browser or `trm attach`), and the
+    /// same grid slot reconnects as `ssh -t <host> zmx attach <new-session>`
+    /// with the daemon on the remote host — exactly the arrangement a pane
+    /// created with `trm.remote_pane` gets.
+    func switchPaneToRemote(host: String?, at surfaceView: Ghostty.SurfaceView) {
+        guard !isLayoutEditingDisabled else { return }
+
+        guard let host = host?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else {
+            let picked = promptForRemoteHost(
+                messageText: "Switch Pane to Remote",
+                informativeText: """
+                Which machine should this pane switch to?
+
+                Requires key-based SSH to the host and trm installed there. \
+                The pane's current local session detaches and keeps running — \
+                reattach it any time from the Session Browser.
+                """,
+                buttonTitle: "Switch Pane"
+            )
+            guard let picked else { return }
+            switchPaneToRemote(host: picked, at: surfaceView)
             return
         }
-        newRemotePane(host: host, at: surfaceView)
+        guard validateRemoteHostOrPresentError(host) else { return }
+
+        // The local zmx session is deliberately NOT killed: switching away is
+        // a detach, not a close, so the local work survives. Undo restores
+        // the local surface still attached to it.
+        let session = ZmxSessionManager.newSessionName()
+        let command = Self.remoteAttachCommand(
+            host: host,
+            session: session,
+            zmxPath: Self.defaultRemoteZmxPath
+        )
+        guard let newView = replacePaneSurface(
+            at: surfaceView,
+            command: command,
+            errorTitle: "Could not Switch Pane",
+            undoAction: "Switch Pane to Remote"
+        ) else { return }
+        newView.remoteHost = host
+        newView.remoteZmxSession = session
+    }
+
+    /// Swap a pane's surface in place for one running `command`, keeping the
+    /// pane's identity — pane id (so watermarks and cmux env addressing stay
+    /// stable), grid cell, stack membership, and display order. No local
+    /// persistence wrap is applied: every current caller runs a remote
+    /// attach, whose zmx session lives on the other machine.
+    @discardableResult
+    private func replacePaneSurface(
+        at surfaceView: Ghostty.SurfaceView,
+        command: String,
+        errorTitle: String,
+        undoAction: String
+    ) -> Ghostty.SurfaceView? {
+        guard !isLayoutEditingDisabled else { return nil }
+        guard let ghostty_app = ghostty.app else { return nil }
+        guard let node = surfaceTree.root?.node(view: surfaceView) else { return nil }
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = command
+        let paneId = surfaceView.paneId ?? nextAvailablePaneId()
+        Self.injectCmuxEnvVars(into: &config, paneId: paneId)
+        let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
+        newView.paneId = paneId
+
+        let newTree: SplitTree<Ghostty.SurfaceView>
+        do {
+            newTree = try surfaceTree.replacing(node: node, with: .leaf(view: newView))
+        } catch {
+            presentInternalCommandError(
+                title: errorTitle,
+                message: "Failed to replace this pane's surface."
+            )
+            return nil
+        }
+
+        // Grid bookkeeping is keyed by surface identity; remap the old
+        // surface's entries in place so the pane keeps its cell and any stack
+        // membership.
+        let oldId = ObjectIdentifier(surfaceView)
+        let newId = ObjectIdentifier(newView)
+        if let idx = paneDisplayOrder.firstIndex(of: oldId) {
+            paneDisplayOrder[idx] = newId
+        }
+        if let children = paneStacks.removeValue(forKey: oldId) {
+            paneStacks[newId] = children
+        }
+        for (key, children) in paneStacks {
+            if let idx = children.firstIndex(of: oldId) {
+                paneStacks[key]?[idx] = newId
+            }
+        }
+
+        replaceSurfaceTree(
+            newTree,
+            moveFocusTo: newView,
+            moveFocusFrom: surfaceView,
+            undoAction: undoAction
+        )
+
+        // An agent overview bound to the old surface follows the swap. Left
+        // stale, its move shortcut silently no-ops (it resolves the overview
+        // via the focused — new — surface), its refresh targets a dead
+        // surface, and the overview is closed as orphaned once the old
+        // surface finally deallocates.
+        for overview in agentOverviewPanes where overview.surface === surfaceView {
+            overview.surface = newView
+        }
+        return newView
+    }
+
+    /// The host to use without asking: the single trm machine advertising on
+    /// Bonjour. With zero or several machines visible there is no unambiguous
+    /// default and callers fall back to the host prompt (which lists every
+    /// discovered machine).
+    private func defaultRemoteHostIfUnambiguous() -> String? {
+        let hosts = RemoteHostDiscovery.shared.hosts
+        guard hosts.count == 1 else { return nil }
+        return hosts[0].sshDestination
+    }
+
+    /// Whether a pane has work going on that the user should be told about
+    /// before its surface is replaced: a foreground process the surface
+    /// itself reports, or — for a zmx-backed pane, whose real children live
+    /// under the session daemon rather than the surface's pty — a command
+    /// running in its session's shell.
+    private func paneHasDoneWork(_ view: Ghostty.SurfaceView) -> Bool {
+        if view.needsConfirmQuit { return true }
+        if let session = view.zmxSessionName,
+           ZmxSessionManager.sessionHasRunningCommand(session) {
+            return true
+        }
+        return false
+    }
+
+    /// Context-menu entry point: switch a terminal pane's shell to another
+    /// machine.
+    func switchPaneToRemote(_ pane: GridPane) {
+        guard case .terminal(let view) = pane else { return }
+        switchPaneToRemoteConfirmingWork(at: view)
+    }
+
+    /// A fresh pane switches with no warning; a pane that is doing work gets
+    /// one first, because the remote side is a NEW session — the local one
+    /// detaches and keeps running, but the work stays behind on this machine.
+    /// When exactly one trm machine is advertising on Bonjour it is used
+    /// without asking; otherwise the host prompt appears.
+    func switchPaneToRemoteConfirmingWork(at view: Ghostty.SurfaceView) {
+        if paneHasDoneWork(view) {
+            let alert = NSAlert()
+            alert.messageText = "Switch Pane to Remote?"
+            alert.informativeText = """
+            This pane has work running. Switching connects it to a new \
+            session on the remote machine — the current local session \
+            detaches and keeps running in the background; reattach it any \
+            time from the Session Browser.
+            """
+            alert.addButton(withTitle: "Switch Pane")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        switchPaneToRemote(host: defaultRemoteHostIfUnambiguous(), at: view)
+    }
+
+    /// File-menu / shortcut entry point: create a new remote pane at the
+    /// focused surface. When exactly one trm machine is advertising on
+    /// Bonjour the pane is created there without asking; otherwise the host
+    /// prompt appears with every discovered machine to choose from.
+    @IBAction func newRemotePaneAction(_ sender: Any?) {
+        guard let view = focusedSurface else { return }
+        if let host = defaultRemoteHostIfUnambiguous() {
+            newRemotePane(host: host, at: view)
+        } else {
+            newRemotePane(host: nil, at: view)
+        }
     }
 
     /// Whether a string is a plausible SSH destination (`host` or `user@host`,
@@ -4263,6 +4578,21 @@ class BaseTerminalController: NSWindowController,
             let arg = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
             let normalized = normalizeQuotedArgument(arg)
             return .remotePane(host: normalized.isEmpty ? nil : normalized)
+        }
+
+        // trm.switch_remote [user@host] / trm.move_remote [user@host] —
+        // re-point the CURRENT pane at another machine. Bare form prompts
+        // with the Bonjour-discovered host list.
+        let bareSwitchRemoteNames: Set<String> = ["trm.switch_remote", "trm.move_remote"]
+        if bareSwitchRemoteNames.contains(trimmed) {
+            return .switchPaneRemote(host: nil)
+        }
+
+        for prefix in ["trm.switch_remote ", "trm.move_remote "] {
+            guard trimmed.hasPrefix(prefix) else { continue }
+            let arg = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = normalizeQuotedArgument(arg)
+            return .switchPaneRemote(host: normalized.isEmpty ? nil : normalized)
         }
 
         // trm.add_pane <type> [arg] / trm.add <type> [arg]

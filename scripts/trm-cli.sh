@@ -161,7 +161,7 @@ Persistent sessions (session_persistence = true in trm.toml):
                                     current window's sessions (multi-client)
   attach-remote <ssh-host>          Open a trm UI showing a remote machine's
                                     window; panes attach over SSH
-  Remote attach: ssh -t host /Applications/trm.app/Contents/MacOS/zmx attach <name>
+  Remote attach: ssh -t host 'ZMX_DIR="\$HOME/.trm/zmx" /Applications/trm.app/Contents/MacOS/zmx attach <name>'
 
 Other:
   version                           Show app version, build number, commit

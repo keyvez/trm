@@ -122,6 +122,10 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     private var locatedSession: AgentSessionLocator.Located?
     private var locatedAgentPid: pid_t = 0
 
+    /// For a remote pane (`remote_host` set), the SSH transcript mirror that
+    /// stands in for the local process-tree walk and file reads.
+    private var remoteMirror: RemoteAgentTranscriptMirror?
+
     /// The watermark of the terminal this overview describes.
     ///
     /// Now that an overview can be moved and stacked anywhere in the grid, it
@@ -181,6 +185,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
 
     deinit {
         timer?.invalidate()
+        remoteMirror?.stop()
     }
 
     func toggleBionic() {
@@ -195,6 +200,14 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     func refresh() {
         guard let surface else {
             statusMessage = "The terminal pane this view was tracking has closed."
+            return
+        }
+
+        // A remote pane's agent process and transcript live on the other
+        // machine — resolve and stream them over SSH instead of walking the
+        // local process tree.
+        if let host = surface.remoteHost, let remoteSession = surface.remoteZmxSession {
+            refreshRemote(host: host, remoteSession: remoteSession)
             return
         }
 
@@ -291,6 +304,50 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                     self.statusMessage = nil
                 } else if parsed?.isEmpty ?? true {
                     self.statusMessage = "No messages in this session yet."
+                }
+            }
+        }
+    }
+
+    /// Remote-pane refresh: drive the SSH mirror, then stat and parse the
+    /// local mirror file exactly like a local transcript.
+    private func refreshRemote(host: String, remoteSession: String) {
+        if let mirror = remoteMirror,
+           mirror.host != host || mirror.remoteSession != remoteSession {
+            mirror.stop()
+            remoteMirror = nil
+        }
+        if remoteMirror == nil {
+            remoteMirror = RemoteAgentTranscriptMirror(host: host, remoteSession: remoteSession)
+        }
+        guard let mirror = remoteMirror else { return }
+        mirror.poll()
+
+        guard let kind = mirror.locatedKind else {
+            statusMessage = mirror.statusMessage ?? "Looking for an agent on \(host)…"
+            return
+        }
+
+        let url = mirror.mirrorURL
+        let knownMtime = lastMtime
+        Task.detached(priority: .utility) {
+            let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+            // Unchanged mirror — nothing to re-parse.
+            if let mtime, let knownMtime, mtime == knownMtime { return }
+
+            let parsed = kind == .codex
+                ? CodexTranscriptReader.parse(url: url)
+                : AgentTranscriptReader.parse(url: url)
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.lastMtime = mtime
+                self.agentKind = kind
+                if let parsed, !parsed.isEmpty {
+                    self.transcript = parsed
+                    self.statusMessage = nil
+                } else {
+                    self.statusMessage = "Streaming the session from \(host)…"
                 }
             }
         }

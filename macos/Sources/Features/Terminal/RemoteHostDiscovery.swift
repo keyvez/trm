@@ -34,11 +34,18 @@ final class RemoteHostDiscovery {
         let hostname: String
         /// SSH port advertised by the host (22 unless overridden).
         let port: Int
+        /// Account to log in as, when the host advertises one (`ssh_user`
+        /// TXT entry). Machines don't share usernames, and a bare hostname
+        /// makes ssh guess with the *connecting* machine's username.
+        let user: String?
 
-        var id: String { "\(name)|\(hostname):\(port)" }
+        var id: String { "\(name)|\(sshDestination):\(port)" }
 
         /// Destination string for an SSH command.
-        var sshDestination: String { hostname }
+        var sshDestination: String {
+            if let user { return "\(user)@\(hostname)" }
+            return hostname
+        }
     }
 
     /// Hosts currently visible on the network, excluding this machine.
@@ -68,7 +75,10 @@ final class RemoteHostDiscovery {
             params.includePeerToPeer = false
             let listener = try NWListener(using: params)
 
-            let record = NWTXTRecord(["ssh_port": String(sshPort)])
+            let record = NWTXTRecord([
+                "ssh_port": String(sshPort),
+                "ssh_user": NSUserName(),
+            ])
             listener.service = NWListener.Service(
                 name: Self.localHostName,
                 type: Self.serviceType,
@@ -145,30 +155,63 @@ final class RemoteHostDiscovery {
     /// Rebuild the host list from a browse result set.
     private func updateHosts(from results: Set<NWBrowser.Result>) {
         var found: [Host] = []
+        let localMdns = Self.mdnsHostname(forServiceName: Self.localHostName)
 
         for result in results {
             guard case let .service(name, _, _, _) = result.endpoint else { continue }
-            // Don't offer this machine as a remote target.
-            guard name != Self.localHostName else { continue }
-
-            var port = 22
-            if case let .bonjour(txt) = result.metadata,
-               case let .string(value) = txt.getEntry(for: "ssh_port"),
-               let parsed = Int(value), parsed > 0, parsed < 65536 {
-                port = parsed
-            }
 
             // Bonjour instance names are usually the sharing name; the
-            // matching mDNS hostname is what SSH can actually resolve.
+            // matching mDNS hostname is what SSH can actually resolve. An
+            // always-on advertiser (scripts/install-bonjour-advertiser.sh)
+            // registers the "<host>.local" name directly, so machines are
+            // compared by hostname, not by instance name.
             let hostname = Self.mdnsHostname(forServiceName: name)
-            found.append(Host(name: name, hostname: hostname, port: port))
+
+            // Don't offer this machine as a remote target.
+            guard hostname != localMdns else { continue }
+
+            var port = 22
+            var user: String?
+            if case let .bonjour(txt) = result.metadata {
+                if case let .string(value) = txt.getEntry(for: "ssh_port"),
+                   let parsed = Int(value), parsed > 0, parsed < 65536 {
+                    port = parsed
+                }
+                // The username is interpolated into an ssh command
+                // downstream, so hold TXT data (which any LAN peer can
+                // publish) to the same strict character set destinations
+                // are validated against.
+                if case let .string(value) = txt.getEntry(for: "ssh_user"),
+                   !value.isEmpty, value.count <= 64,
+                   value.unicodeScalars.allSatisfy({ Self.allowedUserChars.contains($0) }) {
+                    user = value
+                }
+            }
+
+            found.append(Host(name: name, hostname: hostname, port: port, user: user))
         }
 
+        // A machine can be advertised twice — by a running trm and by the
+        // always-on LaunchAgent. One machine must be one entry, or "exactly
+        // one host" flows (auto-pick without a dialog) break. When the two
+        // records disagree on detail, the one that names a login user wins.
+        found.sort {
+            if ($0.user != nil) != ($1.user != nil) { return $0.user != nil }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        var seenDestinations = Set<String>()
+        found = found.filter { seenDestinations.insert("\($0.hostname):\($0.port)").inserted }
         found.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
         guard found != hosts else { return }
         hosts = found
         onHostsChanged?(found)
     }
+
+    /// Characters allowed in an advertised `ssh_user` value — the same set
+    /// SSH destinations are validated against before shell interpolation.
+    private static let allowedUserChars = CharacterSet.alphanumerics
+        .union(CharacterSet(charactersIn: "._-"))
 
     // MARK: - Names
 

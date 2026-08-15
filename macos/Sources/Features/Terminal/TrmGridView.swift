@@ -139,6 +139,16 @@ struct TrmGridView: View {
     /// Callback to peek (expand) a stacked sub-pane.
     var onPeekPane: ((GridPane) -> Void)? = nil
 
+    /// Switch a terminal pane's shell to another machine (context menu).
+    var onSwitchPaneRemote: ((GridPane) -> Void)? = nil
+
+    /// Pane ids of remote panes whose SSH link has died: these render a
+    /// centered Reconnect button over the pane.
+    var disconnectedRemotePaneIds: Set<Int> = []
+
+    /// Reconnect a disconnected remote pane (same session, same slot).
+    var onReconnectPane: ((GridPane) -> Void)? = nil
+
     /// Selected pane that has no surface (overview/webview/plugin). Terminals
     /// carry selection through `focusedSurface`; these panes can't.
     var selectedNonSurfacePane: ObjectIdentifier? = nil
@@ -276,7 +286,9 @@ struct TrmGridView: View {
                         dropEdge: $dropEdge,
                         overviewDropPlacement: $overviewDropPlacement
                     ))
+                    .overlay(reconnectOverlay(for: panes[0]))
                     .contextMenu {
+                        switchRemoteMenuItem(for: panes[0])
                         if let pid = paneIdForPane(panes[0]) {
                             pluginsMenu(forPaneId: pid)
                         }
@@ -512,6 +524,7 @@ struct TrmGridView: View {
                 NotificationRingView(isActive: needsAttention)
                     .allowsHitTesting(false)
             )
+            .overlay(reconnectOverlay(for: pane))
             .overlay(
                 // BonSplit-style drop placeholder — shows where the pane will land
                 dropPlaceholder(isVisible: isDropTarget, isStackMode: dropIsStackMode, stackCount: existingCount, edge: dropEdge)
@@ -552,6 +565,7 @@ struct TrmGridView: View {
                         Divider()
                     }
                     agentOverviewMenuItem(for: pane)
+                    switchRemoteMenuItem(for: pane)
                     paneMoveMenu(pane: pane, row: row, col: col)
                     if let pid = paneIdForPane(pane) {
                         Divider()
@@ -601,6 +615,53 @@ struct TrmGridView: View {
             } label: {
                 Label("Close Agent Overview", systemImage: "xmark.circle")
             }
+        }
+    }
+
+    /// Centered Reconnect button over a remote pane whose SSH link died.
+    ///
+    /// The scrim dims the dead terminal (its last frame plus the core's
+    /// "process exited" note stay visible underneath) and swallows clicks so
+    /// a stray click can't feed the exited surface; the button reattaches
+    /// the SAME remote session, so nothing is lost.
+    @ViewBuilder
+    private func reconnectOverlay(for pane: GridPane) -> some View {
+        if let onReconnectPane, case .terminal(let surface) = pane,
+           let pid = surface.paneId, disconnectedRemotePaneIds.contains(pid) {
+            ZStack {
+                Color.black.opacity(0.35)
+                VStack(spacing: 10) {
+                    Text("Connection to \(surface.remoteHost ?? "remote") lost")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.85))
+                    Button {
+                        onReconnectPane(pane)
+                    } label: {
+                        Label("Reconnect", systemImage: "arrow.clockwise")
+                            .font(.system(size: 13, weight: .semibold))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(.regularMaterial, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+    }
+
+    /// "Switch Pane to Remote…" menu item, offered for terminal panes: swaps
+    /// the pane's shell for one running on another machine (the local zmx
+    /// session detaches and keeps running).
+    @ViewBuilder
+    private func switchRemoteMenuItem(for pane: GridPane) -> some View {
+        if let onSwitchPaneRemote, case .terminal = pane {
+            Button {
+                onSwitchPaneRemote(pane)
+            } label: {
+                Label("Switch Pane to Remote…", systemImage: "network")
+            }
+            SwiftUI.Divider()
         }
     }
 
@@ -893,6 +954,7 @@ struct TrmGridView: View {
 
                         stackChildContent(child)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .overlay(reconnectOverlay(for: child))
                     }
                     .contextMenu {
                         // Reorder within the stack. The first sub-pane is the
@@ -918,6 +980,7 @@ struct TrmGridView: View {
                         } label: {
                             Label("Restore Pane", systemImage: "arrow.up.left.and.arrow.down.right")
                         }
+                        switchRemoteMenuItem(for: child)
                         if let pid = paneIdForPane(child) {
                             SwiftUI.Divider()
                             pluginsMenu(forPaneId: pid)

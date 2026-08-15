@@ -106,6 +106,9 @@ protocol TerminalViewModel: ObservableObject {
 
     /// Stable pane IDs that need user attention (agent waiting for input).
     var attentionPaneIds: Set<Int> { get }
+
+    /// Remote panes whose SSH link died; the grid overlays a Reconnect button.
+    var disconnectedRemotePaneIds: Set<Int> { get }
 }
 
 /// The main terminal view. This terminal view supports splits.
@@ -209,6 +212,13 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         },
                         onPeekPane: { pane in
                             (self.delegate as? BaseTerminalController)?.peekPane(pane)
+                        },
+                        onSwitchPaneRemote: { pane in
+                            (self.delegate as? BaseTerminalController)?.switchPaneToRemote(pane)
+                        },
+                        disconnectedRemotePaneIds: viewModel.disconnectedRemotePaneIds,
+                        onReconnectPane: { pane in
+                            (self.delegate as? BaseTerminalController)?.reconnectRemotePane(pane)
                         },
                         selectedNonSurfacePane: viewModel.selectedNonSurfacePane,
                         onSelectNonSurfacePane: { id in

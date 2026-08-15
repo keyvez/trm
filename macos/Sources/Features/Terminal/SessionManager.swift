@@ -86,17 +86,31 @@ enum SessionManager {
         // A default pane_type of "terminal" is implied when the key is absent,
         // so count [[panes]] blocks that are terminals (explicitly or by
         // default) and the zmx_session lines within them.
+        //
+        // A REMOTE pane (`remote_host` set) counts as backed without a local
+        // daemon: its session lives on the other machine, whose liveness
+        // can't be checked from here — and reconnecting is safe regardless,
+        // since `zmx attach` over SSH recreates the session if the remote
+        // daemon has died. Requiring a local zmx_session for those panes
+        // refused Reload Latest UI (and the no-dialog startup) for any
+        // window containing one.
         var terminalPanes = 0
         var zmxNames: [String] = []
+        var remotePanes = 0
         var inPane = false
         var paneIsTerminal = true
         var paneZmx: String? = nil
+        var paneIsRemote = false
 
         func flushPane() {
             guard inPane else { return }
             if paneIsTerminal {
                 terminalPanes += 1
-                if let z = paneZmx { zmxNames.append(z) }
+                if paneIsRemote {
+                    remotePanes += 1
+                } else if let z = paneZmx {
+                    zmxNames.append(z)
+                }
             }
         }
 
@@ -107,6 +121,7 @@ enum SessionManager {
                 inPane = true
                 paneIsTerminal = true
                 paneZmx = nil
+                paneIsRemote = false
                 continue
             }
             guard inPane else { continue }
@@ -118,11 +133,17 @@ enum SessionManager {
                     v = v.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
                     if !v.isEmpty { paneZmx = v }
                 }
+            } else if line.hasPrefix("remote_host") {
+                if let eq = line.firstIndex(of: "=") {
+                    var v = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+                    v = v.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                    if !v.isEmpty { paneIsRemote = true }
+                }
             }
         }
         flushPane()
 
-        guard terminalPanes > 0, zmxNames.count == terminalPanes else { return false }
+        guard terminalPanes > 0, zmxNames.count + remotePanes == terminalPanes else { return false }
         return zmxNames.allSatisfy { ZmxSessionManager.sessionExists($0) }
     }
 

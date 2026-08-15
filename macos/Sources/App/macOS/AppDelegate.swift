@@ -341,6 +341,7 @@ class AppDelegate: NSObject,
         setupMenuImages()
         setupSplitBrowserMenuItem()
         setupSessionBrowserMenuItem()
+        setupRemotePaneMenuItem()
 
         // Setup signal handlers
         setupSignals()
@@ -1070,6 +1071,31 @@ class AppDelegate: NSObject,
         item.keyEquivalentModifierMask = [.command, .shift]
         item.setImageIfDesired(systemSymbolName: "rectangle.stack")
         viewMenu.addItem(item)
+    }
+
+    /// Add "New Remote Pane" to the File menu, right after "New Pane", with
+    /// Cmd+Shift+N. When exactly one trm machine is advertising on Bonjour
+    /// the pane is created there without asking; otherwise a prompt lists the
+    /// discovered machines. Added in code rather than the XIB for the same
+    /// reason as the Session Browser item: the action lives on the terminal
+    /// controller (the first responder).
+    private func setupRemotePaneMenuItem() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        guard let fileMenuItem = mainMenu.items.first(where: { $0.title == "File" }),
+              let fileMenu = fileMenuItem.submenu else { return }
+
+        let item = NSMenuItem(
+            title: "New Remote Pane",
+            action: #selector(BaseTerminalController.newRemotePaneAction(_:)),
+            keyEquivalent: "n"
+        )
+        item.keyEquivalentModifierMask = [.command, .shift]
+        item.setImageIfDesired(systemSymbolName: "network")
+        if let index = fileMenu.items.firstIndex(where: { $0.title == "New Pane" }) {
+            fileMenu.insertItem(item, at: index + 1)
+        } else {
+            fileMenu.addItem(item)
+        }
     }
 
     /// Sync all of our menu item keyboard shortcuts with the Ghostty configuration.

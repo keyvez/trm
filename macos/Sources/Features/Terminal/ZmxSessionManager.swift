@@ -9,7 +9,8 @@ import os
 /// in-process PTY hosts the zmx *client*; a per-session *daemon* (spawned by
 /// zmx itself) owns the real PTY and survives GUI quit. Closing a window
 /// detaches; relaunching reattaches by session name and zmx replays terminal
-/// state via ghostty-vt. Remote attach: `ssh -t host zmx attach <name>`.
+/// state via ghostty-vt. Remote attach (ZMX_DIR must point at trm's socket
+/// dir): `ssh -t host 'ZMX_DIR="$HOME/.trm/zmx" zmx attach <name>'`.
 ///
 /// The zmx binary is bundled into trm.app as an auxiliary executable and is
 /// built from `vendor/zmx` by `zig build` (see src/build/GhosttyZmx.zig).
@@ -103,6 +104,16 @@ enum ZmxSessionManager {
         guard let resolved = serverShellPid(session: session) else { return nil }
         shellPidCache[session] = resolved
         return resolved
+    }
+
+    /// Whether a session's shell currently has a foreground command running.
+    /// This is the "is this pane doing work" signal for flows that replace a
+    /// pane's surface (e.g. switching it to a remote host): a zmx-backed
+    /// pane's real children live under the session daemon, so the surface's
+    /// own process check can't see them.
+    static func sessionHasRunningCommand(_ session: String) -> Bool {
+        guard let shellPid = cachedServerShellPid(session: session) else { return false }
+        return command(ofShellPid: shellPid) != nil
     }
 
     static func serverShellPid(session: String) -> pid_t? {

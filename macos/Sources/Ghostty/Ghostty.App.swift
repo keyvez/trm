@@ -668,9 +668,12 @@ extension Ghostty {
             case GHOSTTY_ACTION_SIZE_LIMIT:
                 fallthrough
             case GHOSTTY_ACTION_QUIT_TIMER:
-                fallthrough
-            case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
                 Ghostty.logger.info("known but unimplemented action action=\(action.tag.rawValue)")
+                return false
+            case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
+                // Observers (e.g. remote-pane reconnect) are told, but the
+                // core still draws its own "process exited" message: false.
+                childExited(app, target: target)
                 return false
             case GHOSTTY_ACTION_COMMAND_FINISHED:
                 commandFinished(app, target: target)
@@ -1891,6 +1894,24 @@ extension Ghostty {
 
             default:
                 assertionFailure()
+            }
+        }
+
+        private static func childExited(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s) {
+            switch (target.tag) {
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return }
+                guard let surfaceView = self.surfaceView(from: surface) else { return }
+
+                NotificationCenter.default.post(
+                    name: .ghosttyChildDidExit,
+                    object: surfaceView
+                )
+
+            default:
+                return
             }
         }
 

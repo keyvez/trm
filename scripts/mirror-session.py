@@ -88,7 +88,12 @@ def transform(lines: list[str], remote_host: str | None, zmx_path: str) -> list[
                     line for line in pane
                     if not line.strip().startswith(REMOTE_DROP_KEYS)
                 ]
-                attach = f"ssh -t {remote_host} {zmx_path} attach {session}"
+                # ZMX_DIR pins trm's standard socket dir on the remote; the
+                # sessions being mirrored were created by the remote trm app,
+                # which keeps them there. Single quotes so $HOME expands on
+                # the remote machine.
+                attach = (f"ssh -t {remote_host} 'ZMX_DIR=\"$HOME/.trm/zmx\" "
+                          f"\"{zmx_path}\" attach {session}'")
                 # Insert the attach command right after the [[panes]] header.
                 kept.insert(1, f"command = {toml_str(attach)}")
                 out.extend(kept)

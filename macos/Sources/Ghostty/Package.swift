@@ -445,6 +445,10 @@ extension Notification.Name {
     /// A shell command finished in a terminal surface (OSC 133;D).
     static let ghosttyCommandDidFinish = Notification.Name("app.roj.trm.commandDidFinish")
 
+    /// A surface's child process exited (the pane's command itself, not a
+    /// shell-integration command). Object is the SurfaceView.
+    static let ghosttyChildDidExit = Notification.Name("app.roj.trm.childDidExit")
+
     /// Open a split browser pane (from socket API or keyboard shortcut).
     /// userInfo: "url" (String), "paneId" (Int, -1 = auto)
     static let trmOpenSplitBrowser = Notification.Name("app.roj.trm.openSplitBrowser")
