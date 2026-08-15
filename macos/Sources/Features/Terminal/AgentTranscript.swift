@@ -216,6 +216,35 @@ enum AgentTranscriptReader {
         return String(text[..<end]) + "\n\n… [prompt truncated in overview]"
     }
 
+    /// Collapse what Claude Code's CLI also collapses: large pasted text.
+    ///
+    /// The CLI shows `[Pasted text #1 +257 lines]` chips, but that is
+    /// presentation only — the transcript stores the entire paste inline in
+    /// the user message. The overview re-derives the collapsed form: a
+    /// prompt beyond a few lines keeps its head and reports the remainder
+    /// as a paste badge; a single enormous line (minified JSON, base64)
+    /// collapses by characters. The full text stays in the transcript.
+    static let pasteCollapseLineThreshold = 12
+    static let pasteCollapseKeptLines = 6
+    static let pasteCollapseCharThreshold = 1_500
+    static let pasteCollapseKeptChars = 1_000
+
+    static func collapsedPrompt(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        if lines.count > pasteCollapseLineThreshold {
+            var head = lines.prefix(pasteCollapseKeptLines).joined(separator: "\n")
+            if head.count > pasteCollapseKeptChars {
+                head = String(head.prefix(pasteCollapseKeptChars)) + "…"
+            }
+            return head + "\n[Pasted text +\(lines.count - pasteCollapseKeptLines) lines]"
+        }
+        if text.count > pasteCollapseCharThreshold {
+            let kept = String(text.prefix(pasteCollapseKeptChars))
+            return kept + "… [Pasted text +\(text.count - pasteCollapseKeptChars) chars]"
+        }
+        return text
+    }
+
     /// First non-empty line of a `tool_result` block's content.
     ///
     /// The content is either a plain string or an array of typed parts, so
@@ -390,7 +419,7 @@ enum AgentTranscriptReader {
                 if let str = message["content"] as? String {
                     let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty, !isSyntheticPrompt(trimmed) {
-                        result.lastUserPrompt = boundedPrompt(trimmed)
+                        result.lastUserPrompt = boundedPrompt(collapsedPrompt(trimmed))
                         // A new human turn supersedes the previous turn's activity.
                         toolOrder.removeAll()
                         tools.removeAll()
@@ -398,6 +427,8 @@ enum AgentTranscriptReader {
                     }
                 } else if let arr = message["content"] as? [[String: Any]] {
                     var sawToolResult = false
+                    var textPrompt: String? = nil
+                    var imageCount = 0
                     for block in arr {
                         switch block["type"] as? String {
                         case "tool_result":
@@ -422,12 +453,27 @@ enum AgentTranscriptReader {
                             if let t = block["text"] as? String {
                                 let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
                                 if !trimmed.isEmpty, !isSyntheticPrompt(trimmed) {
-                                    result.lastUserPrompt = boundedPrompt(trimmed)
+                                    textPrompt = trimmed
                                 }
                             }
+                        case "image":
+                            // A human-attached image. The CLI shows it as an
+                            // [Image #N] chip; the transcript embeds the raw
+                            // base64, useless as prose.
+                            imageCount += 1
                         default:
                             break
                         }
+                    }
+                    // Images inside a tool_result entry are results (e.g.
+                    // screenshots coming back), not something the human
+                    // attached to a prompt.
+                    if sawToolResult { imageCount = 0 }
+                    if textPrompt != nil || imageCount > 0 {
+                        var parts: [String] = []
+                        if let textPrompt { parts.append(collapsedPrompt(textPrompt)) }
+                        parts.append(contentsOf: (0..<imageCount).map { "[Image #\($0 + 1)]" })
+                        result.lastUserPrompt = boundedPrompt(parts.joined(separator: "\n"))
                     }
                     // A pure tool_result entry is the harness replying to the
                     // agent, not a new human turn, so it must not reset state.
@@ -732,7 +778,8 @@ enum CodexTranscriptReader {
                         guard let text = block["text"] as? String else { continue }
                         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !trimmed.isEmpty, !isSynthetic(trimmed) {
-                            result.lastUserPrompt = AgentTranscriptReader.boundedPrompt(trimmed)
+                            result.lastUserPrompt = AgentTranscriptReader.boundedPrompt(
+                                AgentTranscriptReader.collapsedPrompt(trimmed))
                             toolOrder.removeAll()
                             tools.removeAll()
                             latestBlocks.removeAll()

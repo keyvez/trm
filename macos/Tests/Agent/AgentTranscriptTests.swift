@@ -123,14 +123,71 @@ struct AgentTranscriptTests {
         #expect(t.lastUserPrompt == "build the image editor")
     }
 
-    @Test func hugeHumanPromptIsBoundedForOverviewRendering() throws {
+    @Test func hugeHumanPromptIsCollapsedForOverviewRendering() throws {
         let prompt = String(repeating: "x", count: 50_000)
         let t = AgentTranscriptReader.parse(lines: [userLine(prompt)])
         let rendered = try #require(t.lastUserPrompt)
 
-        #expect(rendered.hasPrefix(String(repeating: "x", count: AgentTranscriptReader.maxPromptCharacters)))
-        #expect(rendered.hasSuffix("… [prompt truncated in overview]"))
+        #expect(rendered.hasPrefix(String(repeating: "x", count: AgentTranscriptReader.pasteCollapseKeptChars)))
+        #expect(rendered.hasSuffix("[Pasted text +49000 chars]"))
         #expect(rendered.count < prompt.count)
+    }
+
+    // MARK: - Paste and image collapsing (CLI-matched)
+
+    @Test func multiLinePasteCollapsesToHeadPlusBadge() throws {
+        // 40 lines: keep the head, badge the rest — the CLI's
+        // "[Pasted text #1 +N lines]" presentation, re-derived.
+        let paste = (1...40).map { "line \($0)" }.joined(separator: "\n")
+        let t = AgentTranscriptReader.parse(lines: [userLine(paste)])
+        let rendered = try #require(t.lastUserPrompt)
+
+        let kept = AgentTranscriptReader.pasteCollapseKeptLines
+        #expect(rendered.hasPrefix((1...kept).map { "line \($0)" }.joined(separator: "\n")))
+        #expect(rendered.hasSuffix("[Pasted text +\(40 - kept) lines]"))
+        #expect(!rendered.contains("line \(kept + 1)\n"))
+    }
+
+    @Test func shortPromptsAreNotCollapsed() {
+        let prompt = "just a normal question\nwith a second line"
+        let t = AgentTranscriptReader.parse(lines: [userLine(prompt)])
+        #expect(t.lastUserPrompt == prompt)
+    }
+
+    @Test func attachedImagesBecomePlaceholderChips() {
+        // A prompt with two pasted images: the base64 payload is useless as
+        // prose; the CLI shows [Image #N] chips and so does the overview.
+        let obj: [String: Any] = ["type": "user", "message": ["content": [
+            ["type": "text", "text": "compare these screenshots"],
+            ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "AAAA"]],
+            ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "BBBB"]],
+        ]]]
+        let line = String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+        let t = AgentTranscriptReader.parse(lines: [line])
+        #expect(t.lastUserPrompt == "compare these screenshots\n[Image #1]\n[Image #2]")
+    }
+
+    @Test func imageOnlyPromptStillShowsAsAPrompt() {
+        let obj: [String: Any] = ["type": "user", "message": ["content": [
+            ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "AAAA"]],
+        ]]]
+        let line = String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+        let t = AgentTranscriptReader.parse(lines: [line])
+        #expect(t.lastUserPrompt == "[Image #1]")
+    }
+
+    @Test func imagesInsideToolResultsAreNotPromptChips() {
+        // A screenshot coming back in a tool_result is a result, not
+        // something the human attached.
+        let obj: [String: Any] = ["type": "user", "message": ["content": [
+            ["type": "tool_result", "tool_use_id": "t1", "content": [
+                ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "AAAA"]],
+            ]],
+            ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "BBBB"]],
+        ]]]
+        let line = String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+        let t = AgentTranscriptReader.parse(lines: [userLine("real question"), line])
+        #expect(t.lastUserPrompt == "real question")
     }
 
     @Test func malformedLinesAreSkipped() {
