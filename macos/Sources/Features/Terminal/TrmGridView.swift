@@ -776,13 +776,30 @@ struct TrmGridView: View {
             // size, so this only stops a short message from leaving the pane
             // partly empty.
             return AnyView(cmdClickPeek(
-                AgentOverviewView(pane: agentPane, onClose: onCloseAgentOverview)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading),
+                overviewCellView(agentPane, pane: pane),
                 pane: pane
             ))
         case .stack(let children):
             return AnyView(stackedPaneView(children, stackID: pane.id))
         }
+    }
+
+    /// An overview rendered in its grid cell. A plain click selects the pane
+    /// (routed by the cell-level handler) — peek is deliberately reserved for
+    /// ⌘-click (`cmdClickPeek`), so ordinary clicks can't yank the pane into
+    /// the overlay mid-read. Text selection stays disabled in the cell —
+    /// selectable text swallows the clicks that should select the pane — and
+    /// comes back in the peek overlay, which renders with selection on.
+    private func overviewCellView(
+        _ agentPane: AgentOverviewPane, pane: GridPane
+    ) -> some View {
+        AgentOverviewView(
+            pane: agentPane,
+            onClose: onCloseAgentOverview,
+            allowsTextSelection: false
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .contentShape(Rectangle())
     }
 
     /// ⌘-click anywhere in a non-terminal pane toggles its peek — the pane
@@ -802,12 +819,26 @@ struct TrmGridView: View {
         )
     }
 
+    /// Whether this surface is being rendered in the peek overlay — peeked
+    /// directly, or pulled in as the terminal half of a peeked overview. An
+    /// NSView can only have one superview, so the grid cell must show a
+    /// placeholder in either case or the overlay steals the view.
+    private func surfaceIsInPeekOverlay(_ surface: Ghostty.SurfaceView) -> Bool {
+        guard let peekedID = peekedPane else { return false }
+        if peekedID == ObjectIdentifier(surface) { return true }
+        // A peeked overview brings its bound terminal along.
+        if let overview = findOverview(byID: peekedID) {
+            return overview.surface === surface
+        }
+        return false
+    }
+
     /// A single terminal pane: surface with optional watermark and live summary overlays.
     /// - `index`: the flat grid index (position in `gridPanes`)
     /// - `paneId`: the stable Zig pane ID (monotonic u32, survives pane close/reorder)
     @ViewBuilder
     private func terminalPaneView(_ surface: Ghostty.SurfaceView, index: Int, paneId: Int) -> some View {
-        let isPeeked = peekedPane == ObjectIdentifier(surface)
+        let isPeeked = surfaceIsInPeekOverlay(surface)
         VStack(spacing: 0) {
             // No drag bar for non-stacked panes — they use the surface's own
             // hover-revealed grab handle (SurfaceGrabHandle); peek is wired
@@ -1052,9 +1083,16 @@ struct TrmGridView: View {
     /// cell and the peek overlay would cause the peek to steal the view, and
     /// dismissing the peek would leave the stack cell empty.
     private func stackChildContent(_ pane: GridPane) -> AnyView {
-        // If this pane is currently being peeked, show a placeholder so the
-        // live NSView is only rendered in the peek overlay.
-        if peekedPane == pane.id {
+        // If this pane's content is currently in the peek overlay — peeked
+        // itself, or a terminal pulled in beside its peeked overview — show a
+        // placeholder so the live NSView is only rendered in the overlay.
+        let inOverlay: Bool
+        if case .terminal(let surface) = pane {
+            inOverlay = surfaceIsInPeekOverlay(surface)
+        } else {
+            inOverlay = peekedPane == pane.id
+        }
+        if inOverlay {
             return AnyView(
                 Color.black.opacity(0.6)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1085,8 +1123,7 @@ struct TrmGridView: View {
             return AnyView(cmdClickPeek(pluginPaneView(pluginPane), pane: pane))
         case .agentOverview(let agentPane):
             return AnyView(cmdClickPeek(
-                AgentOverviewView(pane: agentPane, onClose: onCloseAgentOverview)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading),
+                overviewCellView(agentPane, pane: pane),
                 pane: pane
             ))
         case .stack:
@@ -1106,13 +1143,16 @@ struct TrmGridView: View {
         let peekedOverview: AgentOverviewPane? = peekedSurface == nil
             ? findOverview(byID: peekedID)
             : nil
-        // A terminal's Agent Overview joins the peek beside it: expanding the
-        // agent's pane means "show me what this agent is doing", and the
-        // overview is the readable half of that answer. Bound by surface
-        // identity, so it works the same for local and remote panes.
-        let companionOverview: AgentOverviewPane? = peekedSurface.flatMap {
-            findOverview(boundTo: $0)
-        }
+        // Peeking either half of a terminal/overview pair expands the pair:
+        // the overview is the readable half of "what is this agent doing",
+        // the terminal the raw half, and the answer needs both. Bound by
+        // surface identity, so it works the same for local and remote panes;
+        // the companion terminal is only shown when it is actually a pane in
+        // this grid (the overview's binding can outlive the pane).
+        let pairOverview: AgentOverviewPane? =
+            peekedSurface.flatMap { findOverview(boundTo: $0) } ?? peekedOverview
+        let pairSurface: Ghostty.SurfaceView? = peekedSurface
+            ?? peekedOverview?.surface.flatMap { findSurface(byID: ObjectIdentifier($0)) }
 
         // Background scrim — click to dismiss
         Color.black.opacity(0.3)
@@ -1125,7 +1165,7 @@ struct TrmGridView: View {
         GeometryReader { geo in
             HStack {
                 Spacer()
-                if let surface = peekedSurface {
+                if let surface = pairSurface {
                     Ghostty.InspectableSurface(
                         surfaceView: surface,
                         isSplit: false
@@ -1139,7 +1179,7 @@ struct TrmGridView: View {
                         }
                     }
                     .frame(
-                        width: geo.size.width * (companionOverview == nil ? 0.5 : 0.45),
+                        width: geo.size.width * (pairOverview == nil ? 0.5 : 0.45),
                         height: geo.size.height
                     )
                     .cornerRadius(TrmBorder.radius)
@@ -1149,21 +1189,9 @@ struct TrmGridView: View {
                             .allowsHitTesting(false)
                     )
                     .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
+                }
 
-                    if let overview = companionOverview {
-                        AgentOverviewView(pane: overview, onClose: onCloseAgentOverview)
-                            .frame(width: geo.size.width * 0.3, height: geo.size.height)
-                            .cornerRadius(TrmBorder.radius)
-                            .overlay(
-                                RoundedRectangle(
-                                    cornerRadius: TrmBorder.radius, style: .continuous
-                                )
-                                .strokeBorder(TrmBorder.focusedColor, lineWidth: 2)
-                                .allowsHitTesting(false)
-                            )
-                            .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
-                    }
-                } else if let overview = peekedOverview {
+                if let overview = pairOverview {
                     AgentOverviewView(pane: overview, onClose: onCloseAgentOverview)
                         .contextMenu {
                             Button {
@@ -1172,7 +1200,10 @@ struct TrmGridView: View {
                                 Label("Put Back", systemImage: "arrow.uturn.backward")
                             }
                         }
-                        .frame(width: geo.size.width * 0.5, height: geo.size.height)
+                        .frame(
+                            width: geo.size.width * (pairSurface == nil ? 0.5 : 0.3),
+                            height: geo.size.height
+                        )
                         .cornerRadius(TrmBorder.radius)
                         .overlay(
                             RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)

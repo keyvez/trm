@@ -13,6 +13,13 @@ struct AgentOverviewView: View {
     @ObservedObject var pane: AgentOverviewPane
     var onClose: ((AgentOverviewPane) -> Void)? = nil
 
+    /// Whether body text can be selected with the mouse. Off in a grid cell,
+    /// where the overview is a preview and a plain click means "peek this" —
+    /// selectable text would swallow those clicks. On in the peek overlay,
+    /// where reading (and copying arbitrary spans) is the whole point; the
+    /// tap-to-copy links and headings work in both modes.
+    var allowsTextSelection: Bool = true
+
     /// Set briefly after a URL is tapped, driving the "Link copied" pill.
     @State private var didCopyLink = false
 
@@ -180,7 +187,7 @@ struct AgentOverviewView: View {
                         Text(text)
                             .font(.system(size: scaled(11), design: .monospaced))
                             .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
+                            .overviewSelectable(allowsTextSelection)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -423,12 +430,80 @@ struct AgentOverviewView: View {
     }
 
     private func promptText(_ text: String) -> some View {
-        Text(Self.linkified(AttributedString(text)))
-            .font(.system(size: scaled(12.5)))
-            .lineSpacing(3)
-            .foregroundStyle(.secondary)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
+        let linked = Self.linkified(AttributedString(text))
+        return Group {
+            if Self.hasLink(linked) {
+                LinkText(
+                    text: nsProse(
+                        linked,
+                        size: scaled(12.5),
+                        color: .secondaryLabelColor,
+                        lineSpacing: 3
+                    ),
+                    selectable: allowsTextSelection,
+                    onLinkTap: copyLink
+                )
+            } else {
+                Text(linked)
+                    .font(.system(size: scaled(12.5)))
+                    .lineSpacing(3)
+                    .foregroundStyle(.secondary)
+                    .overviewSelectable(allowsTextSelection)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Whether a linkified paragraph actually picked up a link — the switch
+    /// between plain `Text` and the NSTextView-backed `LinkText`.
+    private static func hasLink(_ attr: AttributedString) -> Bool {
+        attr.runs.contains { $0.link != nil }
+    }
+
+    /// Convert a linkified paragraph to AppKit attributes for `LinkText`.
+    /// SwiftUI-scoped attributes don't survive `NSAttributedString(_:)` —
+    /// bionic bold runs carry a SwiftUI `Font`, markdown emphasis carries
+    /// presentation intents — so the runs that matter are mapped by hand.
+    private func nsProse(
+        _ attr: AttributedString,
+        size: CGFloat,
+        monospaced: Bool = false,
+        color: NSColor,
+        lineSpacing: CGFloat,
+        swiftBoldFont: Font? = nil
+    ) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = lineSpacing
+        let base = monospaced
+            ? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+            : NSFont.systemFont(ofSize: size)
+        let out = NSMutableAttributedString()
+        for run in attr.runs {
+            var font = base
+            let intent = run.inlinePresentationIntent ?? []
+            if intent.contains(.code) {
+                font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+            }
+            if intent.contains(.stronglyEmphasized)
+                || (swiftBoldFont != nil && run.font == swiftBoldFont) {
+                font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+            }
+            if intent.contains(.emphasized) {
+                font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+            }
+            var attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: color,
+                .paragraphStyle: paragraph,
+            ]
+            // Link color/underline come from the text view's
+            // linkTextAttributes, applied over these.
+            if let link = run.link { attrs[.link] = link }
+            out.append(NSAttributedString(
+                string: String(attr.characters[run.range]), attributes: attrs
+            ))
+        }
+        return out
     }
 
     /// An attached image, shown as a bounded inline thumbnail.
@@ -529,7 +604,7 @@ struct AgentOverviewView: View {
                         .font(.system(size: 14.5, weight: .semibold))
                         .foregroundStyle(.primary)
                         .padding(.top, 4)
-                        .textSelection(.enabled)
+                        .overviewSelectable(allowsTextSelection)
                 } else {
                     bodyText(part)
                 }
@@ -541,17 +616,35 @@ struct AgentOverviewView: View {
     /// markdown (bold, italics, `code`) rendered instead of shown raw.
     @ViewBuilder
     private func bodyText(_ text: String) -> some View {
+        let linked = pane.bionicEnabled
+            ? Self.linkified(BionicText.attributed(text, font: proseFont, boldFont: proseBoldFont))
+            : Self.linkified(inlineMarkdown(text))
         Group {
-            if pane.bionicEnabled {
-                Text(Self.linkified(BionicText.attributed(text, font: proseFont, boldFont: proseBoldFont)))
+            if Self.hasLink(linked) {
+                LinkText(
+                    text: nsProse(
+                        linked,
+                        size: scaled(13.5),
+                        color: NSColor.labelColor.withAlphaComponent(0.92),
+                        lineSpacing: proseLineSpacing,
+                        swiftBoldFont: proseBoldFont
+                    ),
+                    selectable: allowsTextSelection,
+                    onLinkTap: copyLink
+                )
+            } else if pane.bionicEnabled {
+                Text(linked)
+                    .lineSpacing(proseLineSpacing)
+                    .foregroundStyle(.primary.opacity(0.92))
+                    .overviewSelectable(allowsTextSelection)
             } else {
-                Text(Self.linkified(inlineMarkdown(text)))
+                Text(linked)
                     .font(proseFont)
+                    .lineSpacing(proseLineSpacing)
+                    .foregroundStyle(.primary.opacity(0.92))
+                    .overviewSelectable(allowsTextSelection)
             }
         }
-        .lineSpacing(proseLineSpacing)
-        .foregroundStyle(.primary.opacity(0.92))
-        .textSelection(.enabled)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -645,16 +738,33 @@ struct AgentOverviewView: View {
             // it is offered and reports only a height, so the proposal flows
             // one way. `fixedSize(vertical:)` lets it grow downward for the
             // wrapped lines rather than being clipped to one.
-            Text(Self.linkified(AttributedString(text)))
-                .font(.system(size: scaled(12), design: .monospaced))
-                .lineSpacing(2.5)
-                .foregroundStyle(.primary.opacity(0.88))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 9)
-                .padding(.top, language == nil ? 9 : 2)
+            let linked = Self.linkified(AttributedString(text))
+            Group {
+                if Self.hasLink(linked) {
+                    LinkText(
+                        text: nsProse(
+                            linked,
+                            size: scaled(12),
+                            monospaced: true,
+                            color: NSColor.labelColor.withAlphaComponent(0.88),
+                            lineSpacing: 2.5
+                        ),
+                        selectable: allowsTextSelection,
+                        onLinkTap: copyLink
+                    )
+                } else {
+                    Text(linked)
+                        .font(.system(size: scaled(12), design: .monospaced))
+                        .lineSpacing(2.5)
+                        .foregroundStyle(.primary.opacity(0.88))
+                        .overviewSelectable(allowsTextSelection)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 9)
+            .padding(.top, language == nil ? 9 : 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
@@ -764,3 +874,16 @@ enum AgentOverviewDragContext {
     static var current: Drag? = nil
 }
 
+
+private extension View {
+    /// `.textSelection` takes its selectability statically, so a runtime
+    /// flag needs a branch.
+    @ViewBuilder
+    func overviewSelectable(_ enabled: Bool) -> some View {
+        if enabled {
+            self.textSelection(.enabled)
+        } else {
+            self.textSelection(.disabled)
+        }
+    }
+}

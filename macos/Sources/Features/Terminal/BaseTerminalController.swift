@@ -1823,6 +1823,10 @@ class BaseTerminalController: NSWindowController,
             surfaceToFocus = children.lazy.compactMap {
                 if case .terminal(let s) = $0 { return s } else { return nil }
             }.first
+        case .agentOverview(let overview):
+            // Peeking an overview expands its bound terminal beside it, so
+            // typing should reach the agent that's now on screen.
+            surfaceToFocus = overview.surface
         default:
             surfaceToFocus = nil
         }
