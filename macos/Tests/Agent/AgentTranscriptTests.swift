@@ -361,6 +361,68 @@ struct AgentTranscriptTests {
         #expect(t.lastUserPrompt == "second task")
     }
 
+    // MARK: - Turn history
+
+    @Test func collectsEveryTurnInTheWindow() {
+        let t = AgentTranscriptReader.parse(lines: [
+            userLine("first question"),
+            assistantLine([["type": "text", "text": "first answer"]]),
+            userLine("second question"),
+            assistantLine([["type": "text", "text": "second answer"]]),
+        ])
+        #expect(t.turns.count == 2)
+        #expect(t.turns[0].prompt == "first question")
+        #expect(t.turns[0].blocks == [.paragraph("first answer")])
+        #expect(t.turns[1].prompt == "second question")
+        // The top-level fields still mirror the latest turn.
+        #expect(t.lastUserPrompt == "second question")
+        #expect(t.blocks == [.paragraph("second answer")])
+    }
+
+    @Test func archivedTurnKeepsItsActivity() {
+        let t = AgentTranscriptReader.parse(lines: [
+            userLine("build it"),
+            assistantLine([["type": "tool_use", "id": "t1", "name": "Bash",
+                            "input": ["command": "make"]]]),
+            toolResultLine("t1"),
+            userLine("now test it"),
+        ])
+        #expect(t.turns.count == 2)
+        #expect(t.turns[0].activity.count == 1)
+        #expect(t.turns[0].activity[0].name == "Bash")
+        #expect(t.turns[0].activity[0].finished)
+        // The live turn starts clean, as before.
+        #expect(t.activity.isEmpty)
+    }
+
+    @Test func leadingFragmentWithoutPromptIsStillATurn() {
+        // The tail window can open mid-turn: assistant output whose prompt
+        // was cut off upstream still deserves a page in history.
+        let t = AgentTranscriptReader.parse(lines: [
+            assistantLine([["type": "text", "text": "tail of an old answer"]]),
+            userLine("new question"),
+        ])
+        #expect(t.turns.count == 2)
+        #expect(t.turns[0].prompt == nil)
+        #expect(t.turns[0].blocks == [.paragraph("tail of an old answer")])
+        #expect(t.turns[1].prompt == "new question")
+    }
+
+    @Test func turnIDsAreStableAsNewTurnsAppend(){
+        let base = [
+            userLine("first"),
+            assistantLine([["type": "text", "text": "answer one"]]),
+        ]
+        let before = AgentTranscriptReader.parse(lines: base)
+        let after = AgentTranscriptReader.parse(lines: base + [
+            userLine("second"),
+            assistantLine([["type": "text", "text": "answer two"]]),
+        ])
+        #expect(before.turns.count == 1)
+        #expect(after.turns.count == 2)
+        #expect(before.turns[0].id == after.turns[0].id)
+    }
+
     @Test func longToolDetailIsTruncated() {
         let long = String(repeating: "x", count: 200)
         let detail = AgentTranscriptReader.toolDetail(name: "Bash", input: ["command": long])

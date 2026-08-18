@@ -41,6 +41,27 @@ struct AgentTranscript: Equatable {
     /// stays the plain-text form for copying and compact contexts.
     var promptBlocks: [Block] = []
 
+    /// Every turn found in the parse window, oldest first. The last entry is
+    /// the turn the top-level fields mirror; earlier entries let the overview
+    /// page back through the session. The first entry may be a fragment — a
+    /// turn whose beginning was cut off by the tail window.
+    var turns: [Turn] = []
+
+    /// One human turn: the prompt and everything the agent did in response.
+    struct Turn: Equatable, Identifiable {
+        var prompt: String? = nil
+        var promptBlocks: [Block] = []
+        var blocks: [Block] = []
+        var activity: [ToolActivity] = []
+
+        /// Stable across polls: turns only append, and a finished turn's
+        /// prompt and first tool call never change — so a reader paging
+        /// through history isn't shifted when a new turn arrives.
+        var id: String { "\(prompt?.hashValue ?? 0):\(activity.first?.id ?? "-")" }
+
+        var isEmpty: Bool { prompt == nil && blocks.isEmpty && activity.isEmpty }
+    }
+
     /// True when the agent appears to still be working: the newest transcript
     /// entry is a tool call that never received a result.
     var isWorking: Bool = false
@@ -523,14 +544,26 @@ enum AgentTranscriptReader {
         var result = AgentTranscript()
 
         // Tool calls keyed by tool_use id, in call order, so a later
-        // tool_result can mark the matching call finished.
+        // tool_result can mark the matching call finished. Cleared at each
+        // turn boundary along with `current`.
         var toolOrder: [String] = []
         var tools: [String: AgentTranscript.ToolActivity] = [:]
 
-        // Blocks of the newest assistant message that carried any text. An
-        // assistant entry that only makes tool calls must not blank out the
-        // prose the agent wrote just before it.
-        var latestBlocks: [AgentTranscript.Block] = []
+        // The turn being accumulated, plus every completed turn seen so far.
+        // `current.blocks` holds the newest assistant message that carried
+        // any text — an assistant entry that only makes tool calls must not
+        // blank out the prose the agent wrote just before it.
+        var turns: [AgentTranscript.Turn] = []
+        var current = AgentTranscript.Turn()
+
+        // A new human prompt closes out the turn in flight.
+        func finalizeCurrentTurn() {
+            current.activity = Array(toolOrder.compactMap { tools[$0] }.suffix(maxActivity))
+            if !current.isEmpty { turns.append(current) }
+            current = .init()
+            toolOrder.removeAll()
+            tools.removeAll()
+        }
 
         // Context tokens in the newest assistant entry that reported usage:
         // input + cache creation + cache read is what occupies the window.
@@ -552,13 +585,11 @@ enum AgentTranscriptReader {
                 if let str = message["content"] as? String {
                     let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty, !isSyntheticPrompt(trimmed) {
+                        // A new human turn: archive the one in flight.
+                        finalizeCurrentTurn()
                         let collapsed = collapsedPrompt(trimmed)
-                        result.lastUserPrompt = boundedPrompt(collapsed)
-                        result.promptBlocks = splitDetectingUnfencedCode(collapsed)
-                        // A new human turn supersedes the previous turn's activity.
-                        toolOrder.removeAll()
-                        tools.removeAll()
-                        latestBlocks.removeAll()
+                        current.prompt = boundedPrompt(collapsed)
+                        current.promptBlocks = splitDetectingUnfencedCode(collapsed)
                     }
                 } else if let arr = message["content"] as? [[String: Any]] {
                     var sawToolResult = false
@@ -617,22 +648,19 @@ enum AgentTranscriptReader {
                         imageThumbnails.removeAll()
                     }
                     if textPrompt != nil || imageCount > 0 {
+                        // A tool_result entry with embedded text is the
+                        // harness replying to the agent, not a new human
+                        // turn, so it must not close out the turn in flight.
+                        if !sawToolResult { finalizeCurrentTurn() }
                         let collapsed = textPrompt.map { collapsedPrompt($0) }
                         var parts: [String] = []
                         if let collapsed { parts.append(collapsed) }
                         parts.append(contentsOf: (0..<imageCount).map { "[Image #\($0 + 1)]" })
-                        result.lastUserPrompt = boundedPrompt(parts.joined(separator: "\n"))
+                        current.prompt = boundedPrompt(parts.joined(separator: "\n"))
 
                         var pblocks = collapsed.map { splitDetectingUnfencedCode($0) } ?? []
                         pblocks.append(contentsOf: imageThumbnails.map { .image($0) })
-                        result.promptBlocks = pblocks
-                    }
-                    // A pure tool_result entry is the harness replying to the
-                    // agent, not a new human turn, so it must not reset state.
-                    if !sawToolResult, result.lastUserPrompt != nil {
-                        toolOrder.removeAll()
-                        tools.removeAll()
-                        latestBlocks.removeAll()
+                        current.promptBlocks = pblocks
                     }
                 }
 
@@ -667,17 +695,21 @@ enum AgentTranscriptReader {
                         break
                     }
                 }
-                if !blocks.isEmpty { latestBlocks = blocks }
+                if !blocks.isEmpty { current.blocks = blocks }
 
             default:
                 continue
             }
         }
 
-        result.blocks = latestBlocks
-        result.activity = Array(
-            toolOrder.compactMap { tools[$0] }.suffix(maxActivity)
-        )
+        finalizeCurrentTurn()
+        result.turns = turns
+        if let last = turns.last {
+            result.blocks = last.blocks
+            result.activity = last.activity
+            result.lastUserPrompt = last.prompt
+            result.promptBlocks = last.promptBlocks
+        }
         result.isWorking = result.activity.contains { !$0.finished }
         result.contextUsedPercent = latestContextTokens.map(contextPercent(usedTokens:))
         return result
@@ -891,7 +923,16 @@ enum CodexTranscriptReader {
         var result = AgentTranscript()
         var toolOrder: [String] = []
         var tools: [String: AgentTranscript.ToolActivity] = [:]
-        var latestBlocks: [AgentTranscript.Block] = []
+        var turns: [AgentTranscript.Turn] = []
+        var current = AgentTranscript.Turn()
+
+        func finalizeCurrentTurn() {
+            current.activity = Array(toolOrder.compactMap { tools[$0] }.suffix(maxActivity))
+            if !current.isEmpty { turns.append(current) }
+            current = .init()
+            toolOrder.removeAll()
+            tools.removeAll()
+        }
 
         var latestPercent: Int? = nil
 
@@ -930,12 +971,10 @@ enum CodexTranscriptReader {
                         guard let text = block["text"] as? String else { continue }
                         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !trimmed.isEmpty, !isSynthetic(trimmed) {
+                            finalizeCurrentTurn()
                             let collapsed = AgentTranscriptReader.collapsedPrompt(trimmed)
-                            result.lastUserPrompt = AgentTranscriptReader.boundedPrompt(collapsed)
-                            result.promptBlocks = AgentTranscriptReader.splitDetectingUnfencedCode(collapsed)
-                            toolOrder.removeAll()
-                            tools.removeAll()
-                            latestBlocks.removeAll()
+                            current.prompt = AgentTranscriptReader.boundedPrompt(collapsed)
+                            current.promptBlocks = AgentTranscriptReader.splitDetectingUnfencedCode(collapsed)
                         }
                     }
                 } else if role == "assistant" {
@@ -945,7 +984,7 @@ enum CodexTranscriptReader {
                             blocks.append(contentsOf: AgentTranscriptReader.splitProseAndCode(text))
                         }
                     }
-                    if !blocks.isEmpty { latestBlocks = blocks }
+                    if !blocks.isEmpty { current.blocks = blocks }
                 }
                 // Developer messages are harness plumbing — ignored.
 
@@ -976,8 +1015,14 @@ enum CodexTranscriptReader {
             }
         }
 
-        result.blocks = latestBlocks
-        result.activity = Array(toolOrder.compactMap { tools[$0] }.suffix(maxActivity))
+        finalizeCurrentTurn()
+        result.turns = turns
+        if let last = turns.last {
+            result.blocks = last.blocks
+            result.activity = last.activity
+            result.lastUserPrompt = last.prompt
+            result.promptBlocks = last.promptBlocks
+        }
         result.isWorking = result.activity.contains { !$0.finished }
         result.contextUsedPercent = latestPercent
         return result

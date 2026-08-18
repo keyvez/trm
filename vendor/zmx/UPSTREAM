@@ -24,6 +24,16 @@ Local patches (record every deviation from upstream here):
   trm freezing on restore. Input-based promotion still overrides, so an
   active window reclaims leadership normally.
 
+- src/util.zig serializeTerminalState (~553, ~574): both replay phases
+  format with `.unwrap = true` instead of the plain `.vt` preset. Upstream
+  replays each grid row terminated with \r\n, which hard-breaks
+  soft-wrapped lines in the reattaching client — copying a wrapped URL
+  after any reattach picked up newlines the program never printed.
+  Unwrapping emits one logical line per wrapped run and lets the client's
+  autowrap re-create the wrap flags (and reflow at a different width).
+  Covered by test "serializeTerminalState roundtrip preserves soft-wrap
+  for copy" in src/util.zig (also a local addition).
+
 To update: clone upstream at a new commit, copy src/*.zig + LICENSE over,
 re-apply the patches listed above, update this file, and run
 `zig build test` + a manual attach/detach smoke test.

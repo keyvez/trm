@@ -550,7 +550,16 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
             var sb_bottom = sb_bottom_row;
             sb_bottom.x = @intCast(pages.cols - 1);
 
-            var scroll_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
+            var scroll_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .{
+                // Soft-wrapped rows are emitted as one logical line (no \r\n
+                // at the wrap point) so the client terminal re-wraps them and
+                // records the wrap flags. Without this, every reattach
+                // hard-breaks wrapped lines and copying a wrapped URL from
+                // the client picks up newlines the program never printed. A
+                // client at a different width also reflows correctly.
+                .emit = .vt,
+                .unwrap = true,
+            });
             scroll_fmt.content = .{
                 .selection = ghostty_vt.Selection.init(
                     screen_top,
@@ -571,7 +580,13 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     }
 
     // Phase 2: visible screen with full extras (modes, cursor, keyboard, etc.)
-    var vis_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
+    // Unwrap for the same copy-fidelity reason as phase 1: at the same client
+    // width the content re-wraps at identical columns, so layout and the CUP
+    // cursor restore are unchanged, but wrap flags survive the roundtrip.
+    var vis_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .{
+        .emit = .vt,
+        .unwrap = true,
+    });
 
     // Restrict content to the active viewport only
     const active_tl = pages.pin(.{ .active = .{ .x = 0, .y = 0 } });
@@ -1169,6 +1184,54 @@ test "serializeTerminalState with scrollback preserves visible content" {
     try expectMarkerAtRow(alloc, &client, "MARK_B", 5);
     try expectMarkerAtRow(alloc, &client, "MARK_C", 9);
     try expectCursorAt(&client, 15, 19);
+}
+
+test "serializeTerminalState roundtrip preserves soft-wrap for copy" {
+    const alloc = testing.allocator;
+
+    // A long URL that soft-wraps across several 20-col rows, in both the
+    // scrollback (phase 1) and the visible screen (phase 2).
+    // Sized so "first …" ends up fully inside the scrollback and
+    // "second …" fully inside the visible screen: a logical line that
+    // straddles the two replay phases is split by the inter-phase clear
+    // and is expected to lose its wrap there.
+    const url = "https://example.com/a/very/long/path/that/wraps/around";
+    var term = try testCreateTerminal(alloc, 20, 6, "");
+    defer term.deinit(alloc);
+
+    {
+        var stream = term.vtStream();
+        defer stream.deinit();
+        try stream.nextSlice("first " ++ url ++ "\r\n");
+        // Enough fill that "first …" scrolls fully off the client's screen
+        // during phase 1 replay: the inter-phase \x1b[2J erases whatever
+        // scrollback tail is still on the visible screen (pre-existing
+        // upstream behavior, independent of wrap preservation).
+        var buf: [32]u8 = undefined;
+        for (0..10) |i| {
+            const line = std.fmt.bufPrint(&buf, "FILL_{d}\r\n", .{i}) catch unreachable;
+            try stream.nextSlice(line);
+        }
+        try stream.nextSlice("second " ++ url ++ "\r\n");
+    }
+
+    var client = try serializeRoundtrip(alloc, &term);
+    defer client.deinit(alloc);
+
+    // Visual layout is unchanged (same width, same wrap columns).
+    try expectScreensMatch(alloc, &term, &client);
+
+    // Copy-style extraction (which respects wrap flags, like the real
+    // clipboard path) must yield the URLs unbroken — no newline inserted
+    // at the wrap points. Dump the whole screen so the scrollback line is
+    // covered too, not just the viewport.
+    const unwrapped = try client.screens.active.dumpStringAllocUnwrapped(
+        alloc,
+        .{ .screen = .{} },
+    );
+    defer alloc.free(unwrapped);
+    try testing.expect(std.mem.indexOf(u8, unwrapped, "first " ++ url) != null);
+    try testing.expect(std.mem.indexOf(u8, unwrapped, "second " ++ url) != null);
 }
 
 test "serializeTerminalState nested roundtrip preserves content" {

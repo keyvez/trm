@@ -65,6 +65,7 @@ pub fn build(b: *std.Build) !void {
     // zmx session-persistence tool (vendor/zmx), bundled into trm.app so
     // panes can run under detachable per-session daemons.
     const zmx = try buildpkg.GhosttyZmx.init(b, &config, &mod);
+    zmx.addTestStepDependencies(test_step);
 
     // Ghostty docs
     const docs = try buildpkg.GhosttyDocs.init(b, &deps);

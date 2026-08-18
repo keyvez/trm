@@ -768,20 +768,38 @@ struct TrmGridView: View {
                 terminalPaneView(surface, index: index, paneId: surface.paneId ?? index)
             )
         case .webview(let webviewPane):
-            return AnyView(webviewPaneView(webviewPane))
+            return AnyView(cmdClickPeek(webviewPaneView(webviewPane), pane: pane))
         case .plugin(let pluginPane):
-            return AnyView(pluginPaneView(pluginPane))
+            return AnyView(cmdClickPeek(pluginPaneView(pluginPane), pane: pane))
         case .agentOverview(let agentPane):
             // Sized to fill its cell. The cell already proposes a definite
             // size, so this only stops a short message from leaving the pane
             // partly empty.
-            return AnyView(
+            return AnyView(cmdClickPeek(
                 AgentOverviewView(pane: agentPane, onClose: onCloseAgentOverview)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading),
+                pane: pane
+            ))
         case .stack(let children):
             return AnyView(stackedPaneView(children, stackID: pane.id))
         }
+    }
+
+    /// ⌘-click anywhere in a non-terminal pane toggles its peek — the pane
+    /// bar is a small target, and "expand this so I can read it" is the main
+    /// thing done with an overview. Terminals are deliberately excluded:
+    /// ⌘-click inside a terminal is Ghostty's open-URL gesture. Simultaneous
+    /// so ordinary clicks (buttons, links, selection) are untouched.
+    private func cmdClickPeek(_ view: some View, pane: GridPane) -> some View {
+        view.simultaneousGesture(
+            TapGesture().modifiers(.command).onEnded {
+                if peekedPane == pane.id {
+                    onDismissPeek?()
+                } else {
+                    onPeekPane?(pane)
+                }
+            }
+        )
     }
 
     /// A single terminal pane: surface with optional watermark and live summary overlays.
@@ -1062,14 +1080,15 @@ struct TrmGridView: View {
             }
             )
         case .webview(let webviewPane):
-            return AnyView(webviewPaneView(webviewPane))
+            return AnyView(cmdClickPeek(webviewPaneView(webviewPane), pane: pane))
         case .plugin(let pluginPane):
-            return AnyView(pluginPaneView(pluginPane))
+            return AnyView(cmdClickPeek(pluginPaneView(pluginPane), pane: pane))
         case .agentOverview(let agentPane):
-            return AnyView(
+            return AnyView(cmdClickPeek(
                 AgentOverviewView(pane: agentPane, onClose: onCloseAgentOverview)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading),
+                pane: pane
+            ))
         case .stack:
             // Nested stacks not supported — flatten would have happened at model level
             return AnyView(EmptyView())
@@ -1087,6 +1106,13 @@ struct TrmGridView: View {
         let peekedOverview: AgentOverviewPane? = peekedSurface == nil
             ? findOverview(byID: peekedID)
             : nil
+        // A terminal's Agent Overview joins the peek beside it: expanding the
+        // agent's pane means "show me what this agent is doing", and the
+        // overview is the readable half of that answer. Bound by surface
+        // identity, so it works the same for local and remote panes.
+        let companionOverview: AgentOverviewPane? = peekedSurface.flatMap {
+            findOverview(boundTo: $0)
+        }
 
         // Background scrim — click to dismiss
         Color.black.opacity(0.3)
@@ -1112,7 +1138,10 @@ struct TrmGridView: View {
                             Label("Put Back", systemImage: "arrow.uturn.backward")
                         }
                     }
-                    .frame(width: geo.size.width * 0.5, height: geo.size.height)
+                    .frame(
+                        width: geo.size.width * (companionOverview == nil ? 0.5 : 0.45),
+                        height: geo.size.height
+                    )
                     .cornerRadius(TrmBorder.radius)
                     .overlay(
                         RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
@@ -1120,6 +1149,20 @@ struct TrmGridView: View {
                             .allowsHitTesting(false)
                     )
                     .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
+
+                    if let overview = companionOverview {
+                        AgentOverviewView(pane: overview, onClose: onCloseAgentOverview)
+                            .frame(width: geo.size.width * 0.3, height: geo.size.height)
+                            .cornerRadius(TrmBorder.radius)
+                            .overlay(
+                                RoundedRectangle(
+                                    cornerRadius: TrmBorder.radius, style: .continuous
+                                )
+                                .strokeBorder(TrmBorder.focusedColor, lineWidth: 2)
+                                .allowsHitTesting(false)
+                            )
+                            .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
+                    }
                 } else if let overview = peekedOverview {
                     AgentOverviewView(pane: overview, onClose: onCloseAgentOverview)
                         .contextMenu {
@@ -1154,6 +1197,27 @@ struct TrmGridView: View {
                 for child in children {
                     if case .agentOverview(let overview) = child,
                        ObjectIdentifier(overview) == id {
+                        return overview
+                    }
+                }
+            default:
+                break
+            }
+        }
+        return nil
+    }
+
+    /// Find the agent overview pane bound to a terminal surface, if one is
+    /// open anywhere in the grid (top-level or inside a stack).
+    private func findOverview(boundTo surface: Ghostty.SurfaceView) -> AgentOverviewPane? {
+        for pane in panes {
+            switch pane {
+            case .agentOverview(let overview):
+                if overview.surface === surface { return overview }
+            case .stack(let children):
+                for child in children {
+                    if case .agentOverview(let overview) = child,
+                       overview.surface === surface {
                         return overview
                     }
                 }

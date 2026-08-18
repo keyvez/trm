@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SystemConfiguration
 import os
 
 /// Bonjour advertising and discovery for trm hosts on the local network.
@@ -155,7 +156,7 @@ final class RemoteHostDiscovery {
     /// Rebuild the host list from a browse result set.
     private func updateHosts(from results: Set<NWBrowser.Result>) {
         var found: [Host] = []
-        let localMdns = Self.mdnsHostname(forServiceName: Self.localHostName)
+        let localNames = Self.localMdnsNames
 
         for result in results {
             guard case let .service(name, _, _, _) = result.endpoint else { continue }
@@ -167,8 +168,12 @@ final class RemoteHostDiscovery {
             // compared by hostname, not by instance name.
             let hostname = Self.mdnsHostname(forServiceName: name)
 
-            // Don't offer this machine as a remote target.
-            guard hostname != localMdns else { continue }
+            // Don't offer this machine as a remote target. Its advertisement
+            // can arrive under any of several names (LocalHostName from the
+            // LaunchAgent, sharing name from a running trm, DNS name), so
+            // check against all of them — a missed match here auto-connects
+            // a "remote" pane to the machine it's already on.
+            guard !Self.isOwnHostname(hostname, localNames: localNames) else { continue }
 
             var port = 22
             var user: String?
@@ -200,7 +205,9 @@ final class RemoteHostDiscovery {
             return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
         var seenDestinations = Set<String>()
-        found = found.filter { seenDestinations.insert("\($0.hostname):\($0.port)").inserted }
+        found = found.filter {
+            seenDestinations.insert("\($0.hostname.lowercased()):\($0.port)").inserted
+        }
         found.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
         guard found != hosts else { return }
@@ -217,20 +224,50 @@ final class RemoteHostDiscovery {
 
     /// This machine's Bonjour instance name.
     static var localHostName: String {
-        // .localizedName is the user-facing sharing name; fall back to the
-        // POSIX hostname when it isn't available.
-        if let name = Host_localizedName(), !name.isEmpty { return name }
-        return ProcessInfo.processInfo.hostName
+        // The mDNS LocalHostName (`scutil --get LocalHostName`) is the name
+        // Bonjour actually answers to as "<name>.local" — the only choice
+        // that's guaranteed resolvable by other machines. ProcessInfo's
+        // hostName is whatever DNS says (often the router's idea of the
+        // machine, e.g. "mini.attlocal.net") and can disagree in both
+        // spelling and case.
+        if let name = SCDynamicStoreCopyLocalHostName(nil) as String?, !name.isEmpty {
+            return name
+        }
+        return dnsDerivedHostName()
     }
 
-    private static func Host_localizedName() -> String? {
-        // ProcessInfo.hostName returns e.g. "mac.local"; strip the domain so
-        // the advertised name matches the sharing name users recognise.
+    /// First label of the DNS hostname — the fallback identity when
+    /// SystemConfiguration can't provide the mDNS name.
+    private static func dnsDerivedHostName() -> String {
         let raw = ProcessInfo.processInfo.hostName
         if let dot = raw.firstIndex(of: ".") {
             return String(raw[raw.startIndex..<dot])
         }
         return raw
+    }
+
+    /// Every `.local` hostname this machine may be advertised under,
+    /// lowercased: the mDNS LocalHostName (used by the always-on
+    /// LaunchAgent), the sharing name mapped the way discovery maps instance
+    /// names, and the DNS-derived name. Self-filtering checks all of them
+    /// because the advertisement and this process derive the machine's name
+    /// through different APIs that are free to disagree.
+    static var localMdnsNames: Set<String> {
+        var names: Set<String> = []
+        if let name = SCDynamicStoreCopyLocalHostName(nil) as String?, !name.isEmpty {
+            names.insert(mdnsHostname(forServiceName: name).lowercased())
+        }
+        if let name = SCDynamicStoreCopyComputerName(nil, nil) as String?, !name.isEmpty {
+            names.insert(mdnsHostname(forServiceName: name).lowercased())
+        }
+        names.insert(mdnsHostname(forServiceName: dnsDerivedHostName()).lowercased())
+        return names
+    }
+
+    /// Whether a discovered hostname is one of this machine's own names.
+    /// DNS names are case-insensitive, so the comparison is too.
+    static func isOwnHostname(_ hostname: String, localNames: Set<String>) -> Bool {
+        localNames.contains(hostname.lowercased())
     }
 
     /// Map a Bonjour instance name to a resolvable `.local` hostname.

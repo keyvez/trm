@@ -13,6 +13,9 @@ struct AgentOverviewView: View {
     @ObservedObject var pane: AgentOverviewPane
     var onClose: ((AgentOverviewPane) -> Void)? = nil
 
+    /// Set briefly after a URL is tapped, driving the "Link copied" pill.
+    @State private var didCopyLink = false
+
     // MARK: - Type scale
 
     /// Every size in the view is expressed through this, so the whole scale
@@ -31,6 +34,16 @@ struct AgentOverviewView: View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.5)
+            scrollBody
+        }
+        // Darker than the standard text background: the overview sits beside
+        // terminals, and matching their darker ground keeps the eye from
+        // treating it as a bright document panel in a dark workspace.
+        .background(Self.paneBackground)
+    }
+
+    private var scrollBody: some View {
+        ZStack(alignment: .bottom) {
             ScrollView {
                 // Deliberately NOT a LazyVStack. A lazy stack inside a
                 // ScrollView has to estimate the height of blocks it has not
@@ -45,8 +58,19 @@ struct AgentOverviewView: View {
                     // An empty selection renders nothing, which just looks
                     // broken — fall back to everything.
                     let sections = pane.sections.isEmpty ? .all : pane.sections
-                    let errors = pane.transcript.activity.filter(\.isError)
+                    // When browsing history, every section renders the
+                    // archived turn; live (offset 0) renders the transcript's
+                    // top-level fields.
+                    let viewed = pane.displayedTurn
+                    let prompt = viewed?.prompt ?? pane.transcript.lastUserPrompt
+                    let promptBlocks = viewed?.promptBlocks ?? pane.transcript.promptBlocks
+                    let activity = viewed?.activity ?? pane.transcript.activity
+                    let blocks = viewed?.blocks ?? pane.transcript.blocks
+                    let errors = activity.filter(\.isError)
 
+                    if pane.turnOffset > 0 {
+                        earlierTurnBanner
+                    }
                     if sections.contains(.errors) {
                         if errors.isEmpty {
                             Text("No failed tool calls in this turn.")
@@ -57,16 +81,16 @@ struct AgentOverviewView: View {
                         }
                     }
                     if sections.contains(.prompt),
-                       let prompt = pane.transcript.lastUserPrompt {
-                        promptSection(prompt)
+                       let prompt {
+                        promptSection(prompt, blocks: promptBlocks)
                     }
                     if sections.contains(.activity),
-                       !pane.transcript.activity.isEmpty {
-                        activitySection
+                       !activity.isEmpty {
+                        activitySection(activity)
                     }
                     if sections.contains(.reply),
-                       !pane.transcript.blocks.isEmpty {
-                        messageSection
+                       !blocks.isEmpty {
+                        messageSection(blocks)
                     }
                     if let status = pane.statusMessage {
                         Text(status)
@@ -79,11 +103,41 @@ struct AgentOverviewView: View {
                 .padding(.vertical, 16)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Tapping any link in the overview copies it instead of opening a
+            // browser: the overview is a reading surface, and what you want
+            // from a URL an agent printed is almost always the URL itself —
+            // to paste into a browser profile, a message, or another pane.
+            .environment(\.openURL, OpenURLAction { url in
+                copyLink(url)
+                return .handled
+            })
+
+            if didCopyLink {
+                HStack(spacing: 5) {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text("Link copied")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                .padding(.bottom, 10)
+                .transition(.opacity)
+                .allowsHitTesting(false)
+            }
         }
-        // Darker than the standard text background: the overview sits beside
-        // terminals, and matching their darker ground keeps the eye from
-        // treating it as a bright document panel in a dark workspace.
-        .background(Self.paneBackground)
+    }
+
+    private func copyLink(_ url: URL) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.absoluteString, forType: .string)
+        withAnimation(.easeOut(duration: 0.12)) { didCopyLink = true }
+        Task {
+            try? await Task.sleep(for: .milliseconds(1500))
+            withAnimation(.easeOut(duration: 0.25)) { didCopyLink = false }
+        }
     }
 
     /// The overview's ground colour — a dark slate that reads as part of the
@@ -163,6 +217,41 @@ struct AgentOverviewView: View {
             }
 
             Spacer()
+
+            // Turn navigation: page back through the session's earlier
+            // prompts and replies. Hidden until there is history to visit.
+            if pane.turnCount > 1 || pane.turnOffset > 0 {
+                HStack(spacing: 2) {
+                    Button(action: { pane.goToOlderTurn() }) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 9, weight: .semibold))
+                            .opacity(pane.canGoOlderTurn ? 1 : 0.3)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!pane.canGoOlderTurn)
+                    .help("Previous turn")
+
+                    if pane.turnOffset > 0 {
+                        Button(action: { pane.goToLatestTurn() }) {
+                            Text("\(pane.turnCount - pane.turnOffset)/\(pane.turnCount)")
+                                .font(.system(size: 9, weight: .medium))
+                                .monospacedDigit()
+                        }
+                        .buttonStyle(.plain)
+                        .help("Back to latest turn")
+                    }
+
+                    Button(action: { pane.goToNewerTurn() }) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .opacity(pane.canGoNewerTurn ? 1 : 0.3)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!pane.canGoNewerTurn)
+                    .help("Next turn")
+                }
+                .foregroundStyle(pane.turnOffset > 0 ? Color.accentColor : Color.secondary)
+            }
 
             // What the pane shows. A long session holds far more than fits in
             // a narrow column, and which part matters depends on the moment —
@@ -277,7 +366,31 @@ struct AgentOverviewView: View {
 
     // MARK: - Sections
 
-    private func promptSection(_ prompt: String) -> some View {
+    /// Banner shown while paging through history, with the way back.
+    private var earlierTurnBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 10))
+            Text("Turn \(pane.turnCount - pane.turnOffset) of \(pane.turnCount)")
+                .font(.system(size: scaled(11), weight: .medium))
+            Spacer(minLength: 0)
+            Button(action: { pane.goToLatestTurn() }) {
+                Text("Latest")
+                    .font(.system(size: scaled(11), weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.accentColor.opacity(0.08))
+        )
+    }
+
+    private func promptSection(_ prompt: String, blocks promptBlocks: [AgentTranscript.Block]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             copyableSectionLabel("You asked") { prompt }
             HStack(alignment: .top, spacing: 0) {
@@ -288,10 +401,10 @@ struct AgentOverviewView: View {
                 // reply gets, and show attached images inline; the plain
                 // string remains the fallback (and what copy yields).
                 VStack(alignment: .leading, spacing: 8) {
-                    if pane.transcript.promptBlocks.isEmpty {
+                    if promptBlocks.isEmpty {
                         promptText(prompt)
                     } else {
-                        ForEach(pane.transcript.promptBlocks) { block in
+                        ForEach(promptBlocks) { block in
                             switch block {
                             case .paragraph(let text):
                                 promptText(text)
@@ -310,7 +423,7 @@ struct AgentOverviewView: View {
     }
 
     private func promptText(_ text: String) -> some View {
-        Text(text)
+        Text(Self.linkified(AttributedString(text)))
             .font(.system(size: scaled(12.5)))
             .lineSpacing(3)
             .foregroundStyle(.secondary)
@@ -334,17 +447,18 @@ struct AgentOverviewView: View {
         }
     }
 
-    private var activitySection: some View {
+    private func activitySection(_ activity: [AgentTranscript.ToolActivity]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             copyableSectionLabel(
-                pane.transcript.isWorking ? "Working on" : "Recent activity"
+                pane.turnOffset == 0 && pane.transcript.isWorking
+                    ? "Working on" : "Recent activity"
             ) {
-                pane.transcript.activity
+                activity
                     .map { [$0.name, $0.detail].compactMap { $0 }.joined(separator: " ") }
                     .joined(separator: "\n")
             }
             VStack(alignment: .leading, spacing: 5) {
-                ForEach(pane.transcript.activity) { item in
+                ForEach(activity) { item in
                     HStack(alignment: .firstTextBaseline, spacing: 7) {
                         Image(systemName: item.finished ? "checkmark.circle.fill" : "circle.dotted")
                             .font(.system(size: 9))
@@ -374,10 +488,10 @@ struct AgentOverviewView: View {
         }
     }
 
-    private var messageSection: some View {
+    private func messageSection(_ blocks: [AgentTranscript.Block]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             copyableSectionLabel("\(pane.agentKind.displayName) said") {
-                pane.transcript.blocks.map { block in
+                blocks.map { block in
                     switch block {
                     case .paragraph(let text): return text
                     case .code(_, let text): return text
@@ -385,7 +499,7 @@ struct AgentOverviewView: View {
                     }
                 }.joined(separator: "\n\n")
             }
-            ForEach(pane.transcript.blocks) { block in
+            ForEach(blocks) { block in
                 switch block {
                 case .paragraph(let text):
                     paragraphView(text)
@@ -429,9 +543,9 @@ struct AgentOverviewView: View {
     private func bodyText(_ text: String) -> some View {
         Group {
             if pane.bionicEnabled {
-                Text(BionicText.attributed(text, font: proseFont, boldFont: proseBoldFont))
+                Text(Self.linkified(BionicText.attributed(text, font: proseFont, boldFont: proseBoldFont)))
             } else {
-                Text(inlineMarkdown(text))
+                Text(Self.linkified(inlineMarkdown(text)))
                     .font(proseFont)
             }
         }
@@ -460,6 +574,45 @@ struct AgentOverviewView: View {
             markdown: text,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(text)
+    }
+
+    /// Mark bare URLs as tappable links (styled so they're discoverable);
+    /// ranges that already carry a markdown link are left as they are. Taps
+    /// route through the view's `openURL` override, which copies rather than
+    /// opens — see `scrollBody`.
+    static func linkified(_ attr: AttributedString) -> AttributedString {
+        var result = attr
+        let plain = String(result.characters)
+        // Cheap pre-check: NSDataDetector on every paragraph of every poll
+        // would be wasted work for the common linkless paragraph.
+        guard plain.contains("://") || plain.contains("www.") else { return result }
+        guard let detector = try? NSDataDetector(
+            types: NSTextCheckingResult.CheckingType.link.rawValue
+        ) else { return result }
+
+        let matches = detector.matches(
+            in: plain,
+            range: NSRange(plain.startIndex..., in: plain)
+        )
+        for match in matches {
+            guard let url = match.url,
+                  let stringRange = Range(match.range, in: plain) else { continue }
+            // Map the String range onto the AttributedString by character
+            // offset — both views index the same Character sequence.
+            let lowerOffset = plain.distance(from: plain.startIndex, to: stringRange.lowerBound)
+            let length = plain.distance(from: stringRange.lowerBound, to: stringRange.upperBound)
+            guard let lower = result.characters.index(
+                result.startIndex, offsetBy: lowerOffset, limitedBy: result.endIndex
+            ), let upper = result.characters.index(
+                lower, offsetBy: length, limitedBy: result.endIndex
+            ) else { continue }
+            let range = lower..<upper
+            guard result[range].link == nil else { continue }
+            result[range].link = url
+            result[range].foregroundColor = .accentColor
+            result[range].underlineStyle = .single
+        }
+        return result
     }
 
     // MARK: - Code
@@ -492,7 +645,7 @@ struct AgentOverviewView: View {
             // it is offered and reports only a height, so the proposal flows
             // one way. `fixedSize(vertical:)` lets it grow downward for the
             // wrapped lines rather than being clipped to one.
-            Text(text)
+            Text(Self.linkified(AttributedString(text)))
                 .font(.system(size: scaled(12), design: .monospaced))
                 .lineSpacing(2.5)
                 .foregroundStyle(.primary.opacity(0.88))

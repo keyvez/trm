@@ -4161,6 +4161,10 @@ class BaseTerminalController: NSWindowController,
     /// Default path to trm's bundled zmx on a remote machine.
     static let defaultRemoteZmxPath = "/Applications/trm.app/Contents/MacOS/zmx"
 
+    /// UserDefaults key for the most recently used remote SSH destination,
+    /// prefilled in the host prompt the next time one appears.
+    static let lastRemoteHostDefaultsKey = "LastRemoteHost"
+
     /// Open a new terminal pane whose shell runs on another machine.
     ///
     /// The pane's command is `ssh -t <host> <remote-zmx> attach <session>`, so
@@ -4175,11 +4179,12 @@ class BaseTerminalController: NSWindowController,
     func newRemotePane(host: String?, at surfaceView: Ghostty.SurfaceView) {
         guard !isLayoutEditingDisabled else { return }
 
-        guard let host = host?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else {
+        guard let host = host.map(Self.sanitizedRemoteHost), !host.isEmpty else {
             promptForRemoteHost(at: surfaceView)
             return
         }
         guard validateRemoteHostOrPresentError(host) else { return }
+        UserDefaults.standard.set(host, forKey: Self.lastRemoteHostDefaultsKey)
 
         // The remote session name is generated here so it can be recorded in
         // the checkpoint and reattached later.
@@ -4284,13 +4289,24 @@ class BaseTerminalController: NSWindowController,
             input = combo
         }
         input.placeholderString = "user@host"
+        // Prefill the last-used destination — repeat connections to the same
+        // machine are the common case. The field gets focus with the text
+        // fully selected, so typing a different host replaces it outright.
+        if let last = UserDefaults.standard.string(forKey: Self.lastRemoteHostDefaultsKey),
+           !last.isEmpty, Self.isValidRemoteHost(last) {
+            input.stringValue = last
+            if let combo = input as? NSComboBox,
+               !discovered.contains(where: { $0.sshDestination == last }) {
+                combo.addItem(withObjectValue: last)
+            }
+        }
         alert.accessoryView = input
         alert.addButton(withTitle: buttonTitle)
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = input
 
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        let host = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = Self.sanitizedRemoteHost(input.stringValue)
         guard !host.isEmpty else { return nil }
         guard validateRemoteHostOrPresentError(host) else { return nil }
         return host
@@ -4321,7 +4337,7 @@ class BaseTerminalController: NSWindowController,
     func switchPaneToRemote(host: String?, at surfaceView: Ghostty.SurfaceView) {
         guard !isLayoutEditingDisabled else { return }
 
-        guard let host = host?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else {
+        guard let host = host.map(Self.sanitizedRemoteHost), !host.isEmpty else {
             let picked = promptForRemoteHost(
                 messageText: "Switch Pane to Remote",
                 informativeText: """
@@ -4338,6 +4354,7 @@ class BaseTerminalController: NSWindowController,
             return
         }
         guard validateRemoteHostOrPresentError(host) else { return }
+        UserDefaults.standard.set(host, forKey: Self.lastRemoteHostDefaultsKey)
 
         // The local zmx session is deliberately NOT killed: switching away is
         // a detach, not a close, so the local work survives. Undo restores
@@ -4491,6 +4508,26 @@ class BaseTerminalController: NSWindowController,
         } else {
             newRemotePane(host: nil, at: view)
         }
+    }
+
+    /// Normalize a typed or pasted SSH destination.
+    ///
+    /// Pasted hostnames arrive with artifacts a human can't see — a newline
+    /// where a terminal soft-wrapped the line, zero-width/format characters
+    /// from chat apps — and none of those are ever part of a real hostname,
+    /// so they are stripped *anywhere* in the string, not just at the ends.
+    /// A pasted `ssh user@host` command is also accepted by dropping the
+    /// leading `ssh` word (before whitespace stripping, which would otherwise
+    /// fuse it into the user name).
+    static func sanitizedRemoteHost(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("ssh ") {
+            text = String(text.dropFirst(4))
+        }
+        return String(String.UnicodeScalarView(text.unicodeScalars.filter { scalar in
+            !CharacterSet.whitespacesAndNewlines.contains(scalar)
+                && scalar.properties.generalCategory != .format
+        }))
     }
 
     /// Whether a string is a plausible SSH destination (`host` or `user@host`,

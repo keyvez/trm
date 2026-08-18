@@ -10,6 +10,7 @@ const GhosttyZig = @import("GhosttyZig.zig");
 
 exe: *std.Build.Step.Compile,
 install_step: *std.Build.Step.InstallArtifact,
+test_run: *std.Build.Step.Run,
 
 pub fn init(b: *std.Build, cfg: *const Config, mod: *const GhosttyZig) !GhosttyZmx {
     // zmx reads `version` and `ghostty_version` from build_options.
@@ -35,7 +36,29 @@ pub fn init(b: *std.Build, cfg: *const Config, mod: *const GhosttyZig) !GhosttyZ
     exe.linkLibC();
 
     const install_step = b.addInstallArtifact(exe, .{});
-    return .{ .exe = exe, .install_step = install_step };
+
+    // Unit tests, mirroring upstream zmx's test step but against the
+    // in-tree ghostty-vt. src/test.zig imports every zmx module.
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("vendor/zmx/src/test.zig"),
+        .target = cfg.target,
+        .optimize = cfg.optimize,
+    });
+    test_mod.addOptions("build_options", options);
+    test_mod.addImport("ghostty-vt", mod.vt);
+    const test_exe = b.addTest(.{
+        .root_module = test_mod,
+        .use_llvm = true,
+    });
+    test_exe.linkLibC();
+    const test_run = b.addRunArtifact(test_exe);
+
+    return .{ .exe = exe, .install_step = install_step, .test_run = test_run };
+}
+
+/// Make `step` (typically the top-level test step) run the zmx unit tests.
+pub fn addTestStepDependencies(self: *const GhosttyZmx, step: *std.Build.Step) void {
+    step.dependOn(&self.test_run.step);
 }
 
 /// Add the zmx exe to the install target.

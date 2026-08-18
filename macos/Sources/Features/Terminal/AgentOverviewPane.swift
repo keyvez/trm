@@ -49,7 +49,60 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// labelled and matched after the surface goes away.
     let boundPaneId: Int?
 
-    @Published var transcript = AgentTranscript()
+    @Published var transcript = AgentTranscript() {
+        didSet { reanchorTurnSelection() }
+    }
+
+    /// How many turns back from the latest the view shows; 0 = live.
+    /// Transient browsing state — deliberately not persisted.
+    @Published var turnOffset: Int = 0
+
+    /// Stable id of the turn being read when browsing history, so a new turn
+    /// arriving mid-read doesn't shift the page underneath the reader.
+    private var viewedTurnID: String? = nil
+
+    var turnCount: Int { transcript.turns.count }
+    var canGoOlderTurn: Bool { turnOffset < turnCount - 1 }
+    var canGoNewerTurn: Bool { turnOffset > 0 }
+
+    func goToOlderTurn() { selectTurn(offset: turnOffset + 1) }
+    func goToNewerTurn() { selectTurn(offset: turnOffset - 1) }
+    func goToLatestTurn() { selectTurn(offset: 0) }
+
+    private func selectTurn(offset: Int) {
+        let clamped = min(max(0, offset), max(0, turnCount - 1))
+        turnOffset = clamped
+        let turns = transcript.turns
+        viewedTurnID = clamped > 0 ? turns[turns.count - 1 - clamped].id : nil
+    }
+
+    /// The archived turn the view renders, or nil when live (offset 0) — the
+    /// live view renders the transcript's top-level fields, which include the
+    /// wider prompt-search fallback that archived turns don't get.
+    var displayedTurn: AgentTranscript.Turn? {
+        guard turnOffset > 0 else { return nil }
+        let turns = transcript.turns
+        let index = turns.count - 1 - turnOffset
+        guard turns.indices.contains(index) else { return nil }
+        return turns[index]
+    }
+
+    /// After a poll replaces the transcript, keep pointing at the same turn:
+    /// new turns appending (or old ones sliding out of the tail window) change
+    /// the viewed turn's distance from the end.
+    private func reanchorTurnSelection() {
+        guard turnOffset > 0, let id = viewedTurnID else { return }
+        let turns = transcript.turns
+        if let index = turns.lastIndex(where: { $0.id == id }) {
+            let offset = turns.count - 1 - index
+            if offset != turnOffset { turnOffset = offset }
+        } else {
+            // The viewed turn left the window — clamp to the oldest we have.
+            let clamped = min(turnOffset, max(0, turns.count - 1))
+            if clamped != turnOffset { turnOffset = clamped }
+            viewedTurnID = displayedTurn?.id
+        }
+    }
 
     /// Which sections this overview shows. Per-pane (not global) so two
     /// overviews can watch two agents in different ways side by side;
