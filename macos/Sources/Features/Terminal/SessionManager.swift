@@ -86,17 +86,32 @@ enum SessionManager {
         // A default pane_type of "terminal" is implied when the key is absent,
         // so count [[panes]] blocks that are terminals (explicitly or by
         // default) and the zmx_session lines within them.
+        //
+        // A REMOTE pane (remote_session on another host, reattached by
+        // re-running its ssh command) counts as backed too: its daemon lives
+        // on the remote machine, which a UI reload here cannot kill.
+        // Requiring a local zmx_session vetoed every reload with an ssh pane
+        // open. Remote liveness is deliberately not probed — blocking reload
+        // on the network would be worse than one pane reporting a failed
+        // attach after restore.
         var terminalPanes = 0
+        var backedPanes = 0
         var zmxNames: [String] = []
         var inPane = false
         var paneIsTerminal = true
         var paneZmx: String? = nil
+        var paneIsRemote = false
 
         func flushPane() {
             guard inPane else { return }
             if paneIsTerminal {
                 terminalPanes += 1
-                if let z = paneZmx { zmxNames.append(z) }
+                if let z = paneZmx {
+                    zmxNames.append(z)
+                    backedPanes += 1
+                } else if paneIsRemote {
+                    backedPanes += 1
+                }
             }
         }
 
@@ -107,6 +122,7 @@ enum SessionManager {
                 inPane = true
                 paneIsTerminal = true
                 paneZmx = nil
+                paneIsRemote = false
                 continue
             }
             guard inPane else { continue }
@@ -118,11 +134,13 @@ enum SessionManager {
                     v = v.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
                     if !v.isEmpty { paneZmx = v }
                 }
+            } else if line.hasPrefix("remote_session") {
+                paneIsRemote = true
             }
         }
         flushPane()
 
-        guard terminalPanes > 0, zmxNames.count == terminalPanes else { return false }
+        guard terminalPanes > 0, backedPanes == terminalPanes else { return false }
         return zmxNames.allSatisfy { ZmxSessionManager.sessionExists($0) }
     }
 

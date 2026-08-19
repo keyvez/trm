@@ -724,6 +724,11 @@ final class Trm {
     /// userInfo keys: "paneId" (Int), "hovering" (Bool — true=enter, false=exit).
     static let hoverPane = Notification.Name("TrmHoverPane")
 
+    /// A URL under the pointer changed. `userInfo["url"]` is the URL string
+    /// on entry and absent on exit. Window controllers combine this with the
+    /// live Command-key state to present a temporary web preview.
+    static let hoveredURLDidChange = Notification.Name("TrmHoveredURLDidChange")
+
     /// Notification posted when the user taps a pane's grab handle (the
     /// hover-revealed bar at the top of a surface) without dragging. The
     /// controller toggles the peek/expand overlay for that pane. The object
@@ -789,6 +794,10 @@ final class Trm {
         /// For pane_type "agent_overview": multiplier on the reading type
         /// scale, absent when at the default.
         var overviewFontScale: Double?
+        /// Independent reading scale used while the overview is peeked.
+        var overviewPeekFontScale: Double?
+        /// Reading font family ("regular" or "monospace").
+        var overviewFontFamily: String?
         /// For stack host panes: sub-pane height fractions of the stack cell.
         var stackFractions: [Double]?
     }
@@ -859,6 +868,12 @@ final class Trm {
             }
             if let ofs = extras[i].overviewFontScale {
                 config.panes[i].overviewFontScale = ofs
+            }
+            if let opfs = extras[i].overviewPeekFontScale {
+                config.panes[i].overviewPeekFontScale = opfs
+            }
+            if let off = extras[i].overviewFontFamily {
+                config.panes[i].overviewFontFamily = off
             }
             if let sf = extras[i].stackFractions {
                 config.panes[i].stackFractions = sf
@@ -1023,6 +1038,8 @@ final class Trm {
         var overviewPlacement: String?
         var overviewMode: String?
         var overviewFontScale: Double?
+        var overviewPeekFontScale: Double?
+        var overviewFontFamily: String?
         var stackFractions: [Double]?
         var remoteHost: String?
         var remoteSession: String?
@@ -1085,11 +1102,21 @@ final class Trm {
                 if let value = parseTomlStringValue(trimmed) {
                     current?.overviewMode = value
                 }
+            } else if trimmed.hasPrefix("overview_peek_font_scale") {
+                if let eqIdx = trimmed.firstIndex(of: "=") {
+                    let raw = trimmed[trimmed.index(after: eqIdx)...]
+                        .trimmingCharacters(in: .whitespaces)
+                    current?.overviewPeekFontScale = Double(raw)
+                }
             } else if trimmed.hasPrefix("overview_font_scale") {
                 if let eqIdx = trimmed.firstIndex(of: "=") {
                     let raw = trimmed[trimmed.index(after: eqIdx)...]
                         .trimmingCharacters(in: .whitespaces)
                     current?.overviewFontScale = Double(raw)
+                }
+            } else if trimmed.hasPrefix("overview_font_family") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.overviewFontFamily = value
                 }
             } else if trimmed.hasPrefix("stack_fractions") {
                 if let value = parseTomlStringValue(trimmed) {

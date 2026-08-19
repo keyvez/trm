@@ -32,6 +32,34 @@ enum AgentOverviewPlacement: String, CaseIterable {
     }
 }
 
+/// Reading typeface for Agent Overview prose. Code and tool details remain
+/// monospaced in either mode; this controls the surrounding reading surface.
+enum AgentOverviewFontFamily: String, CaseIterable, Hashable {
+    case regular
+    case monospace
+
+    var menuTitle: String {
+        switch self {
+        case .regular: return "Regular"
+        case .monospace: return "Monospace"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .regular: return "textformat"
+        case .monospace: return "character.cursor.ibeam"
+        }
+    }
+
+    var design: Font.Design {
+        switch self {
+        case .regular: return .default
+        case .monospace: return .monospaced
+        }
+    }
+}
+
 @MainActor
 final class AgentOverviewPane: ObservableObject, Identifiable {
     let id = UUID()
@@ -50,6 +78,51 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     let boundPaneId: Int?
 
     @Published var transcript = AgentTranscript()
+
+    /// Turns currently available in the bounded transcript window, oldest
+    /// first. `transcript` remains the live/latest value; a separate selection
+    /// lets polling update it without snapping a reader out of history.
+    @Published private(set) var turnHistory: [AgentTranscript] = []
+    @Published private(set) var selectedTurnIndex: Int? = nil
+
+    var displayedTranscript: AgentTranscript {
+        guard let selectedTurnIndex,
+              turnHistory.indices.contains(selectedTurnIndex) else {
+            return transcript
+        }
+        return turnHistory[selectedTurnIndex]
+    }
+
+    var canShowPreviousTurn: Bool {
+        let index = selectedTurnIndex ?? (turnHistory.count - 1)
+        return index > 0
+    }
+
+    var canShowNextTurn: Bool {
+        guard let selectedTurnIndex else { return false }
+        return selectedTurnIndex < turnHistory.count - 1
+    }
+
+    var turnPositionLabel: String? {
+        guard turnHistory.count > 1 else { return nil }
+        let index = selectedTurnIndex ?? (turnHistory.count - 1)
+        return "\(index + 1)/\(turnHistory.count)"
+    }
+
+    func showPreviousTurn() {
+        let index = selectedTurnIndex ?? (turnHistory.count - 1)
+        guard index > 0 else { return }
+        selectedTurnIndex = index - 1
+    }
+
+    func showNextTurn() {
+        guard let selectedTurnIndex,
+              selectedTurnIndex < turnHistory.count - 1 else { return }
+        let next = selectedTurnIndex + 1
+        // Nil means "follow live". Returning to the newest turn should resume
+        // live updates rather than pinning a snapshot of it.
+        self.selectedTurnIndex = next == turnHistory.count - 1 ? nil : next
+    }
 
     /// Which sections this overview shows. Per-pane (not global) so two
     /// overviews can watch two agents in different ways side by side;
@@ -73,7 +146,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
 
     private static let bionicDefaultsKey = "AgentOverviewBionicReading"
 
-    /// Multiplier applied to the overview's type scale.
+    /// Multiplier applied to the overview's compact in-grid type scale.
     ///
     /// The overview is a reading surface that often sits in a narrow column,
     /// so the comfortable size depends on the pane's width and the reader —
@@ -91,18 +164,50 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         }
     }
 
-    static let defaultFontScale: CGFloat = 1.0
+    /// Independent type scale used by the expanded peek reading view. A peek
+    /// has far more horizontal room than a grid cell, so sharing one value
+    /// forced the user to choose between cramped compact text and undersized
+    /// expanded text.
+    @Published var peekFontScale: CGFloat = AgentOverviewPane.defaultPeekFontScale {
+        didSet {
+            let clamped = min(max(peekFontScale, Self.minFontScale), Self.maxFontScale)
+            if clamped != peekFontScale {
+                peekFontScale = clamped
+                return
+            }
+            UserDefaults.standard.set(Double(peekFontScale), forKey: Self.peekFontScaleDefaultsKey)
+        }
+    }
+
+    /// Typeface used for prose throughout this overview. Persisted globally as
+    /// the default for new panes and per pane in session TOML.
+    @Published var fontFamily: AgentOverviewFontFamily = .regular {
+        didSet {
+            UserDefaults.standard.set(fontFamily.rawValue, forKey: Self.fontFamilyDefaultsKey)
+        }
+    }
+
+    static let defaultFontScale: CGFloat = 0.9
+    static let defaultPeekFontScale: CGFloat = 1.2
     static let minFontScale: CGFloat = 0.7
     static let maxFontScale: CGFloat = 2.0
     private static let fontScaleStep: CGFloat = 0.1
     private static let fontScaleDefaultsKey = "AgentOverviewFontScale"
+    private static let peekFontScaleDefaultsKey = "AgentOverviewPeekFontScale"
+    private static let fontFamilyDefaultsKey = "AgentOverviewFontFamily"
 
     func increaseFontSize() { fontScale += Self.fontScaleStep }
     func decreaseFontSize() { fontScale -= Self.fontScaleStep }
     func resetFontSize() { fontScale = Self.defaultFontScale }
 
+    func increasePeekFontSize() { peekFontScale += Self.fontScaleStep }
+    func decreasePeekFontSize() { peekFontScale -= Self.fontScaleStep }
+    func resetPeekFontSize() { peekFontScale = Self.defaultPeekFontScale }
+
     var canIncreaseFontSize: Bool { fontScale < Self.maxFontScale }
     var canDecreaseFontSize: Bool { fontScale > Self.minFontScale }
+    var canIncreasePeekFontSize: Bool { peekFontScale < Self.maxFontScale }
+    var canDecreasePeekFontSize: Bool { peekFontScale > Self.minFontScale }
 
     private var timer: Timer?
 
@@ -152,6 +257,13 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         // reads as 0.0, which would start every new overview at the minimum.
         if let saved = UserDefaults.standard.object(forKey: Self.fontScaleDefaultsKey) as? Double {
             self.fontScale = min(max(CGFloat(saved), Self.minFontScale), Self.maxFontScale)
+        }
+        if let saved = UserDefaults.standard.object(forKey: Self.peekFontScaleDefaultsKey) as? Double {
+            self.peekFontScale = min(max(CGFloat(saved), Self.minFontScale), Self.maxFontScale)
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.fontFamilyDefaultsKey),
+           let family = AgentOverviewFontFamily(rawValue: raw) {
+            self.fontFamily = family
         }
         refresh()
         // Stagger the polls across panes rather than firing them together.
@@ -275,9 +387,9 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                 return
             }
 
-            let parsed = kind == .codex
-                ? CodexTranscriptReader.parse(url: url)
-                : AgentTranscriptReader.parse(url: url)
+            let parsedTurns = kind == .codex
+                ? CodexTranscriptReader.parseTurns(url: url)
+                : AgentTranscriptReader.parseTurns(url: url)
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -286,10 +398,26 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                 self.lastMtime = mtime
                 self.locatedSession = session
                 self.agentKind = kind
-                if let parsed, !parsed.isEmpty {
+                if let parsedTurns, let parsed = parsedTurns.last, !parsed.isEmpty {
+                    // Preserve the exact historical turn across polls. New
+                    // transcript entries may append a turn while the reader is
+                    // looking back; matching its stable message id prevents
+                    // the selection from shifting underneath them.
+                    let selected = self.selectedTurnIndex.flatMap {
+                        self.turnHistory.indices.contains($0) ? self.turnHistory[$0] : nil
+                    }
+                    self.turnHistory = parsedTurns
+                    if let selected {
+                        self.selectedTurnIndex = parsedTurns.firstIndex {
+                            if let id = selected.turnID { return $0.turnID == id }
+                            return $0.lastUserPrompt == selected.lastUserPrompt
+                        }
+                    }
                     self.transcript = parsed
                     self.statusMessage = nil
-                } else if parsed?.isEmpty ?? true {
+                } else if parsedTurns?.isEmpty ?? true {
+                    self.turnHistory = []
+                    self.selectedTurnIndex = nil
                     self.statusMessage = "No messages in this session yet."
                 }
             }

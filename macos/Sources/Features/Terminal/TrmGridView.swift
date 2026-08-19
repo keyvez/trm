@@ -89,6 +89,16 @@ struct TrmGridView: View {
     /// The currently peeked sub-pane (expanded overlay), or nil.
     var peekedPane: ObjectIdentifier? = nil
 
+    /// Absolute horizontal offset driven by the controller's two-stage peek
+    /// navigation animation.
+    var peekSlideOffset: CGFloat = 0
+    var isPeekNavigationAnimating: Bool = false
+
+    /// A transient webpage shown over the grid while Command is held over a
+    /// terminal or overview URL.
+    var temporaryURLPreview: WebViewPane? = nil
+    var isTemporaryURLPreviewPinned = false
+
     /// Callback to move a pane into its own window.
     var onDetachPane: ((GridPane) -> Void)? = nil
 
@@ -153,6 +163,12 @@ struct TrmGridView: View {
     /// Callback to dismiss the peek overlay.
     var onDismissPeek: (() -> Void)? = nil
 
+    /// Navigate to the previous/next logical peek item. Agent terminal and
+    /// overview pairs count as one item.
+    var onNavigatePeek: ((Int) -> Void)? = nil
+    var onPinURLPreview: (() -> Void)? = nil
+    var onDismissURLPreview: (() -> Void)? = nil
+
     /// Fractional heights for each row (parallel to rowCols, sums to 1.0).
     var rowHeightFractions: [CGFloat] = []
 
@@ -203,7 +219,17 @@ struct TrmGridView: View {
 
 
     var body: some View {
-        content
+        ZStack {
+            // Peeking remains an overlay: the user's grid and its exact layout
+            // stay mounted underneath and return unchanged when dismissed.
+            content
+            if let peekedID = peekedPane {
+                peekOverlay(for: peekedID)
+            }
+            if let preview = temporaryURLPreview {
+                temporaryURLPreviewOverlay(preview)
+            }
+        }
             .onReceive(NotificationCenter.default.publisher(for: Trm.watermarkDidChange)) { _ in
                 watermarkVersion += 1
             }
@@ -217,6 +243,49 @@ struct TrmGridView: View {
                     )
                 }
             }
+    }
+
+    private func temporaryURLPreviewOverlay(_ pane: WebViewPane) -> some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black.opacity(0.18)
+                    .contentShape(Rectangle())
+                    .onTapGesture { onDismissURLPreview?() }
+
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 6) {
+                        Image(systemName: isTemporaryURLPreviewPinned ? "pin.fill" : "command")
+                        Text(pane.currentURL?.absoluteString ?? pane.initialURL.absoluteString)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        Text(isTemporaryURLPreviewPinned
+                             ? "Pinned · Esc or click outside to close"
+                             : "Click to pin · Release ⌘ to close")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(.ultraThinMaterial)
+
+                    WebViewPaneView(pane: pane)
+                }
+                .frame(
+                    width: max(360, geo.size.width * 0.68),
+                    height: max(260, geo.size.height * 0.72)
+                )
+                .background(Color(nsColor: .windowBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
+                        .strokeBorder(TrmBorder.focusedColor.opacity(0.75), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.5), radius: 24, y: 8)
+            }
+        }
+        .transition(.opacity)
     }
 
     /// An identity value derived from the focused surface pointer so
@@ -427,10 +496,6 @@ struct TrmGridView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // Peek overlay
-                if let peekedID = peekedPane {
-                    peekOverlay(for: peekedID)
-                }
             }
         }
     }
@@ -496,7 +561,7 @@ struct TrmGridView: View {
             // text selection) still receives the click.
             .simultaneousGesture(
                 TapGesture().onEnded {
-                    if !pane.isTerminal { onSelectNonSurfacePane?(pane.id) }
+                    handleNonTerminalPaneTap(pane)
                 }
             )
             .overlay(
@@ -572,6 +637,28 @@ struct TrmGridView: View {
                 dropEdge: $dropEdge,
                 overviewDropPlacement: $overviewDropPlacement
             ))
+    }
+
+    /// Select a pane without a terminal surface and mirror the terminal's
+    /// command-click peek gesture. Terminal surfaces handle this in their
+    /// AppKit `mouseDown` implementation, but native SwiftUI panes never pass
+    /// through that path.
+    private func handleNonTerminalPaneTap(_ pane: GridPane) {
+        // Stack containers delegate to the per-child gesture below. Handling
+        // the container too would toggle twice in an all-non-terminal group.
+        guard pane.stackChildren == nil, !pane.isTerminal else { return }
+
+        onSelectNonSurfacePane?(pane.id)
+
+        let modifiers = NSEvent.modifierFlags
+        guard modifiers.contains(.command),
+              modifiers.isDisjoint(with: [.shift, .control, .option]) else { return }
+
+        if peekedPane == pane.id {
+            onDismissPeek?()
+        } else {
+            onPeekPane?(pane)
+        }
     }
 
     /// Context menu for an agent overview cell: placement choices + close.
@@ -711,6 +798,12 @@ struct TrmGridView: View {
         case .plugin(let pluginPane):
             return AnyView(pluginPaneView(pluginPane))
         case .agentOverview(let agentPane):
+            if isPaneShownInPeekOverlay(.agentOverview(agentPane)) {
+                return AnyView(
+                    Color.black.opacity(0.6)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                )
+            }
             // Sized to fill its cell. The cell already proposes a definite
             // size, so this only stops a short message from leaving the pane
             // partly empty.
@@ -728,7 +821,7 @@ struct TrmGridView: View {
     /// - `paneId`: the stable Zig pane ID (monotonic u32, survives pane close/reorder)
     @ViewBuilder
     private func terminalPaneView(_ surface: Ghostty.SurfaceView, index: Int, paneId: Int) -> some View {
-        let isPeeked = peekedPane == ObjectIdentifier(surface)
+        let isPeeked = isPaneShownInPeekOverlay(.terminal(surface))
         VStack(spacing: 0) {
             // No drag bar for non-stacked panes — they use the surface's own
             // hover-revealed grab handle (SurfaceGrabHandle); peek is wired
@@ -894,6 +987,15 @@ struct TrmGridView: View {
                         stackChildContent(child)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
+                    // The outer grid-cell gesture cannot identify which child
+                    // of a pane group was clicked. Give each non-terminal
+                    // child the same selection and Cmd-click peek behavior as
+                    // a standalone pane.
+                    .simultaneousGesture(
+                        TapGesture().onEnded {
+                            handleNonTerminalPaneTap(child)
+                        }
+                    )
                     .contextMenu {
                         // Reorder within the stack. The first sub-pane is the
                         // stack's host, so moving to the top is a real
@@ -973,7 +1075,7 @@ struct TrmGridView: View {
     private func stackChildContent(_ pane: GridPane) -> AnyView {
         // If this pane is currently being peeked, show a placeholder so the
         // live NSView is only rendered in the peek overlay.
-        if peekedPane == pane.id {
+        if isPaneShownInPeekOverlay(pane) {
             return AnyView(
                 Color.black.opacity(0.6)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1013,9 +1115,17 @@ struct TrmGridView: View {
         }
     }
 
-    /// The peek overlay: shows a stacked sub-pane at half window width, full height.
+    private typealias AgentPeekPair = (
+        surface: Ghostty.SurfaceView,
+        overview: AgentOverviewPane
+    )
+
+    /// The peek overlay stays above the existing grid. Agent terminals and
+    /// their bound overviews expand as a full-window reading/working pair;
+    /// unrelated pane types retain the original centered half-window peek.
     @ViewBuilder
     private func peekOverlay(for peekedID: ObjectIdentifier) -> some View {
+        let pair = agentPeekPair(for: peekedID)
         // Find the peeked surface across all panes (including stack children).
         let peekedSurface: Ghostty.SurfaceView? = findSurface(byID: peekedID)
         // Overviews have no surface of their own, so resolve them separately —
@@ -1025,60 +1135,162 @@ struct TrmGridView: View {
             ? findOverview(byID: peekedID)
             : nil
 
-        // Background scrim — click to dismiss
-        Color.black.opacity(0.3)
-            .ignoresSafeArea()
-            .onTapGesture {
-                onDismissPeek?()
-            }
+        ZStack {
+            // Keep the scrim stationary while the pane itself slides.
+            Color.black.opacity(0.3)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    onDismissPeek?()
+                }
 
-        // The expanded pane
-        GeometryReader { geo in
-            HStack {
-                Spacer()
-                if let surface = peekedSurface {
-                    Ghostty.InspectableSurface(
-                        surfaceView: surface,
-                        isSplit: false
-                    )
-                    .overlay(watermarkOverlay(forPaneId: surface.paneId ?? 0))
-                    .contextMenu {
-                        Button {
-                            onDismissPeek?()
-                        } label: {
-                            Label("Put Back", systemImage: "arrow.uturn.backward")
+            Group {
+                if let pair {
+                    GeometryReader { geo in
+                        let pairGap = max(gap, 4)
+                        let paneWidth = max(0, (geo.size.width - pairGap) / 2)
+
+                        HStack(spacing: pairGap) {
+                            peekTerminal(pair.surface)
+                                .frame(width: paneWidth, height: geo.size.height)
+
+                            peekOverview(pair.overview)
+                                .frame(width: paneWidth, height: geo.size.height)
+                        }
+                        .frame(width: geo.size.width, height: geo.size.height)
+                    }
+                } else {
+                    // Existing behavior for a pane with no agent/overview pairing.
+                    GeometryReader { geo in
+                        HStack {
+                            Spacer()
+                            if let surface = peekedSurface {
+                                peekTerminal(surface)
+                                    .frame(width: geo.size.width * 0.5, height: geo.size.height)
+                            } else if let overview = peekedOverview {
+                                peekOverview(overview)
+                                    .frame(width: geo.size.width * 0.5, height: geo.size.height)
+                            }
+                            Spacer()
                         }
                     }
-                    .frame(width: geo.size.width * 0.5, height: geo.size.height)
-                    .cornerRadius(TrmBorder.radius)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
-                            .strokeBorder(TrmBorder.focusedColor, lineWidth: 2)
-                            .allowsHitTesting(false)
-                    )
-                    .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
-                } else if let overview = peekedOverview {
-                    AgentOverviewView(pane: overview, onClose: onCloseAgentOverview)
-                        .contextMenu {
-                            Button {
-                                onDismissPeek?()
-                            } label: {
-                                Label("Put Back", systemImage: "arrow.uturn.backward")
-                            }
-                        }
-                        .frame(width: geo.size.width * 0.5, height: geo.size.height)
-                        .cornerRadius(TrmBorder.radius)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
-                                .strokeBorder(TrmBorder.focusedColor, lineWidth: 2)
-                                .allowsHitTesting(false)
-                        )
-                        .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
                 }
-                Spacer()
             }
+            .overlay(alignment: .top) { peekNavigationBar }
+            .offset(x: peekSlideOffset)
         }
         .transition(.opacity)
+    }
+
+    private func peekTerminal(_ surface: Ghostty.SurfaceView) -> some View {
+        Ghostty.InspectableSurface(
+            surfaceView: surface,
+            isSplit: false
+        )
+        .overlay(watermarkOverlay(
+            forPaneId: surface.paneId ?? 0,
+            forceHighlight: isPeekNavigationAnimating
+        ))
+        .contextMenu { putBackMenuItem }
+        .cornerRadius(TrmBorder.radius)
+        .overlay(peekBorder)
+        .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
+    }
+
+    private func peekOverview(_ overview: AgentOverviewPane) -> some View {
+        AgentOverviewView(
+            pane: overview,
+            isPeeked: true,
+            onClose: onCloseAgentOverview
+        )
+        // Command-clicking the terminal already toggles through its AppKit
+        // event path; mirror that dismissal on the SwiftUI overview half.
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                let modifiers = NSEvent.modifierFlags
+                if modifiers.contains(.command),
+                   modifiers.isDisjoint(with: [.shift, .control, .option]) {
+                    onDismissPeek?()
+                }
+            }
+        )
+        .contextMenu { putBackMenuItem }
+        .cornerRadius(TrmBorder.radius)
+        .overlay(peekBorder)
+        .shadow(color: .black.opacity(0.4), radius: 20, x: -5, y: 0)
+    }
+
+    private var peekBorder: some View {
+        RoundedRectangle(cornerRadius: TrmBorder.radius, style: .continuous)
+            .strokeBorder(TrmBorder.focusedColor, lineWidth: 2)
+            .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private var putBackMenuItem: some View {
+        Button {
+            onDismissPeek?()
+        } label: {
+            Label("Put Back", systemImage: "arrow.uturn.backward")
+        }
+    }
+
+    private var peekNavigationBar: some View {
+        HStack(spacing: 6) {
+            Button { onNavigatePeek?(-1) } label: {
+                Image(systemName: "chevron.left")
+            }
+            .help("Previous peek item (⌘⇧[)")
+
+            Button { onDismissPeek?() } label: {
+                Label("Put Back", systemImage: "arrow.uturn.backward")
+            }
+            .help("Close peek")
+
+            Button { onNavigatePeek?(1) } label: {
+                Image(systemName: "chevron.right")
+            }
+            .help("Next peek item (⌘⇧])")
+        }
+        .font(.system(size: 10, weight: .semibold))
+        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.top, 8)
+        .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
+    }
+
+    /// Resolve either half of an agent pair to both panes. The overview's
+    /// surface binding is stable even when the two panes have been moved into
+    /// different grid cells or one is inside a stack.
+    private func agentPeekPair(for id: ObjectIdentifier) -> AgentPeekPair? {
+        if let overview = findOverview(byID: id),
+           let surface = overview.surface,
+           findSurface(byID: ObjectIdentifier(surface)) != nil {
+            return (surface, overview)
+        }
+        if let surface = findSurface(byID: id),
+           let overview = findOverview(boundTo: surface) {
+            return (surface, overview)
+        }
+        return nil
+    }
+
+    /// True for both members of the active pair. In particular, when an
+    /// overview initiates peek its terminal must stop rendering in the grid:
+    /// an AppKit NSView can only have one parent, and the overlay now owns it.
+    private func isPaneShownInPeekOverlay(_ pane: GridPane) -> Bool {
+        guard let peekedPane else { return false }
+        if pane.id == peekedPane { return true }
+        guard let pair = agentPeekPair(for: peekedPane) else { return false }
+        switch pane {
+        case .terminal(let surface):
+            return surface === pair.surface
+        case .agentOverview(let overview):
+            return overview === pair.overview
+        default:
+            return false
+        }
     }
 
     /// Find an agent overview pane by ObjectIdentifier.
@@ -1091,6 +1303,25 @@ struct TrmGridView: View {
                 for child in children {
                     if case .agentOverview(let overview) = child,
                        ObjectIdentifier(overview) == id {
+                        return overview
+                    }
+                }
+            default:
+                break
+            }
+        }
+        return nil
+    }
+
+    private func findOverview(boundTo surface: Ghostty.SurfaceView) -> AgentOverviewPane? {
+        for pane in panes {
+            switch pane {
+            case .agentOverview(let overview):
+                if overview.surface === surface { return overview }
+            case .stack(let children):
+                for child in children {
+                    if case .agentOverview(let overview) = child,
+                       overview.surface === surface {
                         return overview
                     }
                 }
@@ -1196,11 +1427,16 @@ struct TrmGridView: View {
 
     /// Returns a watermark overlay if one is set for this pane index.
     @ViewBuilder
-    private func watermarkOverlay(forPaneId paneId: Int) -> some View {
+    private func watermarkOverlay(forPaneId paneId: Int, forceHighlight: Bool = false) -> some View {
         // Reference watermarkVersion so SwiftUI re-evaluates when it changes.
         let _ = watermarkVersion
         if let text = Trm.shared.watermark(forPaneId: UInt32(paneId)), !text.isEmpty {
-            WatermarkView(text: text, cellHeight: 14, paneId: paneId, isPeeking: isWatermarkPeeking)
+            WatermarkView(
+                text: text,
+                cellHeight: 14,
+                paneId: paneId,
+                isPeeking: isWatermarkPeeking || forceHighlight
+            )
         }
     }
 

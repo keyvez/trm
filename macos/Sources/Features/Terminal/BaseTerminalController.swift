@@ -152,6 +152,12 @@ class BaseTerminalController: NSWindowController,
     /// Inline webview panes opened via URL interception.
     @Published var webviewPanes: [WebViewPane] = []
 
+    /// Ephemeral, non-grid web preview shown only while Command is held over
+    /// a URL. Releasing Command tears the pane down immediately.
+    @Published var temporaryURLPreview: WebViewPane? = nil
+    @Published var isTemporaryURLPreviewPinned = false
+    private var hoveredURL: URL? = nil
+
     /// Inline utility plugin panes (notes, file browser, etc.).
     @Published var pluginPanes: [PluginPane] = []
 
@@ -187,6 +193,11 @@ class BaseTerminalController: NSWindowController,
 
     /// The currently peeked sub-pane (expanded overlay), or `nil` if no peek.
     @Published var peekedPane: ObjectIdentifier? = nil
+    /// Horizontal presentation offset for the single live peek tree.
+    @Published var peekSlideOffset: CGFloat = 0
+    /// Keeps the active/incoming watermark prominent during navigation.
+    @Published var isPeekNavigationAnimating: Bool = false
+    private var peekNavigationGeneration = 0
 
     /// Per-stack sub-pane height fractions, keyed by the stack cell's ObjectIdentifier.
     /// Each value is an array (length == number of children) that sums to 1.0.
@@ -314,6 +325,10 @@ class BaseTerminalController: NSWindowController,
     private var lastOptionReleaseTime: TimeInterval = 0
     /// Whether the Option key was pressed alone (no other modifiers or keys).
     private var optionPressedAlone: Bool = false
+
+    /// Horizontal precise-scroll gesture state while a peek overlay is open.
+    private var peekSwipeDistance: CGFloat = 0
+    private var peekSwipeTriggered = false
 
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private var derivedConfig: DerivedConfig
@@ -561,6 +576,11 @@ class BaseTerminalController: NSWindowController,
             selector: #selector(onPeekPaneRequest(_:)),
             name: Trm.peekPaneRequest,
             object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(hoveredURLDidChange(_:)),
+            name: Trm.hoveredURLDidChange,
+            object: nil)
 
         // Webview pane
         center.addObserver(
@@ -628,7 +648,7 @@ class BaseTerminalController: NSWindowController,
         // Listen for local events that we need to know of outside of
         // single surface handlers.
         self.eventMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.flagsChanged]
+            matching: [.flagsChanged, .scrollWheel, .keyDown, .leftMouseDown]
         ) { [weak self] event in self?.localEventHandler(event) }
 
         // Wire up the live summary manager's pane content provider.
@@ -1785,8 +1805,15 @@ class BaseTerminalController: NSWindowController,
 
     /// Show the peek overlay for a stacked pane.
     func peekPane(_ pane: GridPane) {
+        peekNavigationGeneration += 1
+        peekSlideOffset = 0
+        isPeekNavigationAnimating = false
         peekedPane = pane.id
 
+        focusPeekPane(pane)
+    }
+
+    private func focusPeekPane(_ pane: GridPane) {
         // Move keyboard focus to the peeked pane's surface. Without this, focus
         // stays on whatever pane was focused before the peek, so the expanded
         // (bigger) pane is shown but not focused — the user would have to tap a
@@ -1796,6 +1823,10 @@ class BaseTerminalController: NSWindowController,
         switch pane {
         case .terminal(let surface):
             surfaceToFocus = surface
+        case .agentOverview(let overview):
+            // An overview peeks together with its bound agent terminal, so
+            // make that live half ready for input immediately.
+            surfaceToFocus = overview.surface
         case .stack(let children):
             surfaceToFocus = children.lazy.compactMap {
                 if case .terminal(let s) = $0 { return s } else { return nil }
@@ -1810,7 +1841,99 @@ class BaseTerminalController: NSWindowController,
 
     /// Dismiss the peek overlay.
     func dismissPeek() {
+        peekNavigationGeneration += 1
+        peekSlideOffset = 0
+        isPeekNavigationAnimating = false
         peekedPane = nil
+    }
+
+    /// Move through visual grid panes while the expanded peek remains open.
+    /// A terminal and its bound overview are one logical stop because the peek
+    /// renders them together.
+    func navigatePeek(by delta: Int) {
+        guard delta != 0, let peekedPane, !isPeekNavigationAnimating else { return }
+
+        var leaves: [GridPane] = []
+        func flatten(_ pane: GridPane) {
+            if case .stack(let children) = pane {
+                children.forEach(flatten)
+            } else {
+                leaves.append(pane)
+            }
+        }
+        gridPanes.forEach(flatten)
+
+        var stops: [(pane: GridPane, ids: Set<ObjectIdentifier>)] = []
+        var consumed = Set<ObjectIdentifier>()
+        for pane in leaves where !consumed.contains(pane.id) {
+            switch pane {
+            case .terminal(let surface):
+                var ids: Set<ObjectIdentifier> = [pane.id]
+                if let overview = agentOverviewPanes.first(where: { $0.surface === surface }) {
+                    ids.insert(ObjectIdentifier(overview))
+                }
+                consumed.formUnion(ids)
+                stops.append((pane, ids))
+
+            case .agentOverview(let overview):
+                var ids: Set<ObjectIdentifier> = [pane.id]
+                var target = pane
+                if let surface = overview.surface,
+                   gridSurfaces.contains(where: { $0 === surface }) {
+                    ids.insert(ObjectIdentifier(surface))
+                    target = .terminal(surface)
+                }
+                consumed.formUnion(ids)
+                stops.append((target, ids))
+
+            default:
+                consumed.insert(pane.id)
+                stops.append((pane, [pane.id]))
+            }
+        }
+
+        guard stops.count > 1,
+              let current = stops.firstIndex(where: { $0.ids.contains(peekedPane) }) else { return }
+        let target = (current + delta % stops.count + stops.count) % stops.count
+        let targetPane = stops[target].pane
+        let direction: CGFloat = delta > 0 ? 1 : -1
+        let width = max(window?.contentView?.bounds.width ?? 0, 480)
+        peekNavigationGeneration += 1
+        let generation = peekNavigationGeneration
+        isPeekNavigationAnimating = true
+
+        // Slide the current live tree fully out first. We intentionally do not
+        // use an insertion/removal transition: a terminal is an AppKit NSView
+        // and cannot be mounted in outgoing, incoming, and grid parents at the
+        // same time while SwiftUI cross-fades them.
+        withAnimation(.easeIn(duration: 0.13)) {
+            peekSlideOffset = -direction * width
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.13) { [weak self] in
+            guard let self, self.peekNavigationGeneration == generation else { return }
+
+            // Swap the one live tree offscreen without animation, then bring
+            // it in from the opposite edge with a lightly damped spring.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                self.peekedPane = targetPane.id
+                self.peekSlideOffset = direction * width
+            }
+            self.focusPeekPane(targetPane)
+
+            DispatchQueue.main.async {
+                guard self.peekNavigationGeneration == generation else { return }
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                    self.peekSlideOffset = 0
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak self] in
+                    guard let self, self.peekNavigationGeneration == generation else { return }
+                    self.isPeekNavigationAnimating = false
+                }
+            }
+        }
     }
 
     /// Handle a tap on a pane's grab handle: toggle the peek/expand overlay
@@ -1822,7 +1945,10 @@ class BaseTerminalController: NSWindowController,
         guard surfaceTree.contains(surface) else { return }
 
         let id = ObjectIdentifier(surface)
-        if peekedPane == id {
+        let pairedOverviewIsPeeked = agentOverviewPanes.contains { overview in
+            ObjectIdentifier(overview) == peekedPane && overview.surface === surface
+        }
+        if peekedPane == id || pairedOverviewIsPeeked {
             dismissPeek()
         } else {
             peekPane(.terminal(surface))
@@ -3747,9 +3873,79 @@ class BaseTerminalController: NSWindowController,
         case .flagsChanged:
             localEventFlagsChanged(event)
 
+        case .scrollWheel:
+            localEventScrollWheel(event)
+
+        case .keyDown:
+            localEventKeyDown(event)
+
+        case .leftMouseDown:
+            localEventLeftMouseDown(event)
+
         default:
             event
         }
+    }
+
+    private func localEventLeftMouseDown(_ event: NSEvent) -> NSEvent? {
+        guard window?.isKeyWindow == true,
+              event.window === window,
+              let preview = temporaryURLPreview,
+              preview.window === window else { return event }
+        let point = preview.convert(event.locationInWindow, from: nil)
+        if preview.bounds.contains(point) {
+            pinTemporaryURLPreview()
+        }
+        return event
+    }
+
+    private func localEventKeyDown(_ event: NSEvent) -> NSEvent? {
+        if window?.isKeyWindow == true,
+           temporaryURLPreview != nil,
+           event.keyCode == 53 {
+            dismissTemporaryURLPreview()
+            return nil
+        }
+        guard window?.isKeyWindow == true, peekedPane != nil else { return event }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags == [.command, .shift],
+              let key = event.charactersIgnoringModifiers else { return event }
+        switch key {
+        case "[": navigatePeek(by: -1); return nil
+        case "]": navigatePeek(by: 1); return nil
+        default: return event
+        }
+    }
+
+    private func localEventScrollWheel(_ event: NSEvent) -> NSEvent? {
+        // The temporary web preview is interactive; all wheel/trackpad events
+        // over it belong to WKWebView, including horizontal page scrollers.
+        if temporaryURLPreview != nil { return event }
+        guard window?.isKeyWindow == true,
+              peekedPane != nil,
+              event.hasPreciseScrollingDeltas,
+              abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) else {
+            return event
+        }
+
+        if event.phase == .began {
+            peekSwipeDistance = 0
+            peekSwipeTriggered = false
+        }
+        peekSwipeDistance += event.scrollingDeltaX
+
+        if !peekSwipeTriggered, abs(peekSwipeDistance) >= 44 {
+            // Natural trackpad motion: fingers left advances, fingers right
+            // goes back. Only one navigation fires per physical gesture.
+            navigatePeek(by: peekSwipeDistance < 0 ? 1 : -1)
+            peekSwipeTriggered = true
+        }
+
+        if event.phase == .ended || event.phase == .cancelled {
+            peekSwipeDistance = 0
+            peekSwipeTriggered = false
+        }
+        return nil
     }
 
     private func localEventFlagsChanged(_ event: NSEvent) -> NSEvent? {
@@ -3773,6 +3969,8 @@ class BaseTerminalController: NSWindowController,
             if watermarkPeek != isWatermarkPeeking {
                 isWatermarkPeeking = watermarkPeek
             }
+
+            updateTemporaryURLPreview(commandIsHeld: flags.contains(.command))
 
             if optionOnly {
                 // Option key was just pressed (alone). Not after a Cmd+Option
@@ -3814,6 +4012,58 @@ class BaseTerminalController: NSWindowController,
         }
 
         return event
+    }
+
+    @objc private func hoveredURLDidChange(_ notification: Notification) {
+        guard window?.isKeyWindow == true else { return }
+
+        // Terminal hover notifications identify their surface. Ignore a URL
+        // from another window; overview link controls use nil because their
+        // SwiftUI view has no direct NSWindow reference, and the key-window
+        // guard above routes those correctly.
+        if let surface = notification.object as? Ghostty.SurfaceView,
+           !gridSurfaces.contains(where: { $0 === surface }) {
+            return
+        }
+
+        let nextURL = (notification.userInfo?["url"] as? String).flatMap(URL.init(string:))
+        // Once the webpage itself takes hit testing, it covers the source link
+        // and naturally emits a hover exit. Keep the launched URL latched
+        // while Command remains held (or until the user pins/closes it).
+        if nextURL != nil || temporaryURLPreview == nil {
+            hoveredURL = nextURL
+        }
+        let flags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        updateTemporaryURLPreview(commandIsHeld: flags.contains(.command))
+    }
+
+    private func updateTemporaryURLPreview(commandIsHeld: Bool) {
+        if isTemporaryURLPreviewPinned { return }
+        if !commandIsHeld {
+            dismissTemporaryURLPreview()
+            return
+        }
+        guard commandIsHeld, let hoveredURL,
+              let scheme = hoveredURL.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return
+        }
+
+        let current = temporaryURLPreview?.currentURL ?? temporaryURLPreview?.initialURL
+        guard current != hoveredURL else { return }
+        isTemporaryURLPreviewPinned = false
+        temporaryURLPreview = WebViewPane(url: hoveredURL)
+    }
+
+    func pinTemporaryURLPreview() {
+        guard temporaryURLPreview != nil else { return }
+        isTemporaryURLPreviewPinned = true
+    }
+
+    func dismissTemporaryURLPreview() {
+        temporaryURLPreview = nil
+        isTemporaryURLPreviewPinned = false
+        hoveredURL = nil
     }
 
     // MARK: TerminalViewDelegate
@@ -4857,6 +5107,12 @@ class BaseTerminalController: NSWindowController,
                 lines.append("overview_mode = \(tomlQuote(view.sections.tomlValue))")
                 if view.fontScale != AgentOverviewPane.defaultFontScale {
                     lines.append("overview_font_scale = \(String(format: "%.2f", Double(view.fontScale)))")
+                }
+                if view.peekFontScale != AgentOverviewPane.defaultPeekFontScale {
+                    lines.append("overview_peek_font_scale = \(String(format: "%.2f", Double(view.peekFontScale)))")
+                }
+                if view.fontFamily != .regular {
+                    lines.append("overview_font_family = \(tomlQuote(view.fontFamily.rawValue))")
                 }
                 // Overviews stack like any other pane now, so their stack
                 // membership has to round-trip too. Every other pane type
@@ -5930,6 +6186,13 @@ class BaseTerminalController: NSWindowController,
             }
             if let scale = cfg.overviewFontScale {
                 view.fontScale = CGFloat(scale)
+            }
+            if let scale = cfg.overviewPeekFontScale {
+                view.peekFontScale = CGFloat(scale)
+            }
+            if let rawFamily = cfg.overviewFontFamily,
+               let family = AgentOverviewFontFamily(rawValue: rawFamily) {
+                view.fontFamily = family
             }
             // Record the saved placement without applying it: the grid shape
             // comes from row_cols, and this only needs to be right for later

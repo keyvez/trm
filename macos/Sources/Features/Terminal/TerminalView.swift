@@ -68,6 +68,10 @@ protocol TerminalViewModel: ObservableObject {
     /// Inline webview panes opened via URL interception.
     var webviewPanes: [WebViewPane] { get }
 
+    /// Temporary Command-hover URL preview, outside the persistent grid.
+    var temporaryURLPreview: WebViewPane? { get }
+    var isTemporaryURLPreviewPinned: Bool { get }
+
     /// All panes (terminals + webviews) for the grid, in display order.
     var gridPanes: [GridPane] { get }
 
@@ -79,6 +83,10 @@ protocol TerminalViewModel: ObservableObject {
 
     /// The currently peeked sub-pane (expanded overlay), or nil.
     var peekedPane: ObjectIdentifier? { get }
+
+    /// Directional animation state for changing the peeked pane.
+    var peekSlideOffset: CGFloat { get }
+    var isPeekNavigationAnimating: Bool { get }
 
     /// The command palette state.
     var commandPaletteIsShowing: Bool { get set }
@@ -160,6 +168,10 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         servicePluginRegistry: viewModel.servicePluginRegistry,
                         attentionPaneIds: viewModel.attentionPaneIds,
                         peekedPane: viewModel.peekedPane,
+                        peekSlideOffset: viewModel.peekSlideOffset,
+                        isPeekNavigationAnimating: viewModel.isPeekNavigationAnimating,
+                        temporaryURLPreview: viewModel.temporaryURLPreview,
+                        isTemporaryURLPreviewPinned: viewModel.isTemporaryURLPreviewPinned,
                         onDetachPane: { pane in
                             (self.delegate as? BaseTerminalController)?.detachPaneToWindow(pane)
                         },
@@ -217,6 +229,15 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         isWatermarkPeeking: viewModel.isWatermarkPeeking,
                         onDismissPeek: {
                             (self.delegate as? BaseTerminalController)?.dismissPeek()
+                        },
+                        onNavigatePeek: { delta in
+                            (self.delegate as? BaseTerminalController)?.navigatePeek(by: delta)
+                        },
+                        onPinURLPreview: {
+                            (self.delegate as? BaseTerminalController)?.pinTemporaryURLPreview()
+                        },
+                        onDismissURLPreview: {
+                            (self.delegate as? BaseTerminalController)?.dismissTemporaryURLPreview()
                         },
                         rowHeightFractions: viewModel.gridRowHeightFractions,
                         colWidthFractions: viewModel.gridColWidthFractions,
