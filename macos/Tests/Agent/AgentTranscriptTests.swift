@@ -23,10 +23,12 @@ struct AgentTranscriptTests {
     }
 
     /// Build one JSONL line carrying a tool_result for the given tool_use id.
-    private func toolResultLine(_ id: String) -> String {
+    private func toolResultLine(_ id: String, content: String? = nil) -> String {
+        var result: [String: Any] = ["type": "tool_result", "tool_use_id": id]
+        if let content { result["content"] = content }
         let obj: [String: Any] = [
             "type": "user",
-            "message": ["content": [["type": "tool_result", "tool_use_id": id]]],
+            "message": ["content": [result]],
         ]
         let data = try! JSONSerialization.data(withJSONObject: obj)
         return String(decoding: data, as: UTF8.self)
@@ -99,6 +101,33 @@ struct AgentTranscriptTests {
         let lines = [userLine("first"), assistantLine([["type": "text", "text": "ok"]]), userLine("second")]
         let t = AgentTranscriptReader.parse(lines: lines)
         #expect(t.lastUserPrompt == "second")
+    }
+
+    @Test func retainsTurnsForHeaderNavigation() {
+        let lines = [
+            userLine("first"),
+            assistantLine([["type": "text", "text": "First answer."]]),
+            userLine("second"),
+            assistantLine([["type": "text", "text": "Second answer."]]),
+        ]
+        let turns = AgentTranscriptReader.parse(lines: lines).turns
+
+        #expect(turns.map(\.prompt) == ["first", "second"])
+        #expect(turns[0].blocks == [.paragraph("First answer.")])
+        #expect(turns[1].blocks == [.paragraph("Second answer.")])
+    }
+
+    @Test func toolResultsDoNotCreateHistoryTurns() {
+        let turns = AgentTranscriptReader.parse(lines: [
+            userLine("go"),
+            assistantLine([["type": "tool_use", "id": "t1", "name": "Bash",
+                            "input": ["command": "ls"]]]),
+            toolResultLine("t1"),
+        ]).turns
+
+        #expect(turns.count == 1)
+        #expect(turns[0].prompt == "go")
+        #expect(turns[0].activity.first?.finished == true)
     }
 
     @Test func syntheticPromptsAreIgnored() {
@@ -293,6 +322,108 @@ struct AgentTranscriptTests {
     }
 
     // MARK: - Activity
+
+    @Test func askUserQuestionPreservesQuestionAndOptionsSeparately() throws {
+        let lines = [
+            userLine("ship it"),
+            assistantLine([["type": "tool_use", "id": "q1", "name": "AskUserQuestion",
+                            "input": ["questions": [[
+                                "header": "Deploy?",
+                                "question": "Where should I deploy this build?",
+                                "multiSelect": false,
+                                "options": [
+                                    ["label": "Production", "description": "Deploy to all users."],
+                                    ["label": "Staging", "description": "Deploy to the test environment."],
+                                ],
+                            ]]]]]),
+        ]
+
+        let transcript = AgentTranscriptReader.parse(lines: lines)
+        let question = try #require(transcript.questions.first)
+
+        #expect(transcript.activity.isEmpty)
+        #expect(transcript.isWorking)
+        #expect(question.header == "Deploy?")
+        #expect(question.text == "Where should I deploy this build?")
+        #expect(!question.allowsMultiple)
+        #expect(!question.finished)
+        #expect(question.options.map(\.label) == ["Production", "Staging"])
+        #expect(question.options[0].description == "Deploy to all users.")
+    }
+
+    @Test func questionToolResultMarksQuestionAnswered() throws {
+        let lines = [
+            userLine("go"),
+            assistantLine([["type": "tool_use", "id": "q1", "name": "AskUserQuestion",
+                            "input": ["questions": [[
+                                "question": "Pick targets",
+                                "multiSelect": true,
+                                "options": [["label": "macOS"], ["label": "Linux"]],
+                            ]]]]]),
+            toolResultLine(
+                "q1",
+                content: "Your questions have been answered: \"Pick targets\"=\"macOS, Linux, plus **docs**\". You can now continue with these answers in mind."
+            ),
+        ]
+
+        let transcript = AgentTranscriptReader.parse(lines: lines)
+        let question = try #require(transcript.questions.first)
+
+        #expect(question.finished)
+        #expect(question.allowsMultiple)
+        #expect(question.selectedAnswer == "macOS, Linux, plus **docs**")
+        #expect(!transcript.isWorking)
+    }
+
+    @Test func multipleQuestionAnswersStayWithTheirQuestion() throws {
+        let lines = [
+            userLine("configure it"),
+            assistantLine([["type": "tool_use", "id": "q1", "name": "AskUserQuestion",
+                            "input": ["questions": [
+                                ["question": "Which environment?", "options": [
+                                    ["label": "Production"], ["label": "Staging"],
+                                ]],
+                                ["question": "Which targets?", "multiSelect": true, "options": [
+                                    ["label": "macOS"], ["label": "Linux"],
+                                ]],
+                            ]]]]),
+            toolResultLine(
+                "q1",
+                content: "The user answered: \"Which environment?\"=\"Staging\", \"Which targets?\"=\"macOS, Linux\". Read the answers carefully and continue."
+            ),
+        ]
+
+        let transcript = AgentTranscriptReader.parse(lines: lines)
+        #expect(transcript.questions.count == 2)
+        #expect(transcript.questions[0].selectedAnswer == "Staging")
+        #expect(transcript.questions[1].selectedAnswer == "macOS, Linux")
+    }
+
+    @Test func newHumanTurnClearsPreviousQuestions() {
+        let lines = [
+            userLine("first"),
+            assistantLine([["type": "tool_use", "id": "q1", "name": "AskUserQuestion",
+                            "input": ["questions": [["question": "Old question"]]]]]),
+            userLine("second"),
+        ]
+
+        let transcript = AgentTranscriptReader.parse(lines: lines)
+        #expect(transcript.questions.isEmpty)
+        #expect(transcript.lastUserPrompt == "second")
+    }
+
+    @Test func legacyOverviewModesOptIntoQuestionsAndCanDisableThem() {
+        let migrated = AgentOverviewSections(tomlValue: "prompt,activity,reply")
+        #expect(migrated.contains(.questions))
+        #expect(AgentOverviewSections(tomlValue: "") == .default)
+
+        var disabled = AgentOverviewSections.default
+        disabled.remove(.questions)
+        #expect(disabled.tomlValue.contains("questions_off"))
+
+        let restored = AgentOverviewSections(tomlValue: disabled.tomlValue)
+        #expect(!restored.contains(.questions))
+    }
 
     @Test func tracksToolCallsInOrder() {
         let lines = [
@@ -721,6 +852,19 @@ struct CodexTranscriptTests {
         ])
         #expect(t.lastUserPrompt == "second")
         #expect(t.activity.isEmpty)
+    }
+
+    @Test func retainsCodexTurnsForHeaderNavigation() {
+        let turns = CodexTranscriptReader.parse(lines: [
+            userLine("first"),
+            assistantLine("First answer."),
+            userLine("second"),
+            assistantLine("Second answer."),
+        ]).turns
+
+        #expect(turns.map(\.prompt) == ["first", "second"])
+        #expect(turns[0].blocks == [.paragraph("First answer.")])
+        #expect(turns[1].blocks == [.paragraph("Second answer.")])
     }
 
     @Test func toolOnlyTurnKeepsPreviousProse() {

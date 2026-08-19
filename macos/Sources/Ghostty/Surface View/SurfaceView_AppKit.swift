@@ -49,7 +49,18 @@ extension Ghostty {
         @Published var error: Error? = nil
 
         // The hovered URL string
-        @Published var hoverUrl: String? = nil
+        @Published var hoverUrl: String? = nil {
+            didSet {
+                guard hoverUrl != oldValue else { return }
+                var userInfo: [String: Any] = [:]
+                if let hoverUrl { userInfo["url"] = hoverUrl }
+                NotificationCenter.default.post(
+                    name: Trm.hoveredURLDidChange,
+                    object: self,
+                    userInfo: userInfo
+                )
+            }
+        }
 
         // The progress report (if any)
         @Published var progressReport: Action.ProgressReport? = nil {

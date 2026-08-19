@@ -27,11 +27,21 @@ enum AgentKind: String, Equatable {
 /// …) can be added later by implementing another reader that produces the same
 /// `AgentTranscript` value — nothing in the view layer knows about Claude.
 struct AgentTranscript: Equatable {
+    /// Stable identifier of the human message that began this turn. Used by
+    /// the overview to keep showing the same historical turn while live
+    /// polling updates the transcript behind it.
+    var turnID: String? = nil
+
     /// Rich content blocks of the last assistant message, in order.
     var blocks: [Block] = []
 
     /// Tool calls from the current (or most recent) turn, oldest first.
     var activity: [ToolActivity] = []
+
+    /// Structured questions the agent asked during the current turn. These
+    /// are kept separate from generic tool activity so the question text and
+    /// choices survive parsing instead of collapsing to "AskUserQuestion".
+    var questions: [Question] = []
 
     /// The last thing the human asked, for context at the top of the view.
     var lastUserPrompt: String? = nil
@@ -53,13 +63,16 @@ struct AgentTranscript: Equatable {
         var promptBlocks: [Block] = []
         var blocks: [Block] = []
         var activity: [ToolActivity] = []
+        var questions: [Question] = []
 
         /// Stable across polls: turns only append, and a finished turn's
         /// prompt and first tool call never change — so a reader paging
         /// through history isn't shifted when a new turn arrives.
         var id: String { "\(prompt?.hashValue ?? 0):\(activity.first?.id ?? "-")" }
 
-        var isEmpty: Bool { prompt == nil && blocks.isEmpty && activity.isEmpty }
+        var isEmpty: Bool {
+            prompt == nil && blocks.isEmpty && activity.isEmpty && questions.isEmpty
+        }
     }
 
     /// True when the agent appears to still be working: the newest transcript
@@ -74,7 +87,7 @@ struct AgentTranscript: Equatable {
     var contextUsedPercent: Int? = nil
 
     var isEmpty: Bool {
-        blocks.isEmpty && activity.isEmpty && lastUserPrompt == nil
+        blocks.isEmpty && activity.isEmpty && questions.isEmpty && lastUserPrompt == nil
     }
 
     /// One renderable piece of an assistant message.
@@ -115,6 +128,26 @@ struct AgentTranscript: Equatable {
         /// First line of the error text, when this call failed.
         var errorText: String? = nil
     }
+
+    /// A question presented by an agent's structured user-input tool.
+    struct Question: Equatable, Identifiable {
+        let id: String
+        let toolCallID: String
+        let header: String?
+        let text: String
+        let options: [Option]
+        let allowsMultiple: Bool
+        var finished: Bool = false
+        /// The label(s) or free-form response returned by Claude Code's
+        /// AskUserQuestion tool result.
+        var selectedAnswer: String? = nil
+
+        struct Option: Equatable, Identifiable {
+            let id: String
+            let label: String
+            let description: String?
+        }
+    }
 }
 
 /// Which sections an agent overview shows.
@@ -134,18 +167,21 @@ struct AgentOverviewSections: OptionSet, Hashable {
     static let reply = AgentOverviewSections(rawValue: 1 << 2)
     /// Tool calls that failed.
     static let errors = AgentOverviewSections(rawValue: 1 << 3)
+    /// Structured questions and their answer choices.
+    static let questions = AgentOverviewSections(rawValue: 1 << 4)
 
-    static let all: AgentOverviewSections = [.prompt, .activity, .reply, .errors]
+    static let all: AgentOverviewSections = [.prompt, .questions, .activity, .reply, .errors]
     /// What a new overview shows: everything except the errors list, which is
     /// noise until something actually fails.
-    static let `default`: AgentOverviewSections = [.prompt, .activity, .reply]
+    static let `default`: AgentOverviewSections = [.prompt, .questions, .activity, .reply]
 
     /// The individual sections, in display order, for building menus.
-    static let allCases: [AgentOverviewSections] = [.prompt, .activity, .reply, .errors]
+    static let allCases: [AgentOverviewSections] = [.prompt, .questions, .activity, .reply, .errors]
 
     var menuTitle: String {
         switch self {
         case .prompt: return "What I Asked"
+        case .questions: return "Questions"
         case .activity: return "Recent Activity"
         case .reply: return "What Claude Said"
         case .errors: return "Errors Only"
@@ -156,6 +192,7 @@ struct AgentOverviewSections: OptionSet, Hashable {
     var menuSubtitle: String {
         switch self {
         case .prompt: return "Your last prompt"
+        case .questions: return "Questions and answer choices"
         case .activity: return "Commands the agent is running"
         case .reply: return "The agent's reply"
         case .errors: return "Tool calls that failed"
@@ -166,6 +203,7 @@ struct AgentOverviewSections: OptionSet, Hashable {
     var symbolName: String {
         switch self {
         case .prompt: return "person.bubble"
+        case .questions: return "questionmark.bubble"
         case .activity: return "terminal"
         case .reply: return "sparkle"
         case .errors: return "exclamationmark.triangle"
@@ -189,13 +227,18 @@ struct AgentOverviewSections: OptionSet, Hashable {
             guard contains(section) else { return nil }
             switch section {
             case .prompt: return "prompt"
+            case .questions: return "questions"
             case .activity: return "activity"
             case .reply: return "reply"
             case .errors: return "errors"
             default: return nil
             }
         }
-        return tokens.joined(separator: ",")
+        // Older checkpoints predate the questions section, so absence alone
+        // cannot mean the user disabled it. Persist an explicit negative token
+        // when it is turned off; the parser can then safely opt old panes in.
+        return (contains(.questions) ? tokens : tokens + ["questions_off"])
+            .joined(separator: ",")
     }
 
     init(rawValue: Int) { self.rawValue = rawValue }
@@ -204,9 +247,14 @@ struct AgentOverviewSections: OptionSet, Hashable {
     /// unparseable value means "everything", matching the render fallback.
     init(tomlValue: String) {
         var result: AgentOverviewSections = []
+        var hasQuestionPreference = false
         for token in tomlValue.split(separator: ",") {
             switch token.trimmingCharacters(in: .whitespaces) {
             case "prompt": result.insert(.prompt)
+            case "questions":
+                result.insert(.questions)
+                hasQuestionPreference = true
+            case "questions_off": hasQuestionPreference = true
             case "activity": result.insert(.activity)
             case "reply": result.insert(.reply)
             case "errors": result.insert(.errors)
@@ -214,10 +262,21 @@ struct AgentOverviewSections: OptionSet, Hashable {
             // list. "fullHistory" meant every section; without this it fell
             // through to `default` and the saved mode was silently replaced
             // by `.default` on every restore.
-            case "fullHistory": result.formUnion(.all)
+            case "fullHistory":
+                result.formUnion(.all)
+                hasQuestionPreference = true
             default: break
             }
         }
+        // Preserve the longstanding empty/unknown-value fallback. Insert the
+        // migration flag only after deciding whether anything parsed at all,
+        // otherwise an empty value would accidentally become Questions-only.
+        if result.isEmpty, !hasQuestionPreference {
+            self = Self.default
+            return
+        }
+        // Existing saved panes should gain this newly introduced section.
+        if !hasQuestionPreference { result.insert(.questions) }
         self = result.isEmpty ? Self.default : result
     }
 }
@@ -405,19 +464,22 @@ enum AgentTranscriptReader {
     /// both shapes are handled. Truncated because this renders in a narrow
     /// pane — the first line carries the actual error nearly every time.
     static func firstLine(ofToolResult block: [String: Any]) -> String? {
-        var text: String? = nil
-        if let s = block["content"] as? String {
-            text = s
-        } else if let parts = block["content"] as? [[String: Any]] {
-            text = parts.compactMap { $0["text"] as? String }.first
-        }
-        guard let raw = text else { return nil }
+        guard let raw = toolResultText(block) else { return nil }
         let line = raw
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first(where: { !$0.isEmpty })
         guard let line, !line.isEmpty else { return nil }
         return line.count > 300 ? String(line.prefix(300)) + "…" : line
+    }
+
+    private static func toolResultText(_ block: [String: Any]) -> String? {
+        if let text = block["content"] as? String { return text }
+        if let parts = block["content"] as? [[String: Any]] {
+            let text = parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
+            return text.isEmpty ? nil : text
+        }
+        return nil
     }
 
     /// Bytes read from the end of the transcript. Claude transcripts grow to
@@ -449,6 +511,14 @@ enum AgentTranscriptReader {
 
     /// Maximum tool calls kept in the activity strip.
     private static let maxActivity = 12
+
+    /// Defensive caps for structured questions rendered by SwiftUI. Claude's
+    /// current UI schema is much smaller than these limits, but transcripts
+    /// are external input and must not be able to recreate the oversized-text
+    /// layout spin that prompt bounding fixed.
+    private static let maxQuestions = 8
+    private static let maxQuestionCharacters = 8 * 1024
+    private static let maxOptionCharacters = 4 * 1024
 
     /// Map a working directory to its Claude project transcript directory.
     /// e.g. `/Users/foo/dev/trm` → `~/.claude/projects/-Users-foo-dev-trm`
@@ -556,13 +626,24 @@ enum AgentTranscriptReader {
         var turns: [AgentTranscript.Turn] = []
         var current = AgentTranscript.Turn()
 
+        // AskUserQuestion calls keyed separately from generic tools. Keeping
+        // the tool call id lets its later tool_result mark every question in
+        // that call answered without discarding their content.
+        var questionOrder: [String] = []
+        var questions: [String: [AgentTranscript.Question]] = [:]
+
         // A new human prompt closes out the turn in flight.
         func finalizeCurrentTurn() {
             current.activity = Array(toolOrder.compactMap { tools[$0] }.suffix(maxActivity))
+            current.questions = Array(
+                questionOrder.flatMap { questions[$0] ?? [] }.suffix(maxQuestions)
+            )
             if !current.isEmpty { turns.append(current) }
             current = .init()
             toolOrder.removeAll()
             tools.removeAll()
+            questionOrder.removeAll()
+            questions.removeAll()
         }
 
         // Context tokens in the newest assistant entry that reported usage:
@@ -601,7 +682,19 @@ enum AgentTranscriptReader {
                         case "tool_result":
                             sawToolResult = true
                             if let id = block["tool_use_id"] as? String,
-                               let existing = tools[id] {
+                               let existingQuestions = questions[id] {
+                                let answers = selectedAnswers(
+                                    fromToolResult: block,
+                                    questions: existingQuestions
+                                )
+                                questions[id] = existingQuestions.map { question in
+                                    var answered = question
+                                    answered.finished = true
+                                    answered.selectedAnswer = answers[question.id]
+                                    return answered
+                                }
+                            } else if let id = block["tool_use_id"] as? String,
+                                      let existing = tools[id] {
                                 // `is_error` marks a failed call. Capture the
                                 // first line of the message so the errors view
                                 // can say what went wrong without re-reading
@@ -684,6 +777,14 @@ enum AgentTranscriptReader {
                         guard let id = block["id"] as? String else { continue }
                         let name = block["name"] as? String ?? "Tool"
                         let input = block["input"] as? [String: Any]
+                        if name == "AskUserQuestion" {
+                            let parsed = parseQuestions(toolCallID: id, input: input)
+                            if !parsed.isEmpty {
+                                if questions[id] == nil { questionOrder.append(id) }
+                                questions[id] = parsed
+                                continue
+                            }
+                        }
                         if tools[id] == nil { toolOrder.append(id) }
                         tools[id] = .init(
                             id: id,
@@ -709,10 +810,129 @@ enum AgentTranscriptReader {
             result.activity = last.activity
             result.lastUserPrompt = last.prompt
             result.promptBlocks = last.promptBlocks
+            result.questions = last.questions
         }
-        result.isWorking = result.activity.contains { !$0.finished }
+        result.isWorking = result.activity.contains { !$0.finished } ||
+            result.questions.contains { !$0.finished }
         result.contextUsedPercent = latestContextTokens.map(contextPercent(usedTokens:))
         return result
+    }
+
+    /// Preserve Claude Code's AskUserQuestion payload as structured overview
+    /// content. One tool call may contain several independently headed
+    /// questions, each with its own choices and multi-select behavior.
+    static func parseQuestions(
+        toolCallID: String,
+        input: [String: Any]?
+    ) -> [AgentTranscript.Question] {
+        guard let rawQuestions = input?["questions"] as? [[String: Any]] else { return [] }
+
+        return rawQuestions.prefix(maxQuestions).enumerated().compactMap {
+            index, raw -> AgentTranscript.Question? in
+            guard let rawText = raw["question"] as? String else { return nil }
+            let text = bounded(rawText, maxCharacters: maxQuestionCharacters)
+            guard !text.isEmpty else { return nil }
+
+            let header = (raw["header"] as? String).flatMap { value -> String? in
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : bounded(trimmed, maxCharacters: 160)
+            }
+            let rawOptions = raw["options"] as? [[String: Any]] ?? []
+            let options = rawOptions.prefix(12).enumerated().compactMap {
+                optionIndex, rawOption -> AgentTranscript.Question.Option? in
+                guard let rawLabel = rawOption["label"] as? String else { return nil }
+                let label = bounded(rawLabel, maxCharacters: maxOptionCharacters)
+                guard !label.isEmpty else { return nil }
+                let description = (rawOption["description"] as? String).flatMap { value -> String? in
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return trimmed.isEmpty
+                        ? nil
+                        : bounded(trimmed, maxCharacters: maxOptionCharacters)
+                }
+                return .init(
+                    id: "\(toolCallID):\(index):\(optionIndex)",
+                    label: label,
+                    description: description
+                )
+            }
+
+            return .init(
+                id: "\(toolCallID):\(index)",
+                toolCallID: toolCallID,
+                header: header,
+                text: text,
+                options: options,
+                allowsMultiple: (raw["multiSelect"] as? Bool) ?? false
+            )
+        }
+    }
+
+    /// Decode Claude Code's prose AskUserQuestion result envelope. The result
+    /// is not JSON: it is a sentence containing one or more
+    /// `"question"="answer"` pairs. Match with the original question text so
+    /// commas, Markdown, quotes inside a question, multi-select responses, and
+    /// free-form "Other" answers remain attached to the correct card.
+    static func selectedAnswers(
+        fromToolResult block: [String: Any],
+        questions: [AgentTranscript.Question]
+    ) -> [String: String] {
+        guard let content = toolResultText(block) else { return [:] }
+        var result: [String: String] = [:]
+
+        for (index, question) in questions.enumerated() {
+            let startToken = "\"\(question.text)\"=\""
+            guard let startRange = content.range(of: startToken) else { continue }
+            let answerStart = startRange.upperBound
+            let tail = content[answerStart...]
+
+            var answerEnd: String.Index? = nil
+            if index + 1 < questions.count {
+                for nextQuestion in questions[(index + 1)...] {
+                    let separator = "\", \"\(nextQuestion.text)\"=\""
+                    if let range = content.range(of: separator, range: answerStart..<content.endIndex),
+                       answerEnd == nil || range.lowerBound < answerEnd! {
+                        answerEnd = range.lowerBound
+                    }
+                }
+            }
+
+            if answerEnd == nil {
+                let finalMarkers = [
+                    "\". You can now continue",
+                    "\". Read the answers carefully",
+                    "\". You may now continue",
+                ]
+                answerEnd = finalMarkers.compactMap {
+                    content.range(of: $0, range: answerStart..<content.endIndex)?.lowerBound
+                }.min()
+            }
+
+            // Unknown/new envelope wording: the answer is still the final
+            // quoted value in the tool result, so use its last quote.
+            if answerEnd == nil, let quote = tail.lastIndex(of: "\"") {
+                answerEnd = quote
+            }
+
+            guard let answerEnd else { continue }
+            let answer = String(content[answerStart..<answerEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !answer.isEmpty {
+                result[question.id] = bounded(answer, maxCharacters: maxOptionCharacters)
+            }
+        }
+        return result
+    }
+
+    private static func bounded(_ value: String, maxCharacters: Int) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let end = trimmed.index(
+            trimmed.startIndex,
+            offsetBy: maxCharacters,
+            limitedBy: trimmed.endIndex
+        ), end != trimmed.endIndex else {
+            return trimmed
+        }
+        return String(trimmed[..<end]) + "…"
     }
 
     /// Convert used context tokens to a window percentage.
@@ -917,6 +1137,7 @@ enum CodexTranscriptReader {
             .prefix(30)
             .first { sessionCwd(of: $0.0) == cwd }?.0
     }
+
 
     /// Parse already-split rollout lines. Exposed for testing.
     static func parse(lines: [String]) -> AgentTranscript {
