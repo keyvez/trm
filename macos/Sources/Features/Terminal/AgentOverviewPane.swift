@@ -217,6 +217,11 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
 
     /// Typeface used for prose throughout this overview. Persisted globally as
     /// the default for new panes and per pane in session TOML.
+    /// Reads the displayed reply aloud with the best installed system voice.
+    /// Owned by the pane (not the view) so speech survives the view being
+    /// rebuilt — peeking the pane mid-sentence must not cut the voice off.
+    let speaker = OverviewSpeaker()
+
     @Published var fontFamily: AgentOverviewFontFamily = .regular {
         didSet {
             UserDefaults.standard.set(fontFamily.rawValue, forKey: Self.fontFamilyDefaultsKey)

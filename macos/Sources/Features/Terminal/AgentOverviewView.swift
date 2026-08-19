@@ -412,6 +412,11 @@ struct AgentOverviewView: View {
             }
             .foregroundStyle(.secondary)
 
+            OverviewSpeakButton(
+                speaker: pane.speaker,
+                text: OverviewSpeaker.spokenText(blocks: pane.displayedTranscript.blocks)
+            )
+
             Button(action: { pane.toggleBionic() }) {
                 Text("B")
                     .font(.system(size: 11, weight: .bold, design: .serif))
@@ -539,6 +544,7 @@ struct AgentOverviewView: View {
                     text: nsProse(
                         linked,
                         size: scaled(12.5),
+                        monospaced: pane.fontFamily.design == .monospaced,
                         color: .secondaryLabelColor,
                         lineSpacing: 3
                     ),
@@ -547,7 +553,7 @@ struct AgentOverviewView: View {
                 )
             } else {
                 Text(linked)
-                    .font(.system(size: scaled(12.5)))
+                    .font(readingFont(12.5))
                     .lineSpacing(3)
                     .foregroundStyle(.secondary)
                     .overviewSelectable(allowsTextSelection)
@@ -1546,5 +1552,25 @@ private extension View {
         } else {
             self.textSelection(.disabled)
         }
+    }
+}
+
+/// Speaks the displayed reply aloud. Its own small view so the button
+/// re-renders on the speaker's state without the pane having to forward the
+/// nested object's changes.
+private struct OverviewSpeakButton: View {
+    @ObservedObject var speaker: OverviewSpeaker
+    let text: String
+
+    var body: some View {
+        Button(action: { speaker.toggle(text) }) {
+            Image(systemName: speaker.isSpeaking ? "stop.fill" : "speaker.wave.2")
+                .font(.system(size: 10))
+                .foregroundStyle(speaker.isSpeaking ? Color.accentColor : Color.secondary)
+                .frame(width: 16, height: 16)
+        }
+        .buttonStyle(.plain)
+        .disabled(text.isEmpty && !speaker.isSpeaking)
+        .help(speaker.isSpeaking ? "Stop speaking" : "Speak the reply aloud")
     }
 }
