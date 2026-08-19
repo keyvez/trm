@@ -776,6 +776,8 @@ struct AgentOverviewView: View {
                     }
                 case .rule:
                     Divider().opacity(0.45)
+                case .table(let headers, let rows):
+                    tableView(headers: headers, rows: rows)
                 }
             }
         }
@@ -816,6 +818,54 @@ struct AgentOverviewView: View {
         }
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A markdown table as a real table: header row, divider, wrapped cells.
+    /// Cells render inline markdown like any other prose, and the whole
+    /// table wraps within the pane's width rather than scrolling sideways.
+    private func tableView(headers: [String], rows: [[String]]) -> some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 14, verticalSpacing: 6) {
+            GridRow {
+                ForEach(Array(headers.enumerated()), id: \.offset) { _, cell in
+                    Text(overviewStyledMarkdown(
+                        cell,
+                        size: scaled(12),
+                        weight: .semibold,
+                        design: pane.fontFamily.design
+                    ))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .gridColumnAlignment(.leading)
+                }
+            }
+            Divider().opacity(0.5)
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                GridRow {
+                    ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                        Text(overviewStyledMarkdown(
+                            cell,
+                            size: scaled(12),
+                            weight: .light,
+                            design: pane.fontFamily.design
+                        ))
+                        .foregroundStyle(.primary.opacity(0.9))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .gridColumnAlignment(.leading)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.secondary.opacity(0.07))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.16), lineWidth: 1)
+        )
+        .overviewSelectable(allowsTextSelection)
     }
 
     private func overviewLinksSection(_ urls: [URL]) -> some View {
@@ -1279,18 +1329,20 @@ private func applyBionicEmphasis(
 /// Block-level Markdown that SwiftUI's inline AttributedString parser does
 /// not lay out on its own. Fenced code is split earlier by the transcript
 /// reader; this handles the reading structures that remain in prose.
-private enum OverviewMarkdownBlock {
+enum OverviewMarkdownBlock: Equatable {
     case heading(level: Int, text: String)
     case paragraph(String)
     case bullets(items: [String], ordered: Bool)
     case quote(String)
     case rule
+    case table(headers: [String], rows: [[String]])
 
     static func parse(_ source: String) -> [Self] {
         var result: [Self] = []
         var paragraph: [String] = []
         var list: [String] = []
         var listIsOrdered: Bool?
+        var tableLines: [String] = []
 
         func flushParagraph() {
             guard !paragraph.isEmpty else { return }
@@ -1305,13 +1357,45 @@ private enum OverviewMarkdownBlock {
             listIsOrdered = nil
         }
 
+        func flushTable() {
+            guard !tableLines.isEmpty else { return }
+            defer { tableLines.removeAll() }
+            // A real GFM table is a header row, a separator row, then data.
+            // Pipe lines that don't form one stay prose rather than vanish.
+            guard tableLines.count >= 2, isTableSeparator(tableLines[1]) else {
+                result.append(.paragraph(tableLines.joined(separator: "\n")))
+                return
+            }
+            let headers = tableCells(tableLines[0])
+            let rows = tableLines.dropFirst(2).map { line -> [String] in
+                var cells = tableCells(line)
+                if cells.count < headers.count {
+                    cells += Array(repeating: "", count: headers.count - cells.count)
+                }
+                return Array(cells.prefix(headers.count))
+            }
+            result.append(.table(headers: headers, rows: Array(rows)))
+        }
+
         for rawLine in source.components(separatedBy: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             if line.isEmpty {
                 flushParagraph()
                 flushList()
+                flushTable()
                 continue
             }
+
+            // Rows accumulate until a non-pipe line ends the table. Checked
+            // before the rule branch: a separator row like |---|---| must
+            // stay with its table.
+            if line.hasPrefix("|") {
+                flushParagraph()
+                flushList()
+                tableLines.append(line)
+                continue
+            }
+            flushTable()
 
             if let heading = heading(line) {
                 flushParagraph()
@@ -1348,7 +1432,32 @@ private enum OverviewMarkdownBlock {
 
         flushParagraph()
         flushList()
+        flushTable()
         return result
+    }
+
+    /// Split a pipe row into trimmed cells, dropping the outer pipes.
+    static func tableCells(_ line: String) -> [String] {
+        var body = line
+        if body.hasPrefix("|") { body.removeFirst() }
+        if body.hasSuffix("|") { body.removeLast() }
+        return body.components(separatedBy: "|")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// The delimiter row under a table header: every cell is dashes with
+    /// optional alignment colons, e.g. `| --- | :---: |`.
+    static func isTableSeparator(_ line: String) -> Bool {
+        let cells = tableCells(line)
+        guard !cells.isEmpty else { return false }
+        return cells.allSatisfy { cell in
+            let stripped = cell.replacingOccurrences(of: " ", with: "")
+            guard stripped.count >= 1 else { return false }
+            var body = Substring(stripped)
+            if body.hasPrefix(":") { body.removeFirst() }
+            if body.hasSuffix(":") { body.removeLast() }
+            return !body.isEmpty && body.allSatisfy { $0 == "-" }
+        }
     }
 
     private static func heading(_ line: String) -> (Int, String)? {

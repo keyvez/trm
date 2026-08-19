@@ -25,3 +25,53 @@ struct OverviewSpeechTests {
                 == "Heading\nitem one\nitem two")
     }
 }
+
+/// GFM pipe tables parsed into real table blocks.
+@MainActor
+struct OverviewMarkdownTableTests {
+
+    @Test func parsesPipeTable() {
+        let blocks = OverviewMarkdownBlock.parse("""
+        Intro line.
+
+        | Name | Port |
+        | --- | :---: |
+        | Moltis | 49264 |
+        | Tailscale | - |
+        """)
+        #expect(blocks == [
+            .paragraph("Intro line."),
+            .table(
+                headers: ["Name", "Port"],
+                rows: [["Moltis", "49264"], ["Tailscale", "-"]]
+            ),
+        ])
+    }
+
+    @Test func pipeLinesWithoutSeparatorStayProse() {
+        let blocks = OverviewMarkdownBlock.parse("| just | one | row |")
+        #expect(blocks == [.paragraph("| just | one | row |")])
+    }
+
+    @Test func raggedRowsArePaddedToHeaderWidth() {
+        let blocks = OverviewMarkdownBlock.parse("""
+        | A | B | C |
+        |---|---|---|
+        | 1 | 2 |
+        | 1 | 2 | 3 | 4 |
+        """)
+        #expect(blocks == [
+            .table(headers: ["A", "B", "C"],
+                   rows: [["1", "2", ""], ["1", "2", "3"]]),
+        ])
+    }
+
+    @Test func tablesSpeakAsCommaSeparatedCells() {
+        let spoken = OverviewSpeaker.plainProse("""
+        | Name | Port |
+        | --- | --- |
+        | Moltis | 49264 |
+        """)
+        #expect(spoken == "Name, Port\nMoltis, 49264")
+    }
+}

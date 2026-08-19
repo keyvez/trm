@@ -78,6 +78,17 @@ final class OverviewSpeaker: NSObject, ObservableObject {
     /// Strip inline markdown down to what should be pronounced.
     static func plainProse(_ text: String) -> String {
         var value = text
+        // Table rows speak as comma-separated cells; separator rows are
+        // punctuation, not content.
+        if value.contains("|") {
+            value = value.components(separatedBy: "\n").compactMap { line -> String? in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("|") else { return line }
+                if OverviewMarkdownBlock.isTableSeparator(trimmed) { return nil }
+                let cells = OverviewMarkdownBlock.tableCells(trimmed).filter { !$0.isEmpty }
+                return cells.joined(separator: ", ")
+            }.joined(separator: "\n")
+        }
         // [title](url) → title
         value = value.replacingOccurrences(
             of: #"\[([^\]]+)\]\([^)]*\)"#, with: "$1", options: .regularExpression
