@@ -26,6 +26,32 @@ enum LayoutSyncModel {
         }
     }
 
+    /// Split a serialized pane list into the panes that take grid cells and
+    /// the ones parked in the sidebar.
+    ///
+    /// A parked pane exists and keeps running but claims no cell, so it must
+    /// stay out of the display order and out of the row/column arithmetic —
+    /// leaving it in makes the grid reserve a cell for a pane that never
+    /// renders. The `sidebar` flag rides alongside each entry rather than
+    /// being derived from position, because parked panes are serialized after
+    /// the grid ones precisely so grid indices stay stable.
+    ///
+    /// Restoring a window where *everything* was parked would leave an empty
+    /// grid with no visible way back, so the first parked pane comes back.
+    static func partitionParked<T>(
+        _ entries: [(value: T, sidebar: Bool)]
+    ) -> (grid: [T], parked: [T]) {
+        var grid: [T] = []
+        var parked: [T] = []
+        for entry in entries {
+            if entry.sidebar { parked.append(entry.value) } else { grid.append(entry.value) }
+        }
+        if grid.isEmpty, !parked.isEmpty {
+            grid.append(parked.removeFirst())
+        }
+        return (grid, parked)
+    }
+
     /// Number of visual grid cells for a flat pane list: every stack of N
     /// panes collapses into one cell.
     static func visualCellCount(flatCount: Int, stackGroups: [[Int]]) -> Int {

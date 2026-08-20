@@ -51,6 +51,59 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     /// hammered from a 1.5 s poll.
     private static let streamRestartCooldown: TimeInterval = 5
 
+    /// Every live mirror, so the app can tear their ssh children down on the
+    /// way out. Weak: a mirror's lifetime belongs to its overview pane.
+    private static let liveMirrors = NSHashTable<RemoteAgentTranscriptMirror>.weakObjects()
+    private static let liveMirrorsLock = NSLock()
+
+    /// Stop every running stream. Called on app termination — the streams are
+    /// child `ssh` processes that outlive us otherwise (see `reapOrphanedStreams`).
+    static func stopAll() {
+        liveMirrorsLock.lock()
+        let mirrors = liveMirrors.allObjects
+        liveMirrorsLock.unlock()
+        for mirror in mirrors { mirror.stop() }
+    }
+
+    /// Kill transcript streams left behind by a previous trm that didn't exit
+    /// cleanly.
+    ///
+    /// A stream is `ssh … tail -F <transcript>`; when trm is killed rather
+    /// than quit, `stop()` never runs and the ssh keeps going with its parent
+    /// reparented to launchd — writing into a closed pipe and holding an SSH
+    /// session open on the remote machine forever. Found one on a laptop that
+    /// had outlived its trm by hours. Matching is deliberately narrow: our own
+    /// processes, orphaned (ppid 1), and carrying the exact command shape this
+    /// class builds.
+    static func reapOrphanedStreams() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        // `-x` without `-a`: this user's processes only.
+        process.arguments = ["-xo", "pid=,ppid=,command="]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        var reaped = 0
+        for line in String(decoding: data, as: UTF8.self).components(separatedBy: .newlines) {
+            let fields = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard fields.count >= 3,
+                  let pid = pid_t(fields[0]), let ppid = pid_t(fields[1]), ppid == 1,
+                  line.contains("/usr/bin/ssh"),
+                  line.contains("tail -n +1 -F "),
+                  line.contains(".jsonl")
+            else { continue }
+            kill(pid, SIGTERM)
+            reaped += 1
+        }
+        if reaped > 0 {
+            logger.info("Reaped \(reaped, privacy: .public) orphaned transcript stream(s)")
+        }
+    }
+
     init(host: String, remoteSession: String) {
         self.host = host
         self.remoteSession = remoteSession
@@ -62,6 +115,10 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
         // Host and session are validated upstream (strict character sets), so
         // they are safe as a file name.
         self.mirrorURL = dir.appendingPathComponent("\(host)-\(remoteSession).jsonl")
+
+        Self.liveMirrorsLock.lock()
+        Self.liveMirrors.add(self)
+        Self.liveMirrorsLock.unlock()
     }
 
     /// Agent kind of the located remote session, if resolution succeeded.
@@ -120,6 +177,23 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     if [ ! -S "$SOCK" ] && [ -n "$XDG_RUNTIME_DIR" ]; then SOCK="$XDG_RUNTIME_DIR/zmx/$S"; fi
     if [ ! -S "$SOCK" ]; then SOCK="$T/$S"; fi
     [ -S "$SOCK" ] || { echo "ERR no-session"; exit 0; }
+
+    # Exact answer first: the agent's SessionStart hook records the transcript
+    # it is actually writing, keyed by this session name. Everything below is a
+    # correlation of file times that cannot separate several agents sharing a
+    # project directory. Absent (hook not installed, or an agent that was
+    # already running when it was) — fall through.
+    REC="$HOME/.trm/agent-sessions/$S"
+    if [ -f "$REC" ]; then
+      P="$(cat "$REC" 2>/dev/null)"
+      if [ -n "$P" ] && [ -f "$P" ]; then
+        case "$P" in
+          */.codex/*) echo "OK codex $P"; exit 0 ;;
+          *)          echo "OK claude $P"; exit 0 ;;
+        esac
+      fi
+    fi
+
     SHELL_PID=""
     for pid in $(lsof -t "$SOCK" 2>/dev/null); do
       c="$(pgrep -P "$pid" 2>/dev/null | head -1)"
@@ -145,24 +219,81 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     cwd_of() { lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1; }
     newest_jsonl() { ls -t "$1"/*.jsonl 2>/dev/null | head -1; }
 
-    # First .jsonl in $1 born after process $2 started (30 s slack) — the
-    # session THAT agent created, which newest-by-mtime gets wrong whenever
-    # several agents share a working directory. Falls back to newest.
+    # Unix time process $1 started, from its elapsed time. Empty if unknown.
+    started_at() {
+      et="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')"
+      [ -n "$et" ] || return 0
+      secs="$(printf %s "$et" | awk -F'[-:]' '{ if (NF==4) print $1*86400+$2*3600+$3*60+$4; else if (NF==3) print $1*3600+$2*60+$3; else if (NF==2) print $1*60+$2; else print $1 }')"
+      echo $(( $(date +%s) - secs ))
+    }
+
+    # Codex writes one rollout per session under a date-sharded tree, and
+    # records the directory it was started in as `cwd` in the first line's
+    # session_meta. That field is the only thing tying a rollout to a pane:
+    # newest-overall (what this used to do) hands every codex pane on the
+    # machine the same transcript, so two panes in two different folders
+    # showed one conversation. Newest 40 is plenty — rollouts are date-sharded
+    # and we only care about live ones.
+    codex_rollout() {
+      cwd="$1"; started="$2"
+      [ -n "$cwd" ] || return 0
+      find "$HOME/.codex/sessions" -type f -name '*.jsonl' 2>/dev/null -exec ls -t {} + 2>/dev/null \
+        | head -40 \
+        | while IFS= read -r f; do
+            h="$(head -1 "$f" 2>/dev/null)"
+            case "$h" in
+              *"\"cwd\":\"$cwd\""*|*"\"cwd\": \"$cwd\""*) ;;
+              *) continue ;;
+            esac
+            # Prefer one this agent can actually have written to.
+            if [ -n "$started" ]; then
+              m="$(stat -f %m "$f" 2>/dev/null)"
+              [ -n "$m" ] && [ "$m" -lt "$started" ] && continue
+            fi
+            echo "$f"
+            break
+          done \
+        | head -1
+    }
+
+    # The .jsonl in $1 that process $2 is talking into. Mirrors
+    # AgentSessionLocator.selectTranscript on the local side; keep the two in
+    # step. Agents don't hold transcripts open, so this is a correlation of
+    # times, and a project directory routinely holds several agents' sessions
+    # plus the debris of old ones:
+    #   - born after the agent started (30 s slack for clock fuzz)
+    #   - written to since the agent started: a conversation it takes part in
+    #     must have grown during its lifetime. Without this a stub created
+    #     seconds before the agent launched wins on earliest birth and gets
+    #     bound forever (seen live: 32 KB, ten seconds of writes, dead for
+    #     four hours, in a directory where three agents were working).
+    #   - not an abandoned stub (a moment of writes, silent since), unless
+    #     nothing else qualifies — a genuinely brief session the user left
+    #     idle is still the right answer when it is the only candidate.
+    # Of what survives, the earliest born: the one this agent made rather than
+    # one a later agent made beside it. Falls back to newest by mtime.
     born_after() {
       dir="$1"; apid="$2"
-      et="$(ps -o etime= -p "$apid" 2>/dev/null | tr -d ' ')"
-      [ -n "$et" ] || { newest_jsonl "$dir"; return; }
-      secs="$(printf %s "$et" | awk -F'[-:]' '{ if (NF==4) print $1*86400+$2*3600+$3*60+$4; else if (NF==3) print $1*3600+$2*60+$3; else if (NF==2) print $1*60+$2; else print $1 }')"
-      started=$(( $(date +%s) - secs - 30 ))
-      best=""; bestb=0
+      started="$(started_at "$apid")"
+      [ -n "$started" ] || { newest_jsonl "$dir"; return; }
+      now="$(date +%s)"
+      earliest=$(( started - 30 ))
+      best=""; bestb=0; stub=""; stubb=0
       for f in "$dir"/*.jsonl; do
         [ -e "$f" ] || continue
         b="$(stat -f %B "$f" 2>/dev/null)" || continue
-        if [ "$b" -ge "$started" ] && { [ -z "$best" ] || [ "$b" -lt "$bestb" ]; }; then
-          best="$f"; bestb="$b"
+        m="$(stat -f %m "$f" 2>/dev/null)" || continue
+        [ "$b" -ge "$earliest" ] || continue
+        [ "$m" -ge "$started" ] || continue
+        if [ $(( m - b )) -lt 60 ] && [ $(( now - m )) -gt 300 ]; then
+          if [ -z "$stub" ] || [ "$b" -lt "$stubb" ]; then stub="$f"; stubb="$b"; fi
+          continue
         fi
+        if [ -z "$best" ] || [ "$b" -lt "$bestb" ]; then best="$f"; bestb="$b"; fi
       done
-      if [ -n "$best" ]; then printf '%s\n' "$best"; else newest_jsonl "$dir"; fi
+      if [ -n "$best" ]; then printf '%s\n' "$best"
+      elif [ -n "$stub" ]; then printf '%s\n' "$stub"
+      else newest_jsonl "$dir"; fi
     }
 
     if [ -n "$AGENT_PID" ]; then
@@ -179,7 +310,10 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
         [ -n "$P" ] && { echo "OK claude $P"; exit 0; }
       fi
       if [ "$AGENT_KIND" = codex ]; then
-        P="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' 2>/dev/null -print0 | xargs -0 ls -t 2>/dev/null | head -1)"
+        STARTED="$(started_at "$AGENT_PID")"
+        P="$(codex_rollout "$CWD" "$STARTED")"
+        # Same folder but older than this process: a session it resumed.
+        [ -n "$P" ] || P="$(codex_rollout "$CWD" "")"
         [ -n "$P" ] && { echo "OK codex $P"; exit 0; }
       fi
       echo "ERR no-transcript"; exit 0

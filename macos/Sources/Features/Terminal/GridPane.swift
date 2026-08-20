@@ -11,9 +11,14 @@ enum PluginPaneKind: String {
     case markdownPreview = "markdown_preview"
     case systemInfo = "system_info"
     case gitStatus = "git_status"
+    case commandCenter = "command_center"
 
     static func fromPaneType(_ value: String) -> PluginPaneKind? {
-        PluginPaneKind(rawValue: value.lowercased())
+        let name = value.lowercased()
+        // `agent_activity` was this pane's name for a day before it became the
+        // Command Center; a session TOML written in that window still restores.
+        if name == "agent_activity" { return .commandCenter }
+        return PluginPaneKind(rawValue: name)
     }
 
     var title: String {
@@ -25,6 +30,7 @@ enum PluginPaneKind: String {
         case .markdownPreview: return "Markdown Preview"
         case .systemInfo: return "System Info"
         case .gitStatus: return "Git Status"
+        case .commandCenter: return "Command Center"
         }
     }
 }
@@ -116,7 +122,9 @@ final class PluginPane: ObservableObject, Identifiable {
         case .logViewer: return 2000
         case .systemInfo: return 5000
         case .gitStatus: return 3000
-        case .notes, .fileBrowser, .markdownPreview: return nil
+        // Command Center keeps its own timer, driven by whether it is on
+        // screen — the plugin host's snapshot text has nothing to do with it.
+        case .notes, .fileBrowser, .markdownPreview, .commandCenter: return nil
         }
     }
 
@@ -136,6 +144,9 @@ final class PluginPane: ObservableObject, Identifiable {
             return Snapshot(text: gitStatusText())
         case .notes:
             return Snapshot(text: notesText)
+        case .commandCenter:
+            // Rendered from live app state, not from a text snapshot.
+            return Snapshot(text: "")
         }
     }
 

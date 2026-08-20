@@ -218,6 +218,11 @@ class AppDelegate: NSObject,
         // Store our start time
         applicationLaunchTime = ProcessInfo.processInfo.systemUptime
 
+        // Clean up transcript streams a previous trm left running. Cheap (one
+        // `ps`), and skipping it leaks an SSH session per remote overview
+        // every time the app is killed rather than quit.
+        RemoteAgentTranscriptMirror.reapOrphanedStreams()
+
         // Check if secure input was enabled when we last quit.
         if (UserDefaults.standard.bool(forKey: "SecureInput") != SecureInput.shared.enabled) {
             toggleSecureInput(self)
@@ -341,6 +346,8 @@ class AppDelegate: NSObject,
         setupMenuImages()
         setupSplitBrowserMenuItem()
         setupSessionBrowserMenuItem()
+        setupSidebarMenuItems()
+        setupCommandCenterMenuItem()
         setupRemotePaneMenuItem()
 
         // Setup signal handlers
@@ -712,6 +719,9 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Remote overview streams are child `ssh` processes; without this they
+        // outlive the app and keep a session open on the other machine.
+        RemoteAgentTranscriptMirror.stopAll()
         // Auto-save all windows so they can be restored on next launch.
         // Skip if the user chose "Terminate All & Quit" — those sessions
         // were killed and must not be restored.
@@ -1071,6 +1081,74 @@ class AppDelegate: NSObject,
         item.keyEquivalentModifierMask = [.command, .shift]
         item.setImageIfDesired(systemSymbolName: "rectangle.stack")
         viewMenu.addItem(item)
+    }
+
+    /// Add the sidebar items to the View menu: "Show Sidebar" (Cmd+Ctrl+S)
+    /// toggles the shelf, "Send Pane to Sidebar" (Cmd+Ctrl+H) parks the
+    /// focused pane in it. Added in code for the same reason as the Session
+    /// Browser item: the actions live on the terminal controller.
+    private func setupSidebarMenuItems() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        guard let viewMenuItem = mainMenu.items.first(where: { $0.title == "View" }),
+              let viewMenu = viewMenuItem.submenu else { return }
+
+        viewMenu.addItem(NSMenuItem.separator())
+
+        let toggle = NSMenuItem(
+            title: "Show Sidebar",
+            action: #selector(BaseTerminalController.toggleSidebarAction(_:)),
+            keyEquivalent: "s"
+        )
+        toggle.keyEquivalentModifierMask = [.command, .control]
+        toggle.setImageIfDesired(systemSymbolName: "sidebar.squares.right")
+        viewMenu.addItem(toggle)
+
+        let send = NSMenuItem(
+            title: "Send Pane to Sidebar",
+            action: #selector(BaseTerminalController.sendPaneToSidebarAction(_:)),
+            keyEquivalent: "h"
+        )
+        send.keyEquivalentModifierMask = [.command, .control]
+        send.setImageIfDesired(systemSymbolName: "rectangle.righthalf.inset.filled.arrow.right")
+        viewMenu.addItem(send)
+    }
+
+    /// Add "Command Center" to the View menu with Cmd+Shift+A.
+    ///
+    /// The pane is reachable from the command palette too, but a list of what
+    /// every agent is doing is a thing you go and look at, and things you go
+    /// and look at live in the View menu next to the Session Browser. Added in
+    /// code for the same reason as the items above: the action lives on the
+    /// terminal controller (the first responder).
+    private func setupCommandCenterMenuItem() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        guard let viewMenuItem = mainMenu.items.first(where: { $0.title == "View" }),
+              let viewMenu = viewMenuItem.submenu else { return }
+
+        let item = NSMenuItem(
+            title: "Command Center",
+            action: #selector(BaseTerminalController.showCommandCenterAction(_:)),
+            keyEquivalent: "a"
+        )
+        item.keyEquivalentModifierMask = [.command, .shift]
+        item.setImageIfDesired(systemSymbolName: "list.bullet.rectangle")
+
+        // The phone shows the same board, so it belongs next to it.
+        let pair = NSMenuItem(
+            title: "Pair iPhone…",
+            action: #selector(BaseTerminalController.pairIPhoneAction(_:)),
+            keyEquivalent: ""
+        )
+        pair.setImageIfDesired(systemSymbolName: "iphone")
+
+        // Directly under Session Browser: both answer "show me what's running".
+        if let index = viewMenu.items.firstIndex(where: { $0.title == "Session Browser" }) {
+            viewMenu.insertItem(item, at: index + 1)
+            viewMenu.insertItem(pair, at: index + 2)
+        } else {
+            viewMenu.addItem(item)
+            viewMenu.addItem(pair)
+        }
     }
 
     /// Add "New Remote Pane" to the File menu, right after "New Pane", with

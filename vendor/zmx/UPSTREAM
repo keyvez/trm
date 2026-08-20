@@ -34,6 +34,16 @@ Local patches (record every deviation from upstream here):
   Covered by test "serializeTerminalState roundtrip preserves soft-wrap
   for copy" in src/util.zig (also a local addition).
 
+- src/log.zig init/rotate: open the log with O_APPEND (raw `posix.open`;
+  Zig's File open/create flags expose no append bit) instead of
+  open-then-seek-to-end. Every `zmx` client writes to the shared
+  `<dir>/logs/zmx.log`, so two processes starting at once each wrote at the
+  end they had observed and one overwrote the other's line — the shared log
+  accumulated torn entries and mismatched key/value pairs, which is exactly
+  the log you need intact when explaining why a session went away. With
+  O_APPEND the kernel resolves the offset at write time and whole lines
+  interleave. Verified with 8 concurrent attaches: 8 intact lines, none torn.
+
 To update: clone upstream at a new commit, copy src/*.zig + LICENSE over,
 re-apply the patches listed above, update this file, and run
 `zig build test` + a manual attach/detach smoke test.

@@ -28,6 +28,55 @@ struct LayoutSyncModelTests {
         #expect(LayoutSyncModel.stackGroups(forTags: []).isEmpty)
     }
 
+    // MARK: partitionParked
+
+    @Test func parkedPanesLeaveTheGrid() {
+        let (grid, parked) = LayoutSyncModel.partitionParked([
+            (value: "a", sidebar: false),
+            (value: "b", sidebar: true),
+            (value: "c", sidebar: false),
+        ])
+        #expect(grid == ["a", "c"])
+        #expect(parked == ["b"])
+    }
+
+    @Test func nothingParkedLeavesTheGridUntouched() {
+        let (grid, parked) = LayoutSyncModel.partitionParked([
+            (value: "a", sidebar: false),
+            (value: "b", sidebar: false),
+        ])
+        #expect(grid == ["a", "b"])
+        #expect(parked.isEmpty)
+    }
+
+    @Test func parkingEveryPaneKeepsTheFirstOnScreen() {
+        // An all-parked window would restore to an empty grid with no visible
+        // way back into it, so the first pane comes back.
+        let (grid, parked) = LayoutSyncModel.partitionParked([
+            (value: "a", sidebar: true),
+            (value: "b", sidebar: true),
+        ])
+        #expect(grid == ["a"])
+        #expect(parked == ["b"])
+    }
+
+    @Test func parkedOrderIsPreserved() {
+        let (grid, parked) = LayoutSyncModel.partitionParked([
+            (value: "a", sidebar: false),
+            (value: "b", sidebar: true),
+            (value: "c", sidebar: true),
+            (value: "d", sidebar: true),
+        ])
+        #expect(grid == ["a"])
+        #expect(parked == ["b", "c", "d"])
+    }
+
+    @Test func emptyInputIsEmpty() {
+        let (grid, parked) = LayoutSyncModel.partitionParked([(value: Int, sidebar: Bool)]())
+        #expect(grid.isEmpty)
+        #expect(parked.isEmpty)
+    }
+
     // MARK: visualCellCount
 
     @Test func stacksCollapseIntoOneCell() {

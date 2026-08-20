@@ -117,6 +117,13 @@ struct TrmGridView: View {
     /// Callback to close an agent overview pane.
     var onCloseAgentOverview: ((AgentOverviewPane) -> Void)? = nil
 
+    /// Send a composed message to the agent an overview is reading.
+    var onSendToAgent: ((AgentOverviewPane, String) -> Void)? = nil
+
+    /// Send a composed message straight to a pane, for the Command Center
+    /// list, whose rows are panes rather than overviews.
+    var onSendToPaneAgent: ((Ghostty.SurfaceView, String) -> Void)? = nil
+
     /// Whether the given pane already has an agent overview open.
     var hasAgentOverview: ((GridPane) -> Bool)? = nil
 
@@ -142,6 +149,9 @@ struct TrmGridView: View {
 
     /// Callback to unstack (restore) a pane from its stack.
     var onUnstackPane: ((GridPane) -> Void)? = nil
+
+    /// Callback to park a pane in the sidebar, where it keeps running unseen.
+    var onSendPaneToSidebar: ((GridPane) -> Void)? = nil
 
     /// Reorder a sub-pane within its stack (`true` = move up).
     var onMoveSubPane: ((GridPane, Bool) -> Void)? = nil
@@ -620,6 +630,7 @@ struct TrmGridView: View {
                     // The overview moves only relative to its terminal pane;
                     // the generic move/stack items don't apply to it.
                     overviewPlacementMenu(overviewPane)
+                    sidebarMenuItem(for: pane)
                 } else {
                     if let onPeekPane {
                         Button {
@@ -632,6 +643,7 @@ struct TrmGridView: View {
                     agentOverviewMenuItem(for: pane)
                     switchRemoteMenuItem(for: pane)
                     paneMoveMenu(pane: pane, row: row, col: col)
+                    sidebarMenuItem(for: pane)
                     if let pid = paneIdForPane(pane) {
                         Divider()
                         pluginsMenu(forPaneId: pid)
@@ -740,6 +752,22 @@ struct TrmGridView: View {
     /// "Switch Pane to Remote…" menu item, offered for terminal panes: swaps
     /// the pane's shell for one running on another machine (the local zmx
     /// session detaches and keeps running).
+    /// "Send to Sidebar" — park the pane out of the grid without stopping it.
+    ///
+    /// Hidden when this is the only cell: the shelf is for panes you want out
+    /// of the way, and emptying the window entirely isn't that.
+    @ViewBuilder
+    private func sidebarMenuItem(for pane: GridPane) -> some View {
+        if let onSendPaneToSidebar, panes.count > 1 {
+            Divider()
+            Button {
+                onSendPaneToSidebar(pane)
+            } label: {
+                Label("Send to Sidebar", systemImage: "sidebar.squares.right")
+            }
+        }
+    }
+
     @ViewBuilder
     private func switchRemoteMenuItem(for pane: GridPane) -> some View {
         if let onSwitchPaneRemote, case .terminal = pane {
@@ -889,6 +917,7 @@ struct TrmGridView: View {
         AgentOverviewView(
             pane: agentPane,
             onClose: onCloseAgentOverview,
+            onSendMessage: onSendToAgent,
             allowsTextSelection: false
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1034,7 +1063,10 @@ struct TrmGridView: View {
     /// A utility plugin pane rendered with a small control toolbar.
     @ViewBuilder
     private func pluginPaneView(_ pane: PluginPane) -> some View {
-        PluginPaneContainerView(pane: pane, onClose: onClosePluginPane)
+        PluginPaneContainerView(
+            onSendToPane: onSendToPaneAgent,
+            pane: pane,
+            onClose: onClosePluginPane)
     }
 
     // MARK: - Stacked Pane Rendering
@@ -1118,6 +1150,14 @@ struct TrmGridView: View {
                             Label("Restore Pane", systemImage: "arrow.up.left.and.arrow.down.right")
                         }
                         switchRemoteMenuItem(for: child)
+                        if let onSendPaneToSidebar {
+                            SwiftUI.Divider()
+                            Button {
+                                onSendPaneToSidebar(child)
+                            } label: {
+                                Label("Send to Sidebar", systemImage: "sidebar.squares.right")
+                            }
+                        }
                         if let pid = paneIdForPane(child) {
                             SwiftUI.Divider()
                             pluginsMenu(forPaneId: pid)
@@ -1298,7 +1338,8 @@ struct TrmGridView: View {
         AgentOverviewView(
             pane: overview,
             isPeeked: true,
-            onClose: onCloseAgentOverview
+            onClose: onCloseAgentOverview,
+            onSendMessage: onSendToAgent
         )
         // Command-clicking the terminal already toggles through its AppKit
         // event path; mirror that dismissal on the SwiftUI overview half.
@@ -2143,6 +2184,9 @@ struct PaneStackDropDelegate: DropDelegate {
 }
 
 private struct PluginPaneContainerView: View {
+    /// Send a message to a pane's agent, for the Command Center list.
+    var onSendToPane: ((Ghostty.SurfaceView, String) -> Void)? = nil
+
     @ObservedObject var pane: PluginPane
     var onClose: ((PluginPane) -> Void)? = nil
 
@@ -2182,6 +2226,11 @@ private struct PluginPaneContainerView: View {
     @ViewBuilder
     private var paneBody: some View {
         switch pane.kind {
+        case .commandCenter:
+            // Not driven by the plugin host like the other kinds: its content
+            // is live app state (every window's agents), not a text snapshot
+            // produced by a subprocess.
+            CommandCenterView(onSendToPane: onSendToPane)
         case .notes:
             TextEditor(text: $pane.notesText)
                 .font(.system(size: 12, design: .monospaced))

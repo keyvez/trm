@@ -1,0 +1,147 @@
+import Testing
+@testable import trm
+
+/// Tests for the Command Center panel's pure layout arithmetic: how many equal
+/// cards fit across the panel, and how the rows are chunked.
+struct CommandCenterLayoutTests {
+
+    // MARK: columnCount
+
+    @Test func narrowPanelStaysAList() {
+        // The panel's default width, and anything under two full cards, keeps
+        // the one-per-row layout rather than squeezing two in.
+        #expect(CommandCenterView.columnCount(for: 320) == 1)
+        #expect(CommandCenterView.columnCount(for: 560) == 1)
+        #expect(CommandCenterView.columnCount(for: 679) == 1)
+    }
+
+    @Test func wideningToTwoCardsSplitsIntoAGrid() {
+        #expect(CommandCenterView.columnCount(for: 680) == 2)
+        #expect(CommandCenterView.columnCount(for: 1_020) == 3)
+        #expect(CommandCenterView.columnCount(for: 1_400) == 4)
+    }
+
+    @Test func degenerateWidthsStillYieldAColumn() {
+        // A GeometryReader reports zero on its first pass; a zero-column grid
+        // would divide by nothing and render an empty panel.
+        #expect(CommandCenterView.columnCount(for: 0) == 1)
+        #expect(CommandCenterView.columnCount(for: -50) == 1)
+    }
+
+    // MARK: rows
+
+    @Test func rowsChunkInPaneOrder() {
+        let entries = (1...5).map { entry(id: $0) }
+        let rows = CommandCenterView.rows(entries, columns: 2)
+        #expect(rows.map { $0.map(\.watermark) } == [["1", "2"], ["3", "4"], ["5"]])
+    }
+
+    @Test func oneColumnIsOneEntryPerRow() {
+        let entries = (1...3).map { entry(id: $0) }
+        let rows = CommandCenterView.rows(entries, columns: 1)
+        #expect(rows.map { $0.map(\.watermark) } == [["1"], ["2"], ["3"]])
+    }
+
+    @Test func emptyListHasNoRows() {
+        #expect(CommandCenterView.rows([], columns: 3).isEmpty)
+    }
+
+    // MARK: -
+
+    /// Entries are identified by their surface; tests have no surfaces, so a
+    /// throwaway object stands in as a distinct identity per row, held for the
+    /// test's lifetime so the identifier stays valid.
+    ///
+    /// Instance state, deliberately: swift-testing runs tests in parallel and
+    /// makes a fresh instance per test, so this cannot be shared — the static
+    /// version of it raced and took the suite down with no assertion message.
+    private final class Anchors {
+        private var objects: [Int: AnyObject] = [:]
+        func identity(_ id: Int) -> ObjectIdentifier {
+            if let existing = objects[id] { return ObjectIdentifier(existing) }
+            let anchor = NSObject()
+            objects[id] = anchor
+            return ObjectIdentifier(anchor)
+        }
+    }
+
+    private let anchors = Anchors()
+
+    private func entry(
+        id: Int,
+        message: String = "",
+        working: Bool = false,
+        needsAttention: Bool = false,
+        errorCount: Int = 0,
+        errorText: String? = nil
+    ) -> CommandCenterMonitor.Entry {
+        .init(
+            id: anchors.identity(id),
+            paneId: id,
+            watermark: "\(id)",
+            kind: .claude,
+            location: nil,
+            host: nil,
+            message: message,
+            prompt: nil,
+            isWorking: working,
+            needsAttention: needsAttention,
+            errorCount: errorCount,
+            errorText: errorText,
+            updatedAt: nil,
+            surface: nil
+        )
+    }
+
+    // MARK: Briefing status
+
+    @Test func statusRanksAttentionAboveErrorsAboveWork() {
+        // A pane can be all three at once; the label has to pick the one that
+        // costs the most to ignore.
+        let blocked = entry(id: 1, working: true, needsAttention: true, errorCount: 3)
+        #expect(CommandCenterView.status(for: blocked).label == "needs you")
+
+        let failing = entry(id: 2, working: true, errorCount: 2)
+        #expect(CommandCenterView.status(for: failing).label == "check this")
+
+        #expect(CommandCenterView.status(for: entry(id: 3, working: true)).label == "working")
+        #expect(CommandCenterView.status(for: entry(id: 4)).label == "idle")
+    }
+
+    @Test func escalationOnlyAppearsWhenSomethingWantsADecision() {
+        #expect(CommandCenterView.escalation(for: entry(id: 1)) == nil)
+        #expect(CommandCenterView.escalation(for: entry(id: 2, working: true)) == nil)
+        #expect(CommandCenterView.escalation(for: entry(id: 3, needsAttention: true))
+            == "Waiting on your answer.")
+        #expect(CommandCenterView.escalation(
+            for: entry(id: 4, errorCount: 2, errorText: "exit status 1"))
+            == "2 errors this turn — exit status 1")
+    }
+
+    // MARK: firstSentence
+
+    @Test func briefingTakesTheOpeningSentence() {
+        let text = "Fixed the socket leak in the daemon. Then I ran the tests and they passed."
+        #expect(CommandCenterMonitor.firstSentence(of: text)
+            == "Fixed the socket leak in the daemon.")
+    }
+
+    @Test func briefingIgnoresAnEarlyAbbreviation() {
+        // "e.g." must not end the sentence three characters in.
+        let text = "Ran e.g. the failing suite and found the cause in the parser."
+        #expect(CommandCenterMonitor.firstSentence(of: text)
+            == "Ran e.g. the failing suite and found the cause in the parser.")
+    }
+
+    @Test func briefingFlattensAndTruncatesLongProse() {
+        let text = String(repeating: "word ", count: 80)
+        let sentence = CommandCenterMonitor.firstSentence(of: text, limit: 40)
+        #expect(sentence.count <= 41)
+        #expect(sentence.hasSuffix("…"))
+        #expect(!sentence.contains("\n"))
+    }
+
+    @Test func briefingOfNothingIsEmpty() {
+        #expect(CommandCenterMonitor.firstSentence(of: "   \n  ").isEmpty)
+    }
+}

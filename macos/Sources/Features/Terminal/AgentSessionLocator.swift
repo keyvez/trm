@@ -27,9 +27,28 @@ enum AgentSessionLocator {
     ///    This is what disambiguates two agents sharing one cwd.
     /// 3. Codex only: newest rollout whose `session_meta.cwd` matches.
     /// The final fallback (newest-in-cwd) stays with the caller.
-    static func locate(shellPid: pid_t, paneCwd: String?) -> Located? {
+    static func locate(
+        shellPid: pid_t,
+        paneCwd: String?,
+        zmxSession: String? = nil
+    ) -> Located? {
         guard shellPid > 0 else { return nil }
         guard let agent = agentProcess(underShell: shellPid) else { return nil }
+
+        // An exact answer, when the agent's SessionStart hook has recorded one:
+        // the transcript path the agent itself reported. Everything below is a
+        // correlation of timestamps that cannot separate several agents
+        // sharing a project directory.
+        if let zmxSession {
+            let started = processStartDate(pid: agent.pid)
+            if let url = AgentSessionHook.recordedTranscript(
+                zmxSession: zmxSession,
+                recordedAfter: started?.addingTimeInterval(-30)
+            ) {
+                let kind = isTranscriptPath(url.path, kind: .codex) ? AgentKind.codex : .claude
+                return Located(kind: kind, url: url)
+            }
+        }
 
         if let url = openTranscript(pid: agent.pid, kind: agent.kind) {
             return Located(kind: agent.kind, url: url)
@@ -65,21 +84,73 @@ enum AgentSessionLocator {
     }
 
     /// Among candidate transcripts, the one this process created: the FIRST
-    /// file born after the process started (small slack for clock fuzz).
-    static func transcriptBorn(after started: Date, among candidates: [URL]) -> URL? {
-        let born: [(URL, Date)] = candidates.compactMap { url in
-            guard let created = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) else { return nil }
-            return (url, created)
+    /// file born after the process started (small slack for clock fuzz),
+    /// ignoring files this process cannot be talking into.
+    static func transcriptBorn(
+        after started: Date,
+        among candidates: [URL],
+        now: Date = Date()
+    ) -> URL? {
+        let keys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey]
+        let described: [Candidate] = candidates.compactMap { url in
+            guard let values = try? url.resourceValues(forKeys: keys),
+                  let born = values.creationDate,
+                  let modified = values.contentModificationDate else { return nil }
+            return Candidate(url: url, born: born, modified: modified)
         }
-        return selectTranscript(startedAt: started, slack: 30, candidates: born)?.0
+        return selectTranscript(
+            startedAt: started, slack: 30, now: now, candidates: described)?.url
     }
 
-    /// Pure selection logic: the earliest candidate created after
-    /// `startedAt - slack`. Exposed for testing.
-    static func selectTranscript(startedAt: Date, slack: TimeInterval, candidates: [(URL, Date)]) -> (URL, Date)? {
-        candidates
-            .filter { $0.1 >= startedAt.addingTimeInterval(-slack) }
-            .min { $0.1 < $1.1 }
+    /// One transcript file, described by the two times that say whether it
+    /// could be a given process's conversation.
+    struct Candidate: Equatable {
+        let url: URL
+        /// When the file was created.
+        let born: Date
+        /// When it was last appended to.
+        let modified: Date
+    }
+
+    /// A file written for only a moment and silent ever since is an abandoned
+    /// stub — an agent that was started and quit, or a session that never got
+    /// a first message. Observed in the wild: a 32 KB transcript with ten
+    /// seconds of writes, dead for four hours, sitting in a project directory
+    /// where three agents were working.
+    private static func isAbandonedStub(_ c: Candidate, now: Date) -> Bool {
+        c.modified.timeIntervalSince(c.born) < 60 && now.timeIntervalSince(c.modified) > 300
+    }
+
+    /// Pure selection logic. Exposed for testing.
+    ///
+    /// Agents don't hold their transcripts open (verified: `lsof` on a running
+    /// `claude` lists no `.jsonl`), so the binding is a correlation of times,
+    /// and it has to survive a project directory holding several agents'
+    /// sessions plus the debris of old ones:
+    ///
+    /// 1. Born after the process started (minus slack) — the session this
+    ///    process created rather than one that predates it.
+    /// 2. Written to since the process started — a conversation this process
+    ///    takes part in must have grown during its lifetime. This is what
+    ///    rules out a stub created seconds before the agent launched, which
+    ///    the birth test alone accepts and then binds forever.
+    /// 3. Not an abandoned stub, unless nothing else qualifies — a short
+    ///    session the user really did leave idle is still the right answer
+    ///    when it is the only candidate.
+    /// 4. Of what remains, the earliest born: the one this process made, not
+    ///    one a later agent made in the same directory.
+    static func selectTranscript(
+        startedAt: Date,
+        slack: TimeInterval,
+        now: Date = Date(),
+        candidates: [Candidate]
+    ) -> Candidate? {
+        let live = candidates.filter {
+            $0.born >= startedAt.addingTimeInterval(-slack) && $0.modified >= startedAt
+        }
+        let active = live.filter { !isAbandonedStub($0, now: now) }
+        let pool = active.isEmpty ? live : active
+        return pool.min { $0.born < $1.born }
     }
 
     private static func jsonlFiles(in dir: URL) -> [URL] {

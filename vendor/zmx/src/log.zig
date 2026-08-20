@@ -14,17 +14,9 @@ pub const LogSystem = struct {
         self.path = try alloc.dupe(u8, path);
         self.mode = mode;
 
-        const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| switch (err) {
-            error.FileNotFound => try std.fs.createFileAbsolute(
-                path,
-                .{ .read = true, .mode = @intCast(self.mode) },
-            ),
-            else => return err,
-        };
+        const file = try openAppend(path, self.mode);
 
-        const end_pos = try file.getEndPos();
-        try file.seekTo(end_pos);
-        self.current_size = end_pos;
+        self.current_size = try file.getEndPos();
         self.file = file;
     }
 
@@ -93,10 +85,31 @@ pub const LogSystem = struct {
             else => return err,
         };
 
-        self.file = try std.fs.createFileAbsolute(
-            self.path,
-            .{ .truncate = true, .read = true, .mode = @intCast(self.mode) },
-        );
+        self.file = try openAppend(self.path, self.mode);
         self.current_size = 0;
     }
 };
+
+/// Open (creating if needed) a log file in O_APPEND mode.
+///
+/// Every write must land at the file's *current* end, resolved by the kernel
+/// at write time. Several processes share one log — every `zmx` client writes
+/// to `<dir>/logs/zmx.log` — and each one used to open the file, seek to the
+/// end it observed, and write there. Two clients starting at once therefore
+/// wrote at the same offset, so one overwrote the other's line: the shared log
+/// filled with torn entries and mismatched key/value pairs, which is exactly
+/// the log you need intact when you are trying to explain why a session went
+/// away. O_APPEND makes each write atomic with respect to the offset, so lines
+/// from concurrent processes interleave whole instead of clobbering.
+///
+/// Zig's `File.OpenFlags`/`CreateFlags` expose no append bit, hence the raw
+/// `posix.open`.
+fn openAppend(path: []const u8, mode: u32) !std.fs.File {
+    const flags: std.posix.O = .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .APPEND = true,
+    };
+    const fd = try std.posix.open(path, flags, @intCast(mode));
+    return .{ .handle = fd };
+}

@@ -341,6 +341,10 @@ enum ZmxSessionManager {
         let referenced: Bool
         /// The pane's watermark from its window's TOML, when it has one.
         var watermark: String?
+        /// SSH destination the session lives on, or nil for a local session.
+        /// A remote session's daemon runs on that machine; everything trm does
+        /// with it — open, terminate — has to go over SSH.
+        var remoteHost: String?
 
         var id: String { name }
 
@@ -503,5 +507,332 @@ enum ZmxSessionManager {
             logger.error("zmx \(args.joined(separator: " ")) failed: \(error.localizedDescription)")
             return -1
         }
+    }
+
+    // MARK: - Remote Sessions
+
+    /// Sessions living on another machine, with the host they came from.
+    struct RemoteSessions: Sendable {
+        let host: String
+        let sessions: [SessionInfo]
+        /// Why the host produced nothing, when it produced nothing for a
+        /// reason worth saying out loud. A host that answered and simply has
+        /// no sessions leaves this nil.
+        let error: String?
+    }
+
+    /// Default path to zmx inside a remote trm install.
+    static let remoteZmxPath = "/Applications/trm.app/Contents/MacOS/zmx"
+
+    /// Wrap a POSIX shell script so it runs under `/bin/sh` on the far side.
+    ///
+    /// `ssh host '<script>'` hands the script to the *login* shell, which is
+    /// whatever the user chose — zsh on a stock Mac. That is not a portability
+    /// nicety: zsh does not word-split unquoted parameters, so a plain
+    /// `for tok in $line` loop silently matches nothing and the probe returns
+    /// an empty list from a machine full of sessions (and a fish login shell
+    /// wouldn't parse the script at all). Naming the interpreter removes the
+    /// whole class of problem.
+    nonisolated private static func shWrapped(_ script: String) -> String {
+        let quoted = script.replacingOccurrences(of: "'", with: "'\\''")
+        return "exec /bin/sh -c '\(quoted)'"
+    }
+
+    /// One shell script, run once per host, that describes every zmx session
+    /// on that machine as `name<TAB>clients<TAB>cwd<TAB>command`.
+    ///
+    /// It is one round trip on purpose: SSH latency dominates everything here,
+    /// and a probe per session would make the browser take seconds per host.
+    /// Both socket directories are listed — trm pins `~/.trm/zmx`, but
+    /// sessions created before that pin still live in the per-user tmp dir.
+    nonisolated private static func remoteProbeScript() -> String {
+        // Written as one command per element and joined with spaces: the whole
+        // thing travels as a single ssh argument, and a here-doc or embedded
+        // newlines would have to survive the login shell on the other side.
+        [
+            "Z=\"\(remoteZmxPath)\";",
+            "[ -x \"$Z\" ] || exit 0;",
+            "D=\"$HOME/.trm/zmx\";",
+            "T=\"${TMPDIR:-/tmp}\"; T=\"${T%/}/zmx-$(id -u)\";",
+            "for DIR in \"$D\" \"$T\"; do",
+            "  [ -d \"$DIR\" ] || continue;",
+            "  ZMX_DIR=\"$DIR\" \"$Z\" list 2>/dev/null | while IFS= read -r L; do",
+            "    case \"$L\" in *name=*) ;; *) continue ;; esac;",
+            "    N=\"\"; P=\"\"; C=\"\";",
+            "    for TOK in $L; do",
+            "      case \"$TOK\" in",
+            "        name=*) N=${TOK#name=} ;;",
+            "        pid=*) P=${TOK#pid=} ;;",
+            "        clients=*) C=${TOK#clients=} ;;",
+            "      esac;",
+            "    done;",
+            "    [ -n \"$N\" ] || continue;",
+            "    W=\"\"; M=\"\";",
+            "    if [ -n \"$P\" ]; then",
+            "      W=$(lsof -a -p \"$P\" -d cwd -Fn 2>/dev/null | sed -n \"s/^n//p\" | head -1);",
+            "      K=$(pgrep -P \"$P\" 2>/dev/null | head -1);",
+            "      [ -n \"$K\" ] && M=$(ps -o command= -p \"$K\" 2>/dev/null | head -1);",
+            "    fi;",
+            "    printf \"%s\\t%s\\t%s\\t%s\\n\" \"$N\" \"$C\" \"$W\" \"$M\";",
+            "  done;",
+            "done",
+        ].joined(separator: " ")
+    }
+
+    /// Ask one host what it is running. Returns an empty list when the host is
+    /// unreachable, has no trm, or times out — an unreachable machine is not
+    /// an error worth putting in front of the user, it just has nothing to
+    /// show.
+    nonisolated static func remoteSessions(host: String) -> RemoteSessions {
+        let args = [
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5",
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=2",
+            host,
+            shWrapped(remoteProbeScript()),
+        ]
+        let run = runCapturing("/usr/bin/ssh", args, timeout: 20)
+        guard let out = run.output, run.status == 0 else {
+            return RemoteSessions(
+                host: host,
+                sessions: [],
+                error: sshFailureMessage(run.error, status: run.status))
+        }
+
+        var result: [SessionInfo] = []
+        for line in out.components(separatedBy: .newlines) {
+            let cols = line.components(separatedBy: "\t")
+            guard cols.count >= 4, !cols[0].isEmpty else { continue }
+            let clients = Int(cols[1]) ?? 0
+            let cwd = cols[2].isEmpty ? nil : cols[2]
+            let command = cols[3].isEmpty ? nil : cols[3]
+            result.append(SessionInfo(
+                name: cols[0],
+                cwd: cwd,
+                command: command,
+                attached: clients > 0,
+                // "Referenced" is a statement about *this* machine's saved
+                // windows, which say nothing about another machine's sessions.
+                referenced: false,
+                remoteHost: host
+            ))
+        }
+        return RemoteSessions(host: host, sessions: result, error: nil)
+    }
+
+    /// Turn ssh's stderr into something worth showing a person.
+    ///
+    /// The distinction that matters is *can't reach it* versus *wouldn't let
+    /// me in*: the second is the one with a fix, and it is easy to hit here
+    /// because the probe runs `BatchMode=yes` — a key held in the login
+    /// keychain and only unlocked interactively authenticates a pane the user
+    /// is watching but not a background scan.
+    nonisolated private static func sshFailureMessage(
+        _ stderr: String?, status: Int32
+    ) -> String {
+        let text = (stderr ?? "").lowercased()
+        if text.contains("permission denied") || text.contains("publickey") {
+            return "SSH refused the key. The browser connects non-interactively, "
+                + "so this host needs key-based login that doesn't prompt "
+                + "(`ssh-add --apple-use-keychain`)."
+        }
+        if text.contains("could not resolve") || text.contains("name or service") {
+            return "Host not found — it may be off the network under this name."
+        }
+        if text.contains("connection refused") {
+            return "Connection refused. Is Remote Login enabled on that Mac?"
+        }
+        if text.contains("timed out") || text.contains("timeout") || status == 15 {
+            return "Timed out. The machine is probably asleep or off the network."
+        }
+        if text.contains("host key verification") {
+            return "Host key verification failed — connect once from a terminal to accept it."
+        }
+        return "Couldn't reach it over SSH."
+    }
+
+    /// Probe several hosts at once. Hosts are independent and each is mostly
+    /// waiting on the network, so they go in parallel; a dead host costs the
+    /// connect timeout, not the sum of them.
+    /// `expected` marks a host this Mac has actually put panes on. Those are
+    /// worth reporting when they fail — their sessions are the ones you came
+    /// looking for. A machine that merely happens to be advertising on the
+    /// network stays quiet, so a sleeping laptop on the LAN doesn't spread
+    /// error cards through the list.
+    nonisolated static func remoteSessionsConcurrently(
+        hosts: [(host: String, expected: Bool)]
+    ) -> [RemoteSessions] {
+        guard !hosts.isEmpty else { return [] }
+        var results = [RemoteSessions?](repeating: nil, count: hosts.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: hosts.count) { index in
+            let entry = hosts[index]
+            let probed = remoteSessions(host: entry.host)
+            guard !probed.sessions.isEmpty || (probed.error != nil && entry.expected) else { return }
+            lock.lock()
+            results[index] = probed
+            lock.unlock()
+        }
+
+        // One machine can be reachable under several names — `mini`,
+        // `mini.local` from Bonjour, `100.x.y.z` over Tailscale — and each
+        // would otherwise become its own group listing the same sessions
+        // twice. Identity is what a host is *running*, so a host whose
+        // sessions are already covered by an earlier one is dropped.
+        var deduped: [RemoteSessions] = []
+        var claimed: Set<String> = []
+        for entry in results.compactMap({ $0 }) {
+            let names = Set(entry.sessions.map(\.name))
+            // Unreachable hosts have no sessions to compare, so they are never
+            // folded into each other.
+            if !names.isEmpty {
+                if names.isSubset(of: claimed) { continue }
+                claimed.formUnion(names)
+            }
+            deduped.append(entry)
+        }
+        return deduped
+    }
+
+    /// Whether a session still exists on another machine.
+    ///
+    /// Returns nil when the host could not be asked — unreachable is not the
+    /// same as gone, and the two lead to opposite decisions about the pane.
+    ///
+    /// This is the only honest way to tell "the user typed `exit`" from "the
+    /// link dropped". Both end the pane's `ssh` process identically, and the
+    /// exit status can't separate them either: on macOS every pane runs under
+    /// `login(1)`, which reports 0 no matter what the child did (verified —
+    /// a child exiting 3 or 255 both surface as 0). What *does* differ is the
+    /// far side: a zmx daemon unlinks its socket the moment its shell exits,
+    /// and keeps it when only the client went away.
+    nonisolated static func remoteSessionAlive(_ name: String, host: String) -> Bool? {
+        let script = [
+            "S=\"\(name)\";",
+            "D=\"$HOME/.trm/zmx\";",
+            "T=\"${TMPDIR:-/tmp}\"; T=\"${T%/}/zmx-$(id -u)\";",
+            "for DIR in \"$D\" \"$T\"; do",
+            "  [ -S \"$DIR/$S\" ] && { echo alive; exit 0; };",
+            "done;",
+            "echo gone",
+        ].joined(separator: " ")
+
+        let run = runCapturing(
+            "/usr/bin/ssh",
+            ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, shWrapped(script)],
+            timeout: 12)
+        guard run.status == 0, let out = run.output else { return nil }
+        if out.contains("alive") { return true }
+        if out.contains("gone") { return false }
+        return nil
+    }
+
+    /// Kill a session on another machine.
+    nonisolated static func killRemoteSession(_ name: String, host: String) {
+        // Quoted so a session name can never turn into extra shell words; the
+        // names trm generates are `trm-<hex>`, but this also runs on names
+        // typed by a user of plain zmx on the other machine.
+        let script = "D=\"$HOME/.trm/zmx\"; T=\"${TMPDIR:-/tmp}\"; T=\"${T%/}/zmx-$(id -u)\"; "
+            + "for DIR in \"$D\" \"$T\"; do "
+            + "ZMX_DIR=\"$DIR\" \"\(remoteZmxPath)\" kill \"\(name)\" 2>/dev/null && exit 0; "
+            + "done"
+        let run = runCapturing(
+            "/usr/bin/ssh",
+            ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, shWrapped(script)],
+            timeout: 20)
+        if run.status != 0 {
+            let why = sshFailureMessage(run.error, status: run.status)
+            logger.error("remote kill of \(name) on \(host) failed: \(why)")
+        }
+    }
+
+    /// SSH destinations named by `remote_host` in any saved session TOML.
+    /// These are the machines this Mac has actually put panes on, which is a
+    /// better list than Bonjour alone: a host reached over Tailscale or a VPN
+    /// never shows up in a LAN service browse.
+    static func savedRemoteHosts() -> [String] {
+        let fm = FileManager.default
+        let dir = SessionManager.sessionsDirectory
+        guard let files = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
+        var hosts: [String] = []
+        var seen: Set<String> = []
+        for file in files where file.hasSuffix(".toml") {
+            guard let content = try? String(
+                contentsOf: dir.appendingPathComponent(file), encoding: .utf8) else { continue }
+            for rawLine in content.components(separatedBy: .newlines) {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                guard line.hasPrefix("remote_host"), let eq = line.firstIndex(of: "=") else { continue }
+                let value = String(line[line.index(after: eq)...])
+                    .trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                guard !value.isEmpty, seen.insert(value.lowercased()).inserted else { continue }
+                hosts.append(value)
+            }
+        }
+        return hosts
+    }
+
+    /// Hand a background read back to the waiting caller.
+    private final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = Data()
+        func set(_ data: Data) { lock.lock(); value = data; lock.unlock() }
+        func get() -> Data { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    /// Run an executable and capture stdout, giving up after `timeout`
+    /// seconds. A hung SSH must never wedge the browser's scan.
+    nonisolated private static func runCapturing(
+        _ executable: String,
+        _ args: [String],
+        timeout: TimeInterval
+    ) -> (output: String?, error: String?, status: Int32) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = args
+        let pipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = errPipe
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            logger.error("\(executable) failed to launch: \(error.localizedDescription)")
+            return (nil, error.localizedDescription, -1)
+        }
+
+        // Drain the pipe on another thread: reading here and waiting for exit
+        // afterwards would deadlock on a full pipe buffer, and waiting first
+        // gives the timeout nothing to interrupt. Terminating the child closes
+        // the write end, which is what unblocks the reader.
+        let box = Box()
+        let errBox = Box()
+        let sem = DispatchSemaphore(value: 0)
+        let errSem = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.set((try? pipe.fileHandleForReading.readToEnd()) ?? Data())
+            sem.signal()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            errBox.set((try? errPipe.fileHandleForReading.readToEnd()) ?? Data())
+            errSem.signal()
+        }
+        var timedOut = false
+        if sem.wait(timeout: .now() + timeout) == .timedOut {
+            logger.warning("\(executable) timed out after \(Int(timeout))s; terminating")
+            timedOut = true
+            process.terminate()
+            _ = sem.wait(timeout: .now() + 2)
+        }
+        _ = errSem.wait(timeout: .now() + 2)
+        process.waitUntilExit()
+        let status = timedOut ? 15 : process.terminationStatus
+        return (
+            String(data: box.get(), encoding: .utf8),
+            String(data: errBox.get(), encoding: .utf8),
+            status
+        )
     }
 }

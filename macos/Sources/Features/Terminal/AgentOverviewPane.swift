@@ -272,6 +272,15 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// stands in for the local process-tree walk and file reads.
     private var remoteMirror: RemoteAgentTranscriptMirror?
 
+    /// True while a remote pane's agent hasn't been resolved yet: the SSH
+    /// probe is a round trip, so there is a window after the pane appears in
+    /// which "no transcript" means "still asking", not "nothing there". The
+    /// Command Center uses this to hold a place for the pane instead of
+    /// leaving it off the board.
+    var isResolvingRemoteAgent: Bool {
+        surface?.remoteHost != nil && remoteMirror?.locatedKind == nil
+    }
+
     /// The watermark of the terminal this overview describes.
     ///
     /// Now that an overview can be moved and stacked anywhere in the grid, it
@@ -384,7 +393,8 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         // the overview never bound to a session. Prefer the shell running
         // inside the zmx server, which is the real parent of the agent.
         var shellPid: pid_t = 0
-        if let session = surface.zmxSessionName,
+        let zmxSession = surface.zmxSessionName
+        if let session = zmxSession,
            let serverShell = ZmxSessionManager.cachedServerShellPid(session: session) {
             shellPid = serverShell
         } else if let paneId = surface.paneId {
@@ -399,7 +409,8 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             let cachedPidAlive = cachedAgentPid > 0 && kill(cachedAgentPid, 0) == 0
             if session == nil || !cachedPidAlive || cwdChanged {
                 if let agent = AgentSessionLocator.agentProcess(underShell: shellPid) {
-                    if let located = AgentSessionLocator.locate(shellPid: shellPid, paneCwd: cwd) {
+                    if let located = AgentSessionLocator.locate(
+                        shellPid: shellPid, paneCwd: cwd, zmxSession: zmxSession) {
                         session = located
                     }
                     await MainActor.run { [weak self] in

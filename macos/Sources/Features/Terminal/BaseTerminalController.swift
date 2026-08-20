@@ -1,4 +1,5 @@
 import Cocoa
+import CoreImage
 import SwiftUI
 import Combine
 import GhosttyKit
@@ -196,6 +197,11 @@ class BaseTerminalController: NSWindowController,
     /// SAME remote session, so nothing is lost.
     @Published var disconnectedRemotePaneIds: Set<Int> = []
 
+    /// Remote panes whose `ssh` has exited and whose host hasn't yet said
+    /// whether the session is still there. Held open meanwhile: the answer
+    /// decides between the Reconnect overlay and an ordinary close.
+    var remotePanesAwaitingExitVerdict: Set<Int> = []
+
     /// The currently peeked sub-pane (expanded overlay), or `nil` if no peek.
     @Published var peekedPane: ObjectIdentifier? = nil
     /// Horizontal presentation offset for the single live peek tree.
@@ -208,15 +214,95 @@ class BaseTerminalController: NSWindowController,
     /// Each value is an array (length == number of children) that sums to 1.0.
     @Published var stackSubPaneHeightFractions: [ObjectIdentifier: [CGFloat]] = [:]
 
+    // MARK: - Sidebar
+
+    /// Panes parked in the sidebar, in the order the shelf lists them.
+    ///
+    /// A parked pane keeps running: it stays in `surfaceTree` (the only strong
+    /// owner of a surface) and is merely excluded from `gridPanes`, the same
+    /// way a stacked child is. Nothing is closed, so no zmx daemon is killed
+    /// and no scrollback is lost — the pane just stops taking up screen.
+    @Published var sidebarPanes: [ObjectIdentifier] = []
+
+    /// Whether the sidebar shelf is expanded alongside the grid.
+    @Published var sidebarIsShowing: Bool = false
+
+    /// Width of the sidebar shelf in points.
+    @Published var sidebarWidth: CGFloat = 260
+
+    /// Whether the Command Center panel is open along the window's edge.
+    ///
+    /// A panel rather than a grid cell: it is a view *of* the panes, not one
+    /// of them, and it should be available without giving up a cell or
+    /// rearranging the layout you already have. Remembered across launches —
+    /// per app rather than per window, because this is a way of working, not
+    /// a property of one window's layout.
+    @Published var commandCenterIsShowing: Bool = UserDefaults.standard.bool(
+        forKey: "CommandCenterPanelOpen"
+    ) {
+        didSet { UserDefaults.standard.set(commandCenterIsShowing, forKey: "CommandCenterPanelOpen") }
+    }
+
+    /// Resize the Command Center panel, clamped against the window rather
+    /// than a fixed maximum.
+    ///
+    /// The panel is allowed past half the window on purpose: with a dozen
+    /// agents it stops being a strip beside the work and becomes the thing you
+    /// are looking at, laid out as a grid of equal cards. The floor keeps a
+    /// card readable; the ceiling keeps a sliver of the grid on screen so
+    /// there is always something to drag back.
+    func setCommandCenterWidth(_ width: CGFloat) {
+        let available = window?.frame.width ?? 1440
+        let maximum = max(360, available - 120)
+        commandCenterWidth = min(max(width, 240), maximum)
+    }
+
+    /// Width of the Command Center panel in points.
+    @Published var commandCenterWidth: CGFloat = {
+        let saved = UserDefaults.standard.double(forKey: "CommandCenterPanelWidth")
+        return saved >= 220 ? CGFloat(saved) : 320
+    }() {
+        didSet { UserDefaults.standard.set(Double(commandCenterWidth), forKey: "CommandCenterPanelWidth") }
+    }
+
+    /// Every pane this window owns, before sidebar and stack filtering.
+    private var allPanesUnfiltered: [GridPane] {
+        gridSurfaces.map { .terminal($0) } +
+        webviewPanes.map { .webview($0) } +
+        pluginPanes.map { .plugin($0) } +
+        agentOverviewPanes.map { .agentOverview($0) }
+    }
+
+    /// The parked panes, resolved to live pane objects in sidebar order.
+    var sidebarGridPanes: [GridPane] {
+        guard !sidebarPanes.isEmpty else { return [] }
+        let byID = Dictionary(
+            allPanesUnfiltered.map { ($0.id, $0) },
+            uniquingKeysWith: { a, _ in a })
+        return sidebarPanes.compactMap { byID[$0] }
+    }
+
+    /// One tile per parked pane. An agent overview whose terminal is parked
+    /// with it is left out: the pair was parked and comes back as a pair, so
+    /// it reads as one item on the shelf rather than two.
+    var sidebarTiles: [GridPane] {
+        let parked = Set(sidebarPanes)
+        return sidebarGridPanes.filter { pane in
+            guard case .agentOverview(let overview) = pane,
+                  let surface = overview.surface else { return true }
+            return !parked.contains(ObjectIdentifier(surface))
+        }
+    }
+
     /// All panes for the grid, in display order.
     /// Panes that are stacked inside another cell are filtered out, and the
     /// host cell is replaced with a `.stack([...])` containing the children.
     var gridPanes: [GridPane] {
-        let all: [GridPane] =
-            gridSurfaces.map { .terminal($0) } +
-            webviewPanes.map { .webview($0) } +
-            pluginPanes.map { .plugin($0) } +
-            agentOverviewPanes.map { .agentOverview($0) }
+        var all: [GridPane] = allPanesUnfiltered
+        if !sidebarPanes.isEmpty {
+            let parked = Set(sidebarPanes)
+            all = all.filter { !parked.contains($0.id) }
+        }
 
         let sorted: [GridPane]
         if paneDisplayOrder.isEmpty {
@@ -1691,6 +1777,16 @@ class BaseTerminalController: NSWindowController,
         guard let idx = agentOverviewPanes.firstIndex(where: { $0 === pane }) else { return }
         let paneID = ObjectIdentifier(pane)
 
+        // A parked overview holds no cell; only the shelf has to forget it.
+        if sidebarPanes.contains(paneID) {
+            removeFromSidebar(paneID)
+            agentOverviewPanes.remove(at: idx)
+            paneDisplayOrder.removeAll { $0 == paneID }
+            paneStacks.removeValue(forKey: paneID)
+            closeWindowIfNoPanes()
+            return
+        }
+
         var layout = GridLayout<ObjectIdentifier>(
             rowCols: gridRowCols,
             displayOrder: paneDisplayOrder
@@ -2163,6 +2259,193 @@ class BaseTerminalController: NSWindowController,
                 paneDisplayOrder.append(paneID)
             }
         }
+    }
+
+    // MARK: - Sidebar
+
+    /// Park a pane in the sidebar: it leaves the grid but keeps running.
+    ///
+    /// This is deliberately not a close. `closeSurface` kills the pane's zmx
+    /// daemon, which is the right thing when the user is done with a pane and
+    /// exactly the wrong thing here — the whole point is a long-running build,
+    /// log tail, or agent that should keep working off-screen. The surface
+    /// stays in `surfaceTree` and only stops being rendered.
+    func sendPaneToSidebar(_ pane: GridPane) {
+        guard !isLayoutEditingDisabled else { return }
+
+        // Something has to stay on screen. Parking one member of a stack is
+        // exempt: that cell survives with the rest of the stack still in it.
+        let vacatesItsCell = pane.isStack || !isPartOfStack(pane.id)
+        guard gridPanes.count > 1 || !vacatesItsCell else {
+            NSSound.beep()
+            return
+        }
+
+        // A stack parks whole, so the shelf shows the group the user built
+        // rather than scattering its members. Bottom-up: each member above the
+        // last is still a stack child when it leaves, so it takes no cell with
+        // it, and the last one out closes the cell behind it.
+        let members = (pane.stackChildren ?? [pane]).reversed()
+        for member in members { parkPane(member) }
+
+        if peekedPane.map({ id in sidebarPanes.contains(id) }) == true { dismissPeek() }
+        gridRowHeightFractions = []
+        gridColWidthFractions = []
+        reconcileGridRowCols()
+        sidebarIsShowing = true
+        focusFirstGridSurface()
+    }
+
+    /// Move one concrete pane out of the grid and onto the shelf.
+    private func parkPane(_ pane: GridPane) {
+        let paneID = pane.id
+        guard !sidebarPanes.contains(paneID) else { return }
+
+        // An agent overview only describes its terminal, so it goes along;
+        // left behind it would render a transcript for a pane that is no
+        // longer on screen.
+        var ids: [ObjectIdentifier] = [paneID]
+        if case .terminal(let surface) = pane {
+            ids += agentOverviewPanes
+                .filter { $0.surface === surface }
+                .map { ObjectIdentifier($0) }
+        }
+
+        for id in ids {
+            // A pane inside a stack has no cell of its own, and a stack host
+            // hands its cell to the promoted member — in both cases the grid
+            // keeps the same number of cells and only the display order changes.
+            let occupiesOwnCell = !isPartOfStack(id)
+            detachFromStack(id)
+            if occupiesOwnCell {
+                removePaneFromGrid(id)
+            } else {
+                paneDisplayOrder.removeAll { $0 == id }
+            }
+            sidebarPanes.append(id)
+        }
+    }
+
+    /// Take a pane off the shelf and give it a cell at the end of the grid.
+    func restorePaneFromSidebar(_ paneID: ObjectIdentifier) {
+        guard !isLayoutEditingDisabled else { return }
+        guard let index = sidebarPanes.firstIndex(of: paneID) else { return }
+        let pane = sidebarGridPanes.first { $0.id == paneID }
+        sidebarPanes.remove(at: index)
+        addPaneBackToGrid(paneID)
+
+        // The overview that was parked with this terminal comes back beside it.
+        if case .terminal(let surface)? = pane {
+            for overview in agentOverviewPanes where overview.surface === surface {
+                let overviewID = ObjectIdentifier(overview)
+                guard let j = sidebarPanes.firstIndex(of: overviewID) else { continue }
+                sidebarPanes.remove(at: j)
+                addPaneBackToGrid(overviewID)
+                applyOverviewPlacement(overview)
+            }
+        }
+
+        gridRowHeightFractions = []
+        gridColWidthFractions = []
+        reconcileGridRowCols()
+        if sidebarPanes.isEmpty { sidebarIsShowing = false }
+
+        // Restoring a pane means "I want to work in this one now."
+        if case .terminal(let surface)? = pane {
+            focusSurface(surface)
+        } else if let pane {
+            selectNonSurfacePane(pane.id)
+        }
+    }
+
+    /// Bring every parked pane back into the grid.
+    func restoreAllPanesFromSidebar() {
+        for paneID in sidebarPanes.reversed() {
+            restorePaneFromSidebar(paneID)
+        }
+    }
+
+    /// Park the focused pane (or the selected non-terminal pane) in the sidebar.
+    func sendFocusedPaneToSidebar() {
+        let target: GridPane? = {
+            if let surface = focusedSurface,
+               let pane = gridPanes.first(where: { $0.containsSurface(ObjectIdentifier(surface)) }) {
+                // A focused terminal inside a stack parks by itself; the rest
+                // of the stack stays where it is.
+                if pane.isStack { return .terminal(surface) }
+                return pane
+            }
+            if let selected = selectedNonSurfacePane {
+                return gridPanes.first { $0.id == selected }
+            }
+            // Nothing is focused or selected — parking an arbitrary pane would
+            // be a surprise, so do nothing.
+            return nil
+        }()
+        guard let target else { return }
+        sendPaneToSidebar(target)
+    }
+
+    /// Show or hide the sidebar shelf.
+    func toggleSidebar() {
+        sidebarIsShowing.toggle()
+    }
+
+    /// Close a parked pane for good, whatever kind it is. This is the one path
+    /// out of the sidebar that does kill the pane's session, so it asks first
+    /// for terminals — a parked pane is off-screen, and its output is easy to
+    /// forget about.
+    func closeSidebarPane(_ pane: GridPane) {
+        switch pane {
+        case .terminal(let surface):
+            closeSurface(surface)
+        case .webview(let webview):
+            closeWebviewPane(webview)
+        case .plugin(let plugin):
+            closePluginPane(plugin)
+        case .agentOverview(let overview):
+            closeAgentOverview(overview)
+        case .stack(let children):
+            for child in children { closeSidebarPane(child) }
+        }
+    }
+
+    /// Remove a pane from whatever stack it belongs to, promoting a new host
+    /// when the pane being detached was the host itself.
+    private func detachFromStack(_ paneID: ObjectIdentifier) {
+        if let children = paneStacks[paneID] {
+            paneStacks.removeValue(forKey: paneID)
+            stackSubPaneHeightFractions.removeValue(forKey: paneID)
+            let rest = children.filter { $0 != paneID }
+            if rest.count >= 2, let newHost = rest.first {
+                paneStacks[newHost] = rest
+            }
+            return
+        }
+
+        guard let (hostID, stackIndex) = findStackEntry(for: paneID) else { return }
+        paneStacks[hostID]?.remove(at: stackIndex)
+        stackSubPaneHeightFractions.removeValue(forKey: hostID)
+        if let remaining = paneStacks[hostID], remaining.count <= 1 {
+            paneStacks.removeValue(forKey: hostID)
+        }
+    }
+
+    /// Focus a pane that is still on screen, used after parking the focused one.
+    private func focusFirstGridSurface() {
+        if let focused = focusedSurface,
+           !sidebarPanes.contains(ObjectIdentifier(focused)) { return }
+        if let surface = gridPanes.lazy.compactMap({ $0.firstTerminalSurface }).first {
+            focusSurface(surface)
+        }
+    }
+
+    /// Drop a pane from the sidebar when it is closing for real, so the shelf
+    /// never lists a pane that no longer exists.
+    func removeFromSidebar(_ paneID: ObjectIdentifier) {
+        guard sidebarPanes.contains(paneID) else { return }
+        sidebarPanes.removeAll { $0 == paneID }
+        if sidebarPanes.isEmpty { sidebarIsShowing = false }
     }
 
     /// Clean up stack entries when a surface is being closed.
@@ -2674,12 +2957,15 @@ class BaseTerminalController: NSWindowController,
     @discardableResult
     private func removeWebviewPane(_ pane: WebViewPane) -> Bool {
         guard let idx = webviewPanes.firstIndex(where: { $0.id == pane.id }) else { return false }
+        // A parked pane holds no cell, so closing it must not shrink a row.
+        let wasParked = sidebarPanes.contains(ObjectIdentifier(pane))
         let flatIndex = gridSurfaces.count + idx
         let (row, _) = gridPosition(flatIndex: flatIndex)
         webviewPanes.remove(at: idx)
         paneDisplayOrder.removeAll { $0 == ObjectIdentifier(pane) }
+        removeFromSidebar(ObjectIdentifier(pane))
 
-        if row < gridRowCols.count {
+        if !wasParked, row < gridRowCols.count {
             if gridRowCols[row] > 1 {
                 gridRowCols[row] -= 1
             } else if gridRowCols.count > 1 {
@@ -2694,12 +2980,15 @@ class BaseTerminalController: NSWindowController,
     @discardableResult
     private func removePluginPane(_ pane: PluginPane) -> Bool {
         guard let idx = pluginPanes.firstIndex(where: { $0.id == pane.id }) else { return false }
+        // A parked pane holds no cell, so closing it must not shrink a row.
+        let wasParked = sidebarPanes.contains(ObjectIdentifier(pane))
         let flatIndex = gridSurfaces.count + webviewPanes.count + idx
         let (row, _) = gridPosition(flatIndex: flatIndex)
         pluginPanes.remove(at: idx)
         paneDisplayOrder.removeAll { $0 == ObjectIdentifier(pane) }
+        removeFromSidebar(ObjectIdentifier(pane))
 
-        if row < gridRowCols.count {
+        if !wasParked, row < gridRowCols.count {
             if gridRowCols[row] > 1 {
                 gridRowCols[row] -= 1
             } else if gridRowCols.count > 1 {
@@ -2936,6 +3225,43 @@ class BaseTerminalController: NSWindowController,
     }
 
     /// Send text to a specific surface via the `text:` binding action.
+    /// Type `text` into a pane as if the user had, then press Enter.
+    ///
+    /// Used by the Agent Overview and Command Center compose boxes: those are
+    /// reading surfaces for an agent, and answering it should not mean hunting
+    /// for the terminal underneath.
+    ///
+    /// The Enter is a separate write, and not a fast one. Programs in raw
+    /// input mode (Claude Code among them) treat a newline arriving in the
+    /// same write as part of the pasted text, and an agent's input box that
+    /// has just taken a paste needs a beat before a bare CR reads as "submit"
+    /// rather than more paste — at 80 ms the message landed in the box and sat
+    /// there unsent.
+    func sendMessageToSurface(_ surface: Ghostty.SurfaceView, text: String) {
+        // Trimmed at both ends, and interior newlines folded to spaces: an
+        // agent's input box submits on Return, so a multi-line message would
+        // send its first line and leave the rest behind.
+        let body = text
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return }
+
+        // Exactly what went down the wire, so a report of "it arrived with a
+        // space in front" can be answered from the log instead of guessed at:
+        // if these bytes are clean, whatever added it is on the far side.
+        let hex = body.utf8.prefix(24).map { String(format: "%02x", $0) }.joined(separator: " ")
+        TrmDiagnostics.log(
+            "[send] paneId=\(surface.paneId.map(String.init) ?? "?") " +
+            "bytes=\(body.utf8.count) head=\(hex)")
+
+        sendTextToSurface(surface, text: body)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.sendTextToSurface(surface, text: "\r")
+        }
+    }
+
     private func sendTextToSurface(_ surface: Ghostty.SurfaceView, text: String) {
         guard let s = surface.surface else { return }
         let action = "text:" + text
@@ -3207,6 +3533,11 @@ class BaseTerminalController: NSWindowController,
 
             cleanupStacksForClosedPane(paneID)
 
+            // A parked pane holds no cell, so the grid bookkeeping below must
+            // not run for it — `gridPanes` won't find it and correctly leaves
+            // `gridRowCols` alone, but the shelf still has to forget it.
+            removeFromSidebar(paneID)
+
             // Pane ids are reused; a lingering disconnected flag would put a
             // reconnect button over an unrelated future pane.
             if let pid = view.paneId {
@@ -3365,28 +3696,107 @@ class BaseTerminalController: NSWindowController,
         guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
         // Only remote panes get the reconnect treatment: a local pane's
         // command exiting means the shell is done, not that a link dropped.
-        guard surfaceView.remoteHost != nil, let paneId = surfaceView.paneId else { return }
+        guard let host = surfaceView.remoteHost, let paneId = surfaceView.paneId else { return }
         guard surfaceTree.contains(where: { $0 === surfaceView }) else { return }
-        disconnectedRemotePaneIds.insert(paneId)
+
+        // `exit` on the far side and a dropped link end the pane's ssh in
+        // exactly the same way locally, so the pane's fate can't be decided
+        // from here: closing on a drop loses running work, and keeping on an
+        // exit leaves a pane the user just told to go away. Ask the machine
+        // that knows. Until it answers the pane is held (see
+        // `ghosttyDidCloseSurface`) — a held pane can still be closed, an
+        // exited one can't be brought back.
+        guard let session = surfaceView.remoteZmxSession else {
+            // No session name to ask about: treat it as a link drop, since
+            // that is the case where guessing wrong destroys something.
+            disconnectedRemotePaneIds.insert(paneId)
+            return
+        }
+        remotePanesAwaitingExitVerdict.insert(paneId)
+
+        Task { [weak self, weak surfaceView] in
+            // The daemon unlinks its socket as it exits, which can land a
+            // beat after the client notices; don't race it.
+            try? await Task.sleep(for: .milliseconds(250))
+            let alive = await Task.detached(priority: .userInitiated) {
+                ZmxSessionManager.remoteSessionAlive(session, host: host)
+            }.value
+
+            guard let self, let surfaceView,
+                  self.remotePanesAwaitingExitVerdict.contains(paneId) else { return }
+            self.remotePanesAwaitingExitVerdict.remove(paneId)
+
+            switch alive {
+            case .some(true), .none:
+                // Still running there, or the host couldn't be asked — either
+                // way there may be work to get back to.
+                TrmDiagnostics.log(
+                    "[remote] pane \(paneId) lost its link to \(host) " +
+                    "(session \(session) \(alive == nil ? "unreachable" : "still running"))")
+                self.disconnectedRemotePaneIds.insert(paneId)
+            case .some(false):
+                // The session ended on purpose: the pane has nothing left to
+                // show, so let it close the way a local pane would.
+                TrmDiagnostics.log(
+                    "[remote] session \(session) on \(host) ended; closing pane \(paneId)")
+                self.disconnectedRemotePaneIds.remove(paneId)
+                self.closeSurface(surfaceView, withConfirmation: false)
+            }
+        }
     }
 
-    /// On wake, kill each remote pane's SSH client outright. A slept
-    /// machine's TCP flows are almost always dead anyway (NAT/DHCP churn,
-    /// different network), but a half-dead ssh sits inside the TCP timeout
-    /// looking frozen — killing it makes the child-exit fire now, so the
-    /// reconnect button is there when the user looks, not 30 s later. The
-    /// remote session daemon is untouched; reconnecting resumes it.
+    /// On wake, kill each remote pane's SSH client outright, then reconnect
+    /// it. A slept machine's TCP flows are almost always dead anyway (NAT/DHCP
+    /// churn, different network), but a half-dead ssh sits inside the TCP
+    /// timeout looking frozen — killing it makes the child-exit fire now. The
+    /// remote session daemon is untouched; reattaching resumes it.
+    ///
+    /// The reconnect is automatic because waking the laptop is not a decision
+    /// about any one pane: every remote pane drops at once, and clicking
+    /// Reconnect N times to get back exactly where you were is ceremony. One
+    /// pass only — a pane whose host is still unreachable exits again and
+    /// falls back to the Reconnect button rather than retrying in a loop.
     @objc private func workspaceDidWake(_ notification: Notification) {
         // Small delay so this doesn't race the wake itself.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self else { return }
+            var killed: [Int] = []
             for view in self.surfaceTree where view.remoteHost != nil {
                 guard let paneId = view.paneId else { continue }
                 let childPid = Trm.shared.paneChildPid(paneId: UInt32(paneId))
                 if childPid > 0 {
                     kill(childPid, SIGTERM)
+                    killed.append(paneId)
                 }
             }
+            guard !killed.isEmpty else { return }
+            TrmDiagnostics.log(
+                "[remote] wake: killed \(killed.count) ssh client(s), reconnecting")
+
+            // Let the child exits land (they mark the panes disconnected)
+            // before reattaching.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self else { return }
+                self.reconnectDisconnectedRemotePanes()
+            }
+        }
+    }
+
+    /// Reattach every remote pane currently marked disconnected. Panes that
+    /// are already live are left alone, so this is safe to call on any signal
+    /// that the network is back.
+    func reconnectDisconnectedRemotePanes() {
+        // Panes still awaiting a verdict count too: after a wake the host is
+        // usually unreachable, so the answer would only tell us what we
+        // already know — the link is gone and the pane wants reattaching.
+        let pending = disconnectedRemotePaneIds.union(remotePanesAwaitingExitVerdict)
+        guard !pending.isEmpty else { return }
+        // Snapshot first: each reconnect swaps a node in the live tree.
+        let views = Array(surfaceTree).filter { $0.remoteHost != nil }
+        for view in views {
+            guard let paneId = view.paneId, pending.contains(paneId) else { continue }
+            remotePanesAwaitingExitVerdict.remove(paneId)
+            reconnectRemotePane(.terminal(view))
         }
     }
 
@@ -3412,6 +3822,7 @@ class BaseTerminalController: NSWindowController,
         newView.remoteZmxSession = session
         if let paneId = newView.paneId {
             disconnectedRemotePaneIds.remove(paneId)
+            remotePanesAwaitingExitVerdict.remove(paneId)
         }
     }
 
@@ -3740,6 +4151,24 @@ class BaseTerminalController: NSWindowController,
             TrmDiagnostics.log("[close-trace] ghosttyDidCloseSurface: target not in surfaceTree (already removed?)")
             return
         }
+        // A remote pane's SSH link dying is a disconnect, not a close. The
+        // work lives in the zmx daemon on the other machine and is still
+        // running, so keep the pane (and its last frame) and let
+        // `reconnectOverlay` offer to reattach the SAME session. Without this
+        // the surface is torn out the instant `ssh` exits — on link loss, and
+        // on every wake, where `workspaceDidWake` kills ssh deliberately — so
+        // panes silently vanish and the Reconnect button never gets a chance
+        // to appear. Explicit closes don't come through here, so a dead pane
+        // can still be closed normally.
+        if processAlive == false, target.remoteHost != nil, let paneId = target.paneId,
+           disconnectedRemotePaneIds.contains(paneId)
+            || remotePanesAwaitingExitVerdict.contains(paneId) {
+            TrmDiagnostics.log(
+                "[close-trace] keeping disconnected remote pane paneId=\(paneId) " +
+                "host=\(target.remoteHost ?? "?") session=\(target.remoteZmxSession ?? "?")")
+            return
+        }
+
         TrmDiagnostics.log("[close-trace] ghosttyDidCloseSurface: calling closeSurface")
         closeSurface(
             node,
@@ -4368,6 +4797,9 @@ class BaseTerminalController: NSWindowController,
         case agentOverview
         case remotePane(host: String?)
         case switchPaneRemote(host: String?)
+        case sendPaneToSidebar
+        case toggleSidebar
+        case installAgentHook
     }
 
     private func handleInternalCommand(_ action: String, on surfaceView: Ghostty.SurfaceView) -> Bool {
@@ -4392,6 +4824,9 @@ class BaseTerminalController: NSWindowController,
         case .restoreSession(let name):
             handleRestoreSession(name: name)
             return true
+        case .installAgentHook:
+            installAgentSessionHook()
+            return true
         case .clearAutoSave:
             SessionManager.clearAutoSaves()
             return true
@@ -4406,6 +4841,16 @@ class BaseTerminalController: NSWindowController,
             return true
         case .switchPaneRemote(let host):
             switchPaneToRemote(host: host, at: surfaceView)
+            return true
+        case .sendPaneToSidebar:
+            if let pane = gridPanes.first(where: {
+                $0.containsSurface(ObjectIdentifier(surfaceView))
+            }) {
+                sendPaneToSidebar(pane.isStack ? .terminal(surfaceView) : pane)
+            }
+            return true
+        case .toggleSidebar:
+            toggleSidebar()
             return true
         }
     }
@@ -4448,6 +4893,9 @@ class BaseTerminalController: NSWindowController,
 
         var config = Ghostty.SurfaceConfiguration()
         config.command = command
+        // See `replacePaneSurface`: a dropped link must leave the pane
+        // standing so it can be reconnected.
+        config.waitAfterCommand = true
 
         guard let view = newGridPane(
             at: surfaceView,
@@ -4647,6 +5095,9 @@ class BaseTerminalController: NSWindowController,
 
         var config = Ghostty.SurfaceConfiguration()
         config.command = command
+        // The core keeps the surface (and its "process exited" note) after a
+        // remote attach ends, which is what the reconnect overlay renders on.
+        config.waitAfterCommand = true
         let paneId = surfaceView.paneId ?? nextAvailablePaneId()
         Self.injectCmuxEnvVars(into: &config, paneId: paneId)
         let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
@@ -4826,6 +5277,63 @@ class BaseTerminalController: NSWindowController,
         ExtensionBuilder.shared.createInteractively(description: description)
     }
 
+    /// Install the Claude Code SessionStart hook that records which
+    /// transcript each pane's agent is writing — here and on the machines this
+    /// window's remote panes run on.
+    ///
+    /// Confirmed rather than silent: it edits `~/.claude/settings.json`, which
+    /// is the user's own config, on machines they may not be looking at.
+    private func installAgentSessionHook() {
+        var hosts: [String] = []
+        var seen: Set<String> = []
+        for view in surfaceTree {
+            guard let host = view.remoteHost,
+                  seen.insert(host.lowercased()).inserted else { continue }
+            hosts.append(host)
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Install the agent session hook?"
+        var detail = "Agents don't hold their transcript open, so trm infers which "
+            + "conversation belongs to which pane from file timestamps — which goes "
+            + "wrong when several agents share a project directory. This hook lets "
+            + "the agent report it directly.\n\nWrites ~/.trm/bin/"
+            + "\(AgentSessionHook.scriptName) and adds a SessionStart entry to "
+            + "~/.claude/settings.json (backed up first) on:\n\n• this Mac"
+        for host in hosts { detail += "\n• \(host)" }
+        detail += "\n\nExisting agents pick it up when they next start or resume."
+        alert.informativeText = detail
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Cancel")
+
+        let proceed: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            let localError = AgentSessionHook.install()
+            Task.detached(priority: .userInitiated) {
+                var failures: [String] = []
+                if let localError { failures.append("this Mac: \(localError)") }
+                for host in hosts {
+                    if let error = AgentSessionHook.installRemote(host: host) {
+                        failures.append(error)
+                    }
+                }
+                await MainActor.run {
+                    guard !failures.isEmpty else { return }
+                    self.presentInternalCommandError(
+                        title: "Agent Hook Partly Installed",
+                        message: failures.joined(separator: "\n\n"))
+                }
+            }
+        }
+
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: proceed)
+        } else {
+            proceed(alert.runModal())
+        }
+    }
+
     private func parseInternalCommand(_ action: String) -> InternalCommand? {
         var trimmed = action.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("!") {
@@ -4934,6 +5442,18 @@ class BaseTerminalController: NSWindowController,
             return .clearAutoSave
         }
 
+        if trimmed == "trm.install_agent_hook" {
+            return .installAgentHook
+        }
+
+        // trm.sidebar_pane — park this pane; trm.sidebar — toggle the shelf
+        if trimmed == "trm.sidebar_pane" {
+            return .sendPaneToSidebar
+        }
+        if trimmed == "trm.sidebar" {
+            return .toggleSidebar
+        }
+
         // trm.create_extension
         if trimmed == "trm.create_extension" {
             return .createExtension
@@ -5018,7 +5538,10 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
-    private func addPaneOfType(_ typeArg: String, on surfaceView: Ghostty.SurfaceView) {
+    /// `surfaceView` anchors the terminal and webview branches; plugin panes
+    /// are placed by the grid itself, so a window with no terminal (all panes
+    /// parked, or a plugin-only window) can still add one.
+    private func addPaneOfType(_ typeArg: String, on surfaceView: Ghostty.SurfaceView?) {
         // Split into pane type and optional remainder (URL, content, path, etc.)
         let parts = typeArg.split(separator: " ", maxSplits: 1)
         let rawType = String(parts[0]).lowercased()
@@ -5026,7 +5549,7 @@ class BaseTerminalController: NSWindowController,
 
         switch rawType {
         case "terminal", "terminal_pane":
-            newGridPane(at: surfaceView, direction: .right)
+            if let surfaceView { newGridPane(at: surfaceView, direction: .right) }
             return
 
         case "webview", "browser":
@@ -5044,7 +5567,7 @@ class BaseTerminalController: NSWindowController,
         guard let kind = PluginPaneKind.fromPaneType(rawType) else {
             presentInternalCommandError(
                 title: "Unknown Pane Type",
-                message: "'\(rawType)' is not a recognized pane type.\n\nAvailable types: terminal, webview, notes, git_status, file_browser, log_viewer, process_monitor, markdown_preview, system_info"
+                message: "'\(rawType)' is not a recognized pane type.\n\nAvailable types: terminal, webview, notes, command_center, git_status, file_browser, log_viewer, process_monitor, markdown_preview, system_info"
             )
             return
         }
@@ -5279,7 +5802,7 @@ class BaseTerminalController: NSWindowController,
         // group name so they can be re-stacked on restore. The stack's
         // sub-pane height fractions ride on its first (host) pane.
         let visualPanes = gridPanes
-        var flatPanes: [(pane: GridPane, stackGroup: String?, stackFractions: [CGFloat]?)] = []
+        var flatPanes: [(pane: GridPane, stackGroup: String?, stackFractions: [CGFloat]?, sidebar: Bool)] = []
         var stackCounter = 0
         for pane in visualPanes {
             if case .stack(let children) = pane {
@@ -5294,12 +5817,21 @@ class BaseTerminalController: NSWindowController,
                     flatPanes.append((
                         pane: child,
                         stackGroup: groupName,
-                        stackFractions: childIdx == 0 ? hostFractions : nil
+                        stackFractions: childIdx == 0 ? hostFractions : nil,
+                        sidebar: false
                     ))
                 }
             } else {
-                flatPanes.append((pane: pane, stackGroup: nil, stackFractions: nil))
+                flatPanes.append((pane: pane, stackGroup: nil, stackFractions: nil, sidebar: false))
             }
+        }
+
+        // Parked panes are serialized after every grid pane, so the indices
+        // that grid panes refer to each other by (an overview's `overview_of`)
+        // stay put, and `[grid] row_cols` keeps describing the visible layout
+        // alone. `sidebar = true` is what puts them back on the shelf.
+        for pane in sidebarGridPanes {
+            flatPanes.append((pane: pane, stackGroup: nil, stackFractions: nil, sidebar: true))
         }
 
         // Save the visual (stacked) gridRowCols. On restore, the flat-to-visual
@@ -5347,6 +5879,10 @@ class BaseTerminalController: NSWindowController,
                 .map { Self.fractionListString($0) }
                 .joined(separator: ";")
             lines.append("col_fractions = \(tomlQuote(joined))")
+        }
+        if !sidebarPanes.isEmpty {
+            lines.append("sidebar_width = \(Int(sidebarWidth))")
+            lines.append("sidebar_open = \(sidebarIsShowing)")
         }
         lines.append("")
 
@@ -5501,6 +6037,12 @@ class BaseTerminalController: NSWindowController,
                 // Already flattened above — should not appear here.
                 break
             }
+
+            // Every branch above closes its block with a blank separator line,
+            // and the shelf marker belongs inside the block, ahead of it.
+            if entry.sidebar, lines.last?.isEmpty == true {
+                lines.insert("sidebar = true", at: lines.count - 1)
+            }
         }
 
         return lines.joined(separator: "\n")
@@ -5545,6 +6087,7 @@ class BaseTerminalController: NSWindowController,
             $webviewPanes.map { _ in () }.eraseToAnyPublisher(),
             $pluginPanes.map { _ in () }.eraseToAnyPublisher(),
             $agentOverviewPanes.map { _ in () }.eraseToAnyPublisher(),
+            $sidebarPanes.map { _ in () }.eraseToAnyPublisher(),
         ]
         layoutBroadcastCancellable = Publishers.MergeMany(publishers)
             .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
@@ -5715,8 +6258,7 @@ class BaseTerminalController: NSWindowController,
         var newWebviews: [WebViewPane] = []
         var newPlugins: [PluginPane] = []
         var newOverviews: [AgentOverviewPane] = []
-        var flatIDs: [ObjectIdentifier] = []
-        var stackTags: [String?] = []
+        var entries: [(value: (id: ObjectIdentifier, tag: String?), sidebar: Bool)] = []
         var stackFractionsByTag: [String: [CGFloat]] = [:]
 
         for (i, paneConfig) in paneConfigs.enumerated() {
@@ -5736,14 +6278,24 @@ class BaseTerminalController: NSWindowController,
                 newOverviews.append(p)
                 id = ObjectIdentifier(p)
             }
-            flatIDs.append(id)
-            stackTags.append(paneConfig.stackGroup)
+            // A pane the primary parked in its sidebar is parked here too:
+            // the mirror follows the primary's layout, and a parked pane
+            // claims no cell on either side.
+            entries.append((
+                value: (id, paneConfig.sidebar ? nil : paneConfig.stackGroup),
+                sidebar: paneConfig.sidebar
+            ))
             if let tag = paneConfig.stackGroup,
                let sf = paneConfig.stackFractions,
                stackFractionsByTag[tag] == nil {
                 stackFractionsByTag[tag] = sf.map { CGFloat($0) }
             }
         }
+
+        let (gridEntries, parkedEntries) = LayoutSyncModel.partitionParked(entries)
+        let flatIDs = gridEntries.map(\.id)
+        let stackTags = gridEntries.map(\.tag)
+        let parkedIDs = parkedEntries.map(\.id)
         guard !flatIDs.isEmpty else { return }
 
         // Stack state, keyed by each group's first member (the host).
@@ -5798,6 +6350,9 @@ class BaseTerminalController: NSWindowController,
         )
         paneStacks = newStacks
         paneDisplayOrder = flatIDs
+        sidebarPanes = parkedIDs
+        sidebarWidth = config.sidebarWidth.map { CGFloat($0) } ?? sidebarWidth
+        sidebarIsShowing = !parkedIDs.isEmpty && config.sidebarOpen
 
         // Visual shape from the config (stacks collapsed); reconcile when
         // panes were skipped so the shape always matches the cell count.
@@ -6204,6 +6759,7 @@ class BaseTerminalController: NSWindowController,
         paneDisplayOrder = []
         paneStacks = [:]
         stackSubPaneHeightFractions = [:]
+        sidebarPanes = []
 
         let paneConfigs: [Trm.TrmPaneConfig] = {
             if !config.panes.isEmpty {
@@ -6372,19 +6928,30 @@ class BaseTerminalController: NSWindowController,
             resolvedByConfigIndex[i] = .agentOverview(overview)
         }
 
-        var flatIDs: [ObjectIdentifier] = []
-        var stackTags: [String?] = []
+        var entries: [(value: (id: ObjectIdentifier, tag: String?), sidebar: Bool)] = []
         var stackFractionsByTag: [String: [CGFloat]] = [:]
         for (i, paneConfig) in paneConfigs.enumerated() {
             guard let pane = resolvedByConfigIndex[i] else { continue }
-            flatIDs.append(pane.id)
-            stackTags.append(paneConfig.stackGroup)
+            // A parked pane's stack tag is dropped with it: it left the grid,
+            // so it is no longer a member of any cell.
+            entries.append((
+                value: (pane.id, paneConfig.sidebar ? nil : paneConfig.stackGroup),
+                sidebar: paneConfig.sidebar
+            ))
             if let tag = paneConfig.stackGroup,
                let fractions = paneConfig.stackFractions,
                stackFractionsByTag[tag] == nil {
                 stackFractionsByTag[tag] = fractions.map { CGFloat($0) }
             }
         }
+
+        let (gridEntries, parkedEntries) = LayoutSyncModel.partitionParked(entries)
+        let flatIDs = gridEntries.map(\.id)
+        let stackTags = gridEntries.map(\.tag)
+        sidebarPanes = parkedEntries.map(\.id)
+        sidebarWidth = config.sidebarWidth.map { CGFloat($0) } ?? sidebarWidth
+        sidebarIsShowing = !sidebarPanes.isEmpty && config.sidebarOpen
+
         guard !flatIDs.isEmpty else { return }
 
         let groups = LayoutSyncModel.stackGroups(forTags: stackTags)
@@ -6864,14 +7431,17 @@ class BaseTerminalController: NSWindowController,
             // recreates the session if the remote daemon has since died, so
             // this reconnects whether or not the work is still running.
             let remoteHost = entry.config.remoteHost
+            var resolvedRemoteSession: String?
             if let remoteHost, !remoteHost.isEmpty,
                Self.isValidRemoteHost(remoteHost) {
                 let session = entry.config.remoteSession ?? ZmxSessionManager.newSessionName()
+                resolvedRemoteSession = session
                 surfaceConfig.command = Self.remoteAttachCommand(
                     host: remoteHost,
                     session: session,
                     zmxPath: Self.defaultRemoteZmxPath
                 )
+                surfaceConfig.waitAfterCommand = true
             } else if ghostty.sessionPersistence {
                 if let saved = entry.config.zmxSession,
                    ZmxSessionManager.sessionExists(saved) {
@@ -6904,7 +7474,11 @@ class BaseTerminalController: NSWindowController,
             // records this as a remote pane.
             if let remoteHost, !remoteHost.isEmpty {
                 view.remoteHost = remoteHost
-                view.remoteZmxSession = entry.config.remoteSession
+                // The *resolved* session, not the config's: a saved pane with
+                // no `remote_session` still attaches to a freshly generated
+                // one, and a pane that doesn't know its own session name can
+                // neither reconnect nor be asked about after a drop.
+                view.remoteZmxSession = resolvedRemoteSession ?? entry.config.remoteSession
                 // zmx replays the remote session's screen; don't also cat
                 // scrollback or replay initial commands into a live shell.
                 reattachedPaneIds.insert(entry.paneId)
@@ -7117,6 +7691,88 @@ class BaseTerminalController: NSWindowController,
         SessionBrowserController.shared.show(ghostty: ghostty)
     }
 
+    /// View → Command Center. Reveals the window's existing activity pane if
+    /// there is one rather than adding a second: it is a single view of a
+    /// global thing, and two of them in one window would just be two of the
+    /// same list.
+    @IBAction func showCommandCenterAction(_ sender: Any?) {
+        commandCenterIsShowing.toggle()
+    }
+
+    /// View → Pair iPhone… — start serving the Command Center and show the
+    /// QR code that hands a phone the address and token.
+    @IBAction func pairIPhoneAction(_ sender: Any?) {
+        let server = CommandCenterServer.shared
+        server.start()
+
+        // The listener needs a moment to be assigned a port before there is
+        // anything to put in the code.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self else { return }
+            guard let url = server.pairingURL() else {
+                self.presentInternalCommandError(
+                    title: "Could Not Start Pairing",
+                    message: "The Command Center server didn't come up. Check that trm is allowed "
+                        + "to accept incoming connections in System Settings → Network → Firewall.")
+                return
+            }
+
+            let alert = NSAlert()
+            alert.messageText = "Pair your iPhone"
+            alert.informativeText = "Open trm on your iPhone and scan this code. It carries this "
+                + "Mac's address, port \(server.port.map(String.init) ?? "?"), and a token.\n\n"
+                + "The phone can read the Command Center and type messages into the panes it "
+                + "lists — nothing else. Rotate the token to revoke every paired phone."
+            if let image = Self.qrImage(for: url, side: 220) {
+                alert.accessoryView = NSImageView(image: image)
+            }
+            alert.addButton(withTitle: "Done")
+            alert.addButton(withTitle: "Rotate Token")
+            alert.addButton(withTitle: "Stop Serving")
+
+            let handler: (NSApplication.ModalResponse) -> Void = { response in
+                switch response {
+                case .alertSecondButtonReturn:
+                    server.rotateToken()
+                    self.pairIPhoneAction(nil)
+                case .alertThirdButtonReturn:
+                    server.stop()
+                default:
+                    break
+                }
+            }
+            if let window = self.window {
+                alert.beginSheetModal(for: window, completionHandler: handler)
+            } else {
+                handler(alert.runModal())
+            }
+        }
+    }
+
+    /// A QR code for `url`, sized for a dialog.
+    static func qrImage(for url: URL, side: CGFloat) -> NSImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(url.absoluteString.utf8), forKey: "inputMessage")
+        // Medium correction: the payload is short, and a denser code is
+        // harder for a phone to read across a desk.
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage else { return nil }
+        let scale = side / output.extent.width
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let rep = NSCIImageRep(ciImage: scaled)
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+        return image
+    }
+
+    @IBAction func toggleSidebarAction(_ sender: Any?) {
+        toggleSidebar()
+    }
+
+    @IBAction func sendPaneToSidebarAction(_ sender: Any?) {
+        sendFocusedPaneToSidebar()
+    }
+
     @IBAction func newRow(_ sender: Any?) {
         guard let surface = focusedSurface?.surface else { return }
         ghostty.split(surface: surface, direction: GHOSTTY_SPLIT_DIRECTION_DOWN)
@@ -7175,6 +7831,15 @@ extension BaseTerminalController: NSMenuItemValidation {
         switch item.action {
         case #selector(findHide):
             return focusedSurface?.searchState != nil
+
+        case #selector(toggleSidebarAction(_:)):
+            // The shelf only exists when something is on it, and the title
+            // names what the item will do rather than what is showing.
+            item.title = sidebarIsShowing ? "Hide Sidebar" : "Show Sidebar"
+            return !sidebarPanes.isEmpty
+
+        case #selector(sendPaneToSidebarAction(_:)):
+            return gridPanes.count > 1 && !isLayoutEditingDisabled
 
         default:
             return true

@@ -800,6 +800,9 @@ final class Trm {
         var overviewFontFamily: String?
         /// For stack host panes: sub-pane height fractions of the stack cell.
         var stackFractions: [Double]?
+        /// True when this pane is parked in the window's sidebar: it keeps
+        /// running but is not laid out in the grid, so it claims no cell.
+        var sidebar: Bool = false
     }
 
     /// Grid layout config from termania.toml.
@@ -825,6 +828,10 @@ final class Trm {
         /// Per-row column width fractions ([grid] col_fractions, rows joined
         /// by ';'). Empty = equal columns.
         var colFractions: [[Double]] = []
+        /// Width of the pane sidebar in points ([grid] sidebar_width).
+        var sidebarWidth: Double?
+        /// Whether the sidebar shelf was open when the layout was saved.
+        var sidebarOpen: Bool = false
     }
 
     /// Read grid/session config from a specific config file path.
@@ -878,6 +885,7 @@ final class Trm {
             if let sf = extras[i].stackFractions {
                 config.panes[i].stackFractions = sf
             }
+            config.panes[i].sidebar = extras[i].sidebar
         }
 
         // Layout-sync extras: top-level window identity keys and [grid]
@@ -888,6 +896,8 @@ final class Trm {
         config.layoutMirror = layoutExtras.layoutMirror
         config.rowFractions = layoutExtras.rowFractions
         config.colFractions = layoutExtras.colFractions
+        config.sidebarWidth = layoutExtras.sidebarWidth
+        config.sidebarOpen = layoutExtras.sidebarOpen
 
         return config
     }
@@ -899,6 +909,8 @@ final class Trm {
         var layoutMirror: Bool = false
         var rowFractions: [Double] = []
         var colFractions: [[Double]] = []
+        var sidebarWidth: Double?
+        var sidebarOpen: Bool = false
     }
 
     /// Parse top-level layout-sync keys (window_id, text_tap_socket,
@@ -935,6 +947,17 @@ final class Trm {
                 } else if trimmed.hasPrefix("col_fractions") {
                     if let value = parseTomlStringValue(trimmed) {
                         extras.colFractions = value.components(separatedBy: ";").map(parseFractionList)
+                    }
+                } else if trimmed.hasPrefix("sidebar_width") {
+                    if let eqIdx = trimmed.firstIndex(of: "=") {
+                        extras.sidebarWidth = Double(
+                            trimmed[trimmed.index(after: eqIdx)...]
+                                .trimmingCharacters(in: .whitespaces))
+                    }
+                } else if trimmed.hasPrefix("sidebar_open") {
+                    if let eqIdx = trimmed.firstIndex(of: "=") {
+                        extras.sidebarOpen = trimmed[trimmed.index(after: eqIdx)...]
+                            .trimmingCharacters(in: .whitespaces) == "true"
                     }
                 }
             }
@@ -1043,6 +1066,7 @@ final class Trm {
         var stackFractions: [Double]?
         var remoteHost: String?
         var remoteSession: String?
+        var sidebar: Bool = false
     }
 
     /// Parse stack_group values from a TOML file.
@@ -1121,6 +1145,12 @@ final class Trm {
             } else if trimmed.hasPrefix("stack_fractions") {
                 if let value = parseTomlStringValue(trimmed) {
                     current?.stackFractions = parseFractionList(value)
+                }
+            } else if trimmed.hasPrefix("sidebar") {
+                if let eqIdx = trimmed.firstIndex(of: "=") {
+                    let raw = trimmed[trimmed.index(after: eqIdx)...]
+                        .trimmingCharacters(in: .whitespaces)
+                    current?.sidebar = (raw == "true")
                 }
             }
         }

@@ -9,12 +9,21 @@ final class SessionBrowserModel: ObservableObject {
     /// A window's worth of sessions, resolved for display.
     struct Group: Identifiable {
         let name: String
-        /// Session TOML path, or nil for the ungrouped bucket.
+        /// Session TOML path, or nil for the ungrouped bucket and for remote
+        /// hosts (whose layouts are saved on the machine they run on).
         let path: String?
         let isOrphanGroup: Bool
+        /// SSH destination this group's sessions live on, or nil for local.
+        let remoteHost: String?
+        /// Why a remote host listed nothing, when that is worth saying.
+        let error: String?
         let sessions: [ZmxSessionManager.SessionInfo]
 
-        var id: String { path ?? "__orphans__" }
+        var id: String { remoteHost.map { "remote:\($0)" } ?? path ?? "__orphans__" }
+
+        /// Whether the group's whole layout can be restored in one go. Only a
+        /// saved TOML describes an arrangement; a bag of sessions doesn't.
+        var canOpenAsWindow: Bool { path != nil }
     }
 
     @Published private(set) var groups: [Group] = []
@@ -55,6 +64,10 @@ final class SessionBrowserModel: ObservableObject {
     func reload() {
         guard !isLoading else { return }
         isLoading = true
+
+        // Collected on the main actor (Bonjour state and UserDefaults live
+        // here) and handed to the detached probe.
+        let remoteHosts = Self.candidateRemoteHosts()
 
         let layout = ZmxSessionManager.sessionGroups()
         let names = layout.flatMap(\.sessionNames)
@@ -102,10 +115,64 @@ final class SessionBrowserModel: ObservableObject {
                     name: group.name,
                     path: group.path,
                     isOrphanGroup: group.isOrphanGroup,
+                    remoteHost: nil,
+                    error: nil,
                     sessions: sessions
                 )
             }
+
+            // Remote hosts are an SSH round trip each — seconds, not
+            // milliseconds — so they land *after* the local list is already on
+            // screen rather than holding the whole browser back.
+            guard !remoteHosts.isEmpty else { return }
+            let remote = await Task.detached(priority: .userInitiated) {
+                ZmxSessionManager.remoteSessionsConcurrently(hosts: remoteHosts)
+            }.value
+
+            // A pane this Mac has open on a remote session shows up as
+            // attached on the far side, so nothing extra is needed to mark it.
+            self.groups += remote.map { host in
+                Group(
+                    name: host.host,
+                    path: nil,
+                    isOrphanGroup: false,
+                    remoteHost: host.host,
+                    error: host.error,
+                    sessions: host.sessions
+                )
+            }
         }
+    }
+
+    /// Machines worth asking about their sessions.
+    ///
+    /// Bonjour alone isn't enough: a host reached over Tailscale or a VPN
+    /// never appears in a LAN service browse, but it is exactly the machine
+    /// whose sessions went missing when the link dropped. So the list is the
+    /// union of what's advertising, what saved windows have put panes on, and
+    /// the last address typed into the host prompt.
+    /// `expected` marks the machines this Mac has actually put panes on: those
+    /// are the ones whose absence needs explaining if the probe fails.
+    private static func candidateRemoteHosts() -> [(host: String, expected: Bool)] {
+        var hosts: [(host: String, expected: Bool)] = []
+        var seen: Set<String> = []
+        func add(_ host: String?, expected: Bool) {
+            guard let host, !host.isEmpty,
+                  BaseTerminalController.isValidRemoteHost(host),
+                  seen.insert(host.lowercased()).inserted else { return }
+            hosts.append((host: host, expected: expected))
+        }
+
+        for host in ZmxSessionManager.savedRemoteHosts() { add(host, expected: true) }
+        add(UserDefaults.standard.string(
+            forKey: BaseTerminalController.lastRemoteHostDefaultsKey), expected: true)
+        for host in RemoteHostDiscovery.shared.hosts {
+            add(host.sshDestination, expected: false)
+        }
+
+        // Every host costs a connect timeout when it's down, and the browser
+        // is meant to feel like a list, not a network scan.
+        return Array(hosts.prefix(8))
     }
 
     // MARK: - Actions
@@ -117,7 +184,9 @@ final class SessionBrowserModel: ObservableObject {
     /// both — so an already-attached session must be *revealed*, never reopened.
     private func existingController(for name: String) -> BaseTerminalController? {
         TerminalController.all.first { controller in
-            controller.surfaceTree.contains { $0.zmxSessionName == name }
+            controller.surfaceTree.contains {
+                $0.zmxSessionName == name || $0.remoteZmxSession == name
+            }
         }
     }
 
@@ -224,11 +293,21 @@ final class SessionBrowserModel: ObservableObject {
 
         [[panes]]
         pane_type = "terminal"
-        zmx_session = \(Self.tomlQuote(session.name))
 
         """
-        if let cwd = session.cwd, !cwd.isEmpty, cwd != "/" {
-            toml += "cwd = \(Self.tomlQuote(cwd))\n"
+        if let host = session.remoteHost {
+            // A remote pane is described by where it runs, not by a local
+            // socket — the restore path rebuilds the `ssh … zmx attach` for it.
+            toml += "remote_host = \(Self.tomlQuote(host))\n"
+            toml += "remote_session = \(Self.tomlQuote(session.name))\n"
+            // `cwd` is deliberately omitted: it names a directory on the other
+            // machine, and setting it here would point the local surface at a
+            // path that may not exist.
+        } else {
+            toml += "zmx_session = \(Self.tomlQuote(session.name))\n"
+            if let cwd = session.cwd, !cwd.isEmpty, cwd != "/" {
+                toml += "cwd = \(Self.tomlQuote(cwd))\n"
+            }
         }
 
         do {
@@ -358,12 +437,18 @@ final class SessionBrowserModel: ObservableObject {
 
         let handler: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
-            for session in group.sessions {
+            let remote = group.sessions.compactMap { session in
+                session.remoteHost.map { (name: session.name, host: $0) }
+            }
+            for session in group.sessions where session.remoteHost == nil {
                 ZmxSessionManager.killSession(session.name)
             }
-            Task {
+            Task.detached(priority: .userInitiated) {
+                for entry in remote {
+                    ZmxSessionManager.killRemoteSession(entry.name, host: entry.host)
+                }
                 try? await Task.sleep(for: .milliseconds(300))
-                self.reload()
+                await MainActor.run { self.reload() }
             }
         }
 
@@ -375,14 +460,24 @@ final class SessionBrowserModel: ObservableObject {
     }
 
     private func terminate(_ session: ZmxSessionManager.SessionInfo) {
-        ZmxSessionManager.killSession(session.name)
-
         // Drop the generated config so a killed session can't be resurrected
         // by a stale file.
         let url = SessionManager.sessionsDirectory
             .appendingPathComponent("_browser_\(session.name).toml")
         try? FileManager.default.removeItem(at: url)
 
+        if let host = session.remoteHost {
+            // Killing over SSH is a round trip: run it off the main thread and
+            // refresh once it has actually happened, not on a guessed delay.
+            let name = session.name
+            Task.detached(priority: .userInitiated) {
+                ZmxSessionManager.killRemoteSession(name, host: host)
+                await MainActor.run { self.reload() }
+            }
+            return
+        }
+
+        ZmxSessionManager.killSession(session.name)
         // Killing is asynchronous in the daemon; give it a moment before the
         // list is rescanned so the socket is actually gone.
         Task {

@@ -15,6 +15,15 @@ struct AgentOverviewView: View {
     var isPeeked = false
     var onClose: ((AgentOverviewPane) -> Void)? = nil
 
+    /// Send a reply to the agent this overview is reading. Absent in contexts
+    /// with no terminal to type into (the mirror's read-only overviews).
+    var onSendMessage: ((AgentOverviewPane, String) -> Void)? = nil
+
+    /// What the user is composing, and a brief confirmation after sending.
+    @State private var draft: String = ""
+    @State private var didSend = false
+    @FocusState private var draftFocused: Bool
+
     /// Whether body text can be selected with the mouse. Off in a grid cell,
     /// where the overview is a preview and a plain click means "peek this" —
     /// selectable text would swallow those clicks. On in the peek overlay,
@@ -67,11 +76,69 @@ struct AgentOverviewView: View {
                 Divider().opacity(0.5)
             }
             scrollBody
+            if onSendMessage != nil {
+                Divider().opacity(0.5)
+                composer
+            }
         }
         // Darker than the standard text background: the overview sits beside
         // terminals, and matching their darker ground keeps the eye from
         // treating it as a bright document panel in a dark workspace.
         .background(terminalBackground)
+    }
+
+    /// Reply to the agent without leaving the overview.
+    ///
+    /// The text is typed into the pane's terminal exactly as if the user had
+    /// typed it, so it lands in whatever the agent's input box is — no
+    /// assumption about which agent is running, and anything the agent does
+    /// with a pasted line (slash commands included) still works.
+    private var composer: some View {
+        HStack(spacing: 8) {
+            TextField(didSend ? "Sent" : "Reply to the agent…", text: $draft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...5)
+                .font(readingFont(12.5))
+                .focused($draftFocused)
+                .onSubmit(send)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.primary.opacity(draftFocused ? 0.22 : 0.10))
+                )
+
+            Button(action: send) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 19))
+                    .foregroundStyle(draftIsEmpty ? Color.secondary.opacity(0.4) : .accentColor)
+            }
+            .buttonStyle(.plain)
+            .disabled(draftIsEmpty)
+            .help("Send to the agent (Return)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+
+    private var draftIsEmpty: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func send() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let onSendMessage else { return }
+        onSendMessage(pane, text)
+        draft = ""
+        didSend = true
+        // The placeholder does the confirming; nothing else changes, because
+        // the agent's own transcript is the real receipt and it arrives on the
+        // next poll.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { didSend = false }
     }
 
     private var scrollBody: some View {

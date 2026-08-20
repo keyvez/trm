@@ -117,6 +117,21 @@ protocol TerminalViewModel: ObservableObject {
 
     /// Remote panes whose SSH link died; the grid overlays a Reconnect button.
     var disconnectedRemotePaneIds: Set<Int> { get }
+
+    /// Panes parked in the sidebar: running, but not laid out in the grid.
+    var sidebarTiles: [GridPane] { get }
+
+    /// Whether the sidebar shelf is expanded rather than collapsed to its rail.
+    var sidebarIsShowing: Bool { get }
+
+    /// Whether the Command Center panel is open along the window's edge.
+    var commandCenterIsShowing: Bool { get }
+
+    /// Width of the Command Center panel in points.
+    var commandCenterWidth: CGFloat { get }
+
+    /// Width of the expanded sidebar shelf in points.
+    var sidebarWidth: CGFloat { get }
 }
 
 /// The main terminal view. This terminal view supports splits.
@@ -162,6 +177,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         DebugBuildWarningView()
                     }
 
+                    HStack(spacing: 0) {
                     TrmGridView(
                         panes: viewModel.gridPanes,
                         rowCols: viewModel.gridRowCols,
@@ -193,6 +209,15 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         onCloseAgentOverview: { pane in
                             (self.delegate as? BaseTerminalController)?.closeAgentOverview(pane)
                         },
+                        onSendToAgent: { overviewPane, text in
+                            guard let surface = overviewPane.surface else { return }
+                            (self.delegate as? BaseTerminalController)?
+                                .sendMessageToSurface(surface, text: text)
+                        },
+                        onSendToPaneAgent: { surface, text in
+                            (self.delegate as? BaseTerminalController)?
+                                .sendMessageToSurface(surface, text: text)
+                        },
                         hasAgentOverview: { pane in
                             (self.delegate as? BaseTerminalController)?.hasAgentOverview(for: pane) ?? false
                         },
@@ -218,6 +243,9 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         },
                         onUnstackPane: { pane in
                             (self.delegate as? BaseTerminalController)?.unstackPane(pane)
+                        },
+                        onSendPaneToSidebar: { pane in
+                            (self.delegate as? BaseTerminalController)?.sendPaneToSidebar(pane)
                         },
                         onMoveSubPane: { pane, up in
                             (self.delegate as? BaseTerminalController)?.moveSubPane(pane, up: up)
@@ -282,6 +310,10 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         }
                         .frame(idealWidth: lastFocusedSurface.value?.initialSize?.width,
                                idealHeight: lastFocusedSurface.value?.initialSize?.height)
+
+                    sidebar
+                    commandCenterPanel
+                    }
                 }
                 // Ignore safe area to extend up in to the titlebar region if we have the "hidden" titlebar style
                 .ignoresSafeArea(.container, edges: ghostty.config.macosTitlebarStyle == "hidden" ? .top : [])
@@ -350,6 +382,142 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
             }
             .frame(maxWidth: .greatestFiniteMagnitude, maxHeight: .greatestFiniteMagnitude)
         }
+    }
+
+    /// Mirrors `CommandCenterView`'s own key so the header toggle and the list
+    /// stay in step; @AppStorage on both sides is the same defaults value.
+    @AppStorage("CommandCenterBriefingMode") private var commandCenterBriefingMode = false
+
+    /// The Command Center panel: every running agent's current message, along
+    /// the window's trailing edge.
+    ///
+    /// Outermost in the row, past the parked-pane shelf: the shelf belongs to
+    /// this window's layout, while this is a view across every window, so it
+    /// reads as the outer frame rather than part of the grid.
+    @ViewBuilder
+    private var commandCenterPanel: some View {
+        if viewModel.commandCenterIsShowing {
+            SidebarResizeHandle { delta in
+                guard let controller = delegate as? BaseTerminalController else { return }
+                controller.setCommandCenterWidth(controller.commandCenterWidth - delta)
+            }
+
+            VStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: "list.bullet.rectangle")
+                        .foregroundStyle(.secondary)
+                    Text("Command Center")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    // Briefing mode lives in the header rather than a menu:
+                    // it's a way of reading the same board, switched as often
+                    // as the work changes shape.
+                    Toggle(isOn: $commandCenterBriefingMode) {
+                        Image(systemName: "target")
+                            .font(.system(size: 11))
+                    }
+                    .toggleStyle(.button)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(commandCenterBriefingMode ? Color.accentColor : .secondary)
+                    .help("Briefing mode — one sentence per agent, sized to act on")
+                    Button {
+                        (delegate as? BaseTerminalController)?.commandCenterIsShowing = false
+                    } label: {
+                        Image(systemName: "sidebar.right")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Hide Command Center (⌘⇧A)")
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+
+                Divider().opacity(0.5)
+
+                CommandCenterView(onSendToPane: { surface, text in
+                    (delegate as? BaseTerminalController)?.sendMessageToSurface(surface, text: text)
+                })
+            }
+            .frame(width: viewModel.commandCenterWidth)
+            .background(.background.opacity(0.35))
+            .transition(.move(edge: .trailing))
+        }
+    }
+
+    /// The parked-pane shelf, to the right of the grid.
+    ///
+    /// It collapses to a narrow rail rather than disappearing: a pane that is
+    /// still running must never be invisible with no way back to it. Nothing
+    /// is drawn at all when nothing is parked.
+    @ViewBuilder
+    private var sidebar: some View {
+        if !viewModel.sidebarTiles.isEmpty {
+            if viewModel.sidebarIsShowing {
+                SidebarResizeHandle { delta in
+                    guard let controller = delegate as? BaseTerminalController else { return }
+                    controller.sidebarWidth = min(max(controller.sidebarWidth - delta, 180), 520)
+                }
+
+                SidebarPanesView(
+                    panes: viewModel.sidebarTiles,
+                    attentionPaneIds: viewModel.attentionPaneIds,
+                    onRestore: { pane in
+                        (delegate as? BaseTerminalController)?.restorePaneFromSidebar(pane.id)
+                    },
+                    onClose: { pane in
+                        (delegate as? BaseTerminalController)?.closeSidebarPane(pane)
+                    },
+                    onRestoreAll: {
+                        (delegate as? BaseTerminalController)?.restoreAllPanesFromSidebar()
+                    },
+                    onCollapse: {
+                        (delegate as? BaseTerminalController)?.sidebarIsShowing = false
+                    }
+                )
+                .frame(width: viewModel.sidebarWidth)
+                .transition(.move(edge: .trailing))
+            } else {
+                SidebarRailView(
+                    count: viewModel.sidebarTiles.count,
+                    needsAttention: viewModel.sidebarTiles.contains { pane in
+                        guard let id = pane.firstTerminalSurface?.paneId else { return false }
+                        return viewModel.attentionPaneIds.contains(id)
+                    },
+                    onExpand: {
+                        (delegate as? BaseTerminalController)?.sidebarIsShowing = true
+                    }
+                )
+                .padding(.trailing, 4)
+            }
+        }
+    }
+}
+
+/// The draggable seam between the grid and the sidebar shelf. Reports the
+/// horizontal drag delta; the controller clamps and applies it.
+private struct SidebarResizeHandle: View {
+    let onDrag: (CGFloat) -> Void
+
+    @State private var lastTranslation: CGFloat = 0
+
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.5))
+            .frame(width: 1)
+            .padding(.horizontal, 2)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        onDrag(value.translation.width - lastTranslation)
+                        lastTranslation = value.translation.width
+                    }
+                    .onEnded { _ in lastTranslation = 0 }
+            )
     }
 }
 

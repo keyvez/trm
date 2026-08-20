@@ -115,17 +115,37 @@ private struct GroupSection: View {
         return "\(n) pane\(n == 1 ? "" : "s")"
     }
 
+    private var headerIcon: String {
+        if group.remoteHost != nil { return "network" }
+        return group.isOrphanGroup ? "questionmark.square.dashed" : "macwindow"
+    }
+
+    private var headerTitle: String {
+        if let host = group.remoteHost { return host }
+        return group.isOrphanGroup ? "Ungrouped" : group.name
+    }
+
+    private var headerSubtitle: String? {
+        if let error = group.error { return error }
+        if group.remoteHost != nil {
+            return "Running on another machine. Opening one attaches over SSH; "
+                + "the work never stopped."
+        }
+        if group.isOrphanGroup {
+            return "Running, but no saved window refers to them."
+        }
+        return nil
+    }
+
     /// Up to three columns, but never more columns than panes — a two-pane
     /// window shouldn't leave a third of the row empty.
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: group.isOrphanGroup
-                      ? "questionmark.square.dashed"
-                      : "macwindow")
+                Image(systemName: headerIcon)
                     .foregroundStyle(.secondary)
 
-                Text(group.isOrphanGroup ? "Ungrouped" : group.name)
+                Text(headerTitle)
                     .font(.system(size: 13, weight: .semibold))
 
                 Text(paneCount)
@@ -134,14 +154,19 @@ private struct GroupSection: View {
 
                 Spacer()
 
-                if !group.isOrphanGroup {
+                // Only a saved TOML describes an arrangement, so only those
+                // groups can come back as a window; the rest open pane by pane.
+                if group.canOpenAsWindow {
                     Button("Open Window", action: onOpenGroup)
                 }
-                Button("Terminate All", role: .destructive, action: onTerminateGroup)
+                // A host that couldn't be reached has nothing to act on.
+                if !group.sessions.isEmpty {
+                    Button("Terminate All", role: .destructive, action: onTerminateGroup)
+                }
             }
 
-            if group.isOrphanGroup {
-                Text("Running, but no saved window refers to them.")
+            if let subtitle = headerSubtitle {
+                Text(subtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }

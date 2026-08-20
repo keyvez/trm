@@ -899,36 +899,88 @@ struct AgentSessionLocatorTests {
         #expect(AgentSessionLocator.kind(forProcessName: "claude-helper") == nil)
     }
 
+    /// Helper: a candidate born at `born` and still being written at `mod`,
+    /// both relative to the process start.
+    private func candidate(
+        _ name: String, born: TimeInterval, modified: TimeInterval, from started: Date
+    ) -> AgentSessionLocator.Candidate {
+        .init(
+            url: URL(fileURLWithPath: "/t/\(name)"),
+            born: started.addingTimeInterval(born),
+            modified: started.addingTimeInterval(modified))
+    }
+
     @Test func birthTimeCorrelationPicksThisProcessSession() {
         // Mirrors the observed disambiguation case: two Claude sessions share
         // one cwd. The pane's process started at T; its transcript was born
         // T+2m; the other session's file was born a month earlier. Agents
         // don't hold transcripts open, so this correlation is the binding.
         let started = Date(timeIntervalSince1970: 1_000_000)
-        let old = (URL(fileURLWithPath: "/t/old.jsonl"), started.addingTimeInterval(-3_000_000))
-        let mine = (URL(fileURLWithPath: "/t/mine.jsonl"), started.addingTimeInterval(140))
-        let later = (URL(fileURLWithPath: "/t/later.jsonl"), started.addingTimeInterval(90_000))
+        let now = started.addingTimeInterval(100_000)
+        let old = candidate("old.jsonl", born: -3_000_000, modified: 95_000, from: started)
+        let mine = candidate("mine.jsonl", born: 140, modified: 99_000, from: started)
+        let later = candidate("later.jsonl", born: 90_000, modified: 99_500, from: started)
         let pick = AgentSessionLocator.selectTranscript(
-            startedAt: started, slack: 30, candidates: [later, old, mine])
-        #expect(pick?.0.lastPathComponent == "mine.jsonl")
+            startedAt: started, slack: 30, now: now, candidates: [later, old, mine])
+        #expect(pick?.url.lastPathComponent == "mine.jsonl")
     }
 
     @Test func noCandidateBornAfterStartMeansNoMatch() {
         // A resumed session reuses an old file — correlation must miss and let
         // the caller fall back rather than guessing.
         let started = Date(timeIntervalSince1970: 1_000_000)
-        let old = (URL(fileURLWithPath: "/t/old.jsonl"), started.addingTimeInterval(-86_400))
+        let now = started.addingTimeInterval(10_000)
+        let old = candidate("old.jsonl", born: -86_400, modified: 9_000, from: started)
         let pick = AgentSessionLocator.selectTranscript(
-            startedAt: started, slack: 30, candidates: [old])
+            startedAt: started, slack: 30, now: now, candidates: [old])
         #expect(pick == nil)
     }
 
     @Test func slackToleratesFileBornJustBeforeProcessClock() {
         let started = Date(timeIntervalSince1970: 1_000_000)
-        let justBefore = (URL(fileURLWithPath: "/t/j.jsonl"), started.addingTimeInterval(-10))
+        let now = started.addingTimeInterval(600)
+        let justBefore = candidate("j.jsonl", born: -10, modified: 500, from: started)
         let pick = AgentSessionLocator.selectTranscript(
-            startedAt: started, slack: 30, candidates: [justBefore])
-        #expect(pick?.0.lastPathComponent == "j.jsonl")
+            startedAt: started, slack: 30, now: now, candidates: [justBefore])
+        #expect(pick?.url.lastPathComponent == "j.jsonl")
+    }
+
+    @Test func ignoresTranscriptNotWrittenSinceProcessStarted() {
+        // The exact shape that broke remote overviews: a stub born 13 s before
+        // the agent launched, written for ten seconds, untouched for hours.
+        // Birth alone accepts it (inside the slack) and it wins on earliest
+        // birth, so the pane streamed a dead 32 KB file while the real
+        // conversation grew beside it.
+        let started = Date(timeIntervalSince1970: 1_000_000)
+        let now = started.addingTimeInterval(16_000)
+        let stub = candidate("stub.jsonl", born: -13, modified: -3, from: started)
+        let live = candidate("live.jsonl", born: 240, modified: 15_900, from: started)
+        let pick = AgentSessionLocator.selectTranscript(
+            startedAt: started, slack: 30, now: now, candidates: [stub, live])
+        #expect(pick?.url.lastPathComponent == "live.jsonl")
+    }
+
+    @Test func prefersActiveSessionOverAbandonedStubBornEarlier() {
+        // Both were born after the agent started, but one got ten seconds of
+        // writes hours ago and the other is still growing.
+        let started = Date(timeIntervalSince1970: 1_000_000)
+        let now = started.addingTimeInterval(30_000)
+        let stub = candidate("stub.jsonl", born: 100, modified: 110, from: started)
+        let live = candidate("live.jsonl", born: 5_000, modified: 29_900, from: started)
+        let pick = AgentSessionLocator.selectTranscript(
+            startedAt: started, slack: 30, now: now, candidates: [stub, live])
+        #expect(pick?.url.lastPathComponent == "live.jsonl")
+    }
+
+    @Test func keepsShortSessionWhenItIsTheOnlyCandidate() {
+        // A genuinely brief session the user left idle still belongs to this
+        // pane — the stub rule only breaks ties, it never empties the pool.
+        let started = Date(timeIntervalSince1970: 1_000_000)
+        let now = started.addingTimeInterval(30_000)
+        let brief = candidate("brief.jsonl", born: 10, modified: 40, from: started)
+        let pick = AgentSessionLocator.selectTranscript(
+            startedAt: started, slack: 30, now: now, candidates: [brief])
+        #expect(pick?.url.lastPathComponent == "brief.jsonl")
     }
 
     @Test func transcriptPathsMatchPerAgent() {

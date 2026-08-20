@@ -259,6 +259,22 @@ struct TerminalCommandPaletteView: View {
         })
 
         options.append(CommandOption(
+            title: "Send Pane to Sidebar",
+            description: "Park this pane in the sidebar — it keeps running, it just stops taking up the grid",
+            leadingIcon: "rectangle.righthalf.inset.filled.arrow.right"
+        ) {
+            onAction("trm.sidebar_pane")
+        })
+
+        options.append(CommandOption(
+            title: "Toggle Sidebar",
+            description: "Show or hide the shelf of panes that are running out of sight",
+            leadingIcon: "sidebar.squares.right"
+        ) {
+            onAction("trm.sidebar")
+        })
+
+        options.append(CommandOption(
             title: "Create Extension...",
             description: "Describe an extension in plain language and have the LLM build and install it",
             leadingIcon: "wand.and.stars"
@@ -288,6 +304,22 @@ struct TerminalCommandPaletteView: View {
             leadingIcon: "trash"
         ) {
             onAction("trm.clear_autosave")
+        })
+
+        options.append(CommandOption(
+            title: "Install Agent Session Hook",
+            description: "Let agents tell trm which transcript belongs to which pane",
+            leadingIcon: "link"
+        ) {
+            onAction("trm.install_agent_hook")
+        })
+
+        options.append(CommandOption(
+            title: "Add Command Center Pane",
+            description: "One list of what every running agent is saying",
+            leadingIcon: "list.bullet.rectangle"
+        ) {
+            onAction("trm.add_pane command_center")
         })
 
         options.append(CommandOption(
@@ -535,6 +567,12 @@ struct TerminalCommandPaletteView: View {
                 insertion: "trm.clear_autosave",
                 subtitle: "Delete all auto-saved session files",
                 description: "Removes all _autosave_* files from the sessions directory. The next launch will start fresh."
+            ),
+            CommandAutocompleteOption(
+                label: "trm.install_agent_hook",
+                insertion: "trm.install_agent_hook",
+                subtitle: "Bind panes to agent transcripts exactly",
+                description: "Installs a Claude Code SessionStart hook that records which transcript each pane's agent is writing, so the Agent Overview stops inferring it from file timestamps. Offers to install on the machines your remote panes run on too."
             ),
         ]
     }

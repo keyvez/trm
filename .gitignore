@@ -28,3 +28,6 @@ trm-*.zip
 
 # Investigation sample dumps (large, regenerable with `sample <pid>`)
 .trm-debug/*.txt
+
+# iOS app build output
+ios/build/

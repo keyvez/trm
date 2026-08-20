@@ -9,6 +9,8 @@ struct HelpPanelView: View {
             ("\u{2318}N", "New Pane (right)"),
             ("\u{2318}\u{21E7}T", "New Row (below)"),
             ("\u{2318}W", "Close Pane"),
+            ("\u{2318}\u{2303}H", "Send Pane to Sidebar"),
+            ("\u{2318}\u{2303}S", "Show Sidebar"),
         ]),
         ("Navigation", [
             ("\u{2318}\u{21E7}\u{2190}", "Focus Left"),
