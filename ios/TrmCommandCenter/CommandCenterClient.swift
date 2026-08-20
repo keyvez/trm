@@ -173,7 +173,14 @@ final class CommandCenterClient: ObservableObject {
         guard let pairing else { state = .idle; return }
         let candidates = pairing.hosts.isEmpty ? [pairing.host] : pairing.hosts
         guard candidateIndex < candidates.count else {
-            state = .failed("Couldn't reach \(pairing.name) at any of its addresses.")
+            // Name every endpoint that was dialled. "Couldn't reach it" sends
+            // you to check the Mac; "couldn't reach it at 100.93.182.104:51735"
+            // tells you whether the phone is even aiming at the right machine
+            // and port, which is the actual question when pairing goes stale.
+            let tried = candidates
+                .map { "\($0):\(pairing.port)" }
+                .joined(separator: "\n")
+            state = .failed("Couldn't reach \(pairing.name). Tried:\n\(tried)")
             candidateIndex = 0
             scheduleReconnect()
             return
@@ -220,8 +227,14 @@ final class CommandCenterClient: ObservableObject {
                     break
                 case .waiting(let error):
                     // Still trying; the timeout above moves on if it stays
-                    // stuck.
-                    self.state = .failed(error.localizedDescription)
+                    // stuck. The endpoint goes in the message because this is
+                    // where "Connection refused" (POSIX 61) surfaces, and a
+                    // refusal without an address can't be acted on — it is
+                    // equally consistent with the right Mac not listening and
+                    // with the phone holding a stale port from an old pairing.
+                    self.state = .failed(
+                        "\(error.localizedDescription)\n\(candidate):\(pairing.port)"
+                    )
                 default:
                     break
                 }
@@ -284,7 +297,9 @@ final class CommandCenterClient: ObservableObject {
                     }
                 }
                 if isComplete || error != nil {
-                    self.state = .failed(error?.localizedDescription ?? "Disconnected")
+                    let reason = error?.localizedDescription ?? "Disconnected"
+                    let endpoint = self.pairing.map { "\n\($0.host):\($0.port)" } ?? ""
+                    self.state = .failed(reason + endpoint)
                     self.scheduleReconnect()
                     return
                 }

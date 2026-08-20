@@ -70,10 +70,15 @@ struct BoardView: View {
                     .foregroundStyle(.secondary)
                 Text("Can't reach your Mac")
                     .font(.headline)
+                // Monospaced because the second line is an address: at
+                // footnote size, telling 51735 from 51733 in a proportional
+                // face is exactly the comparison this screen exists to let
+                // you make.
                 Text(message)
-                    .font(.footnote)
+                    .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
                 Button("Try Again") { client.connect() }
                     .buttonStyle(.bordered)
             } else {

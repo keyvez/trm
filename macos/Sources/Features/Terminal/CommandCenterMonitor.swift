@@ -656,18 +656,46 @@ final class CommandCenterMonitor: ObservableObject {
 
     /// The opening sentence of a message, capped so a briefing stays one line
     /// rather than a paragraph.
+    ///
+    /// The lines are walked before they are joined, because three of the four
+    /// things that end a thought can only be recognised while they are still
+    /// lines: a heading, a trailing colon, and a blank line. Flattening first
+    /// and then hunting for a full stop is what made "Three things, all built
+    /// and verified:" come out as "Three things, all built and verified: ##
+    /// 1." — the stop it found belonged to a numbered heading two lines down.
     nonisolated static func firstSentence(of text: String, limit: Int = 160) -> String {
-        let flat = withoutInlineMarkdown(text)
-            .replacingOccurrences(of: "\n", with: " ")
+        var pieces: [String] = []
+        var closed = false
+
+        for raw in text.components(separatedBy: .newlines) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            // A blank line after something is a paragraph break, and the
+            // paragraph that just ended is the summary.
+            guard !trimmed.isEmpty else {
+                if !pieces.isEmpty { closed = true; break }
+                continue
+            }
+            let isHeading = trimmed.hasPrefix("#")
+            let line = withoutLeadingBlockMarkdown(trimmed)
+            guard !line.isEmpty else { continue }
+            pieces.append(line)
+            // A heading is a complete thought on its own, and a line ending
+            // in a colon is the lead-in to a list — which is exactly the
+            // sentence a briefing wants, and exactly the one that gets
+            // swallowed if the scan runs on into the list's first item. The
+            // colon has to be tested here rather than after joining, since a
+            // colon *inside* a line ("Fixed: the retry loop") introduces the
+            // rest of that line instead of ending it.
+            if isHeading || line.hasSuffix(":") { closed = true; break }
+        }
+
+        let flat = withoutInlineMarkdown(pieces.joined(separator: " "))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !flat.isEmpty else { return "" }
 
         var sentence = flat
-        if let end = flat.firstIndex(where: { ".!?".contains($0) }) {
-            let candidate = String(flat[...end])
-            // A "sentence" that ends after a few characters is an abbreviation
-            // or a version number, not a sentence.
-            if candidate.count > 12 { sentence = candidate }
+        if !closed, let end = sentenceEnd(in: flat) {
+            sentence = String(flat[...end])
         }
         guard sentence.count > limit else { return sentence }
         let cut = sentence.prefix(limit)
@@ -675,6 +703,52 @@ final class CommandCenterMonitor: ObservableObject {
             return String(cut[..<space]) + "…"
         }
         return String(cut) + "…"
+    }
+
+    /// Block-level markdown at the head of a line: heading hashes and
+    /// blockquote carets.
+    ///
+    /// Separate from `withoutInlineMarkdown` because these can only be
+    /// identified by their position — once the lines are joined there is no
+    /// start-of-line left to recognise them by, and a stray `#` mid-sentence
+    /// is a channel name or an issue number, not markup.
+    nonisolated static func withoutLeadingBlockMarkdown(_ line: String) -> String {
+        var rest = Substring(line)
+        while let first = rest.first, first == "#" || first == ">" {
+            rest = rest.dropFirst()
+        }
+        return rest.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Where the first sentence ends, or nil when the text is one unbroken
+    /// run.
+    ///
+    /// A full stop alone isn't enough. Agents number things, and "1." puts a
+    /// stop wherever a list is — far enough into the text to clear any length
+    /// check, and still not the end of a sentence. A stop counts only when
+    /// what precedes it isn't a bare number and what follows it is a space or
+    /// the end of the text.
+    nonisolated static func sentenceEnd(in text: String) -> String.Index? {
+        var searchFrom = text.startIndex
+        while let stop = text[searchFrom...].firstIndex(where: { ".!?".contains($0) }) {
+            let after = text.index(after: stop)
+            let breaksAfter = after == text.endIndex || text[after] == " "
+            let head = text[..<stop]
+            // A "sentence" a few characters long is an abbreviation, not a
+            // sentence.
+            if breaksAfter, head.count > 12, !endsInNumber(head) { return stop }
+            guard after < text.endIndex else { return nil }
+            searchFrom = after
+        }
+        return nil
+    }
+
+    /// Whether a run ends in a bare number — `1`, `0.3`, `v2` — which makes a
+    /// stop after it an ordinal or a version rather than a sentence end.
+    nonisolated static func endsInNumber(_ text: Substring) -> Bool {
+        guard let token = text.split(separator: " ").last, !token.isEmpty else { return false }
+        guard token.contains(where: { $0.isNumber }) else { return false }
+        return token.allSatisfy { $0.isNumber || $0 == "." || $0 == "v" || $0 == "#" }
     }
 
     // MARK: - Actions

@@ -357,6 +357,13 @@ struct CommandCenterView: View {
                         .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                         .tracking(0.8)
                         .foregroundStyle(status.color.opacity(0.9))
+                    // "Idle" is the state you most want to act on and the
+                    // one the colour bar says least about, so it gets the
+                    // only motion on the board: the dog has brought the
+                    // frisbee back and is waiting for the next throw.
+                    if status.isIdle {
+                        FetchIdleAnimation()
+                    }
                     Text(entry.kind.displayName)
                         .font(.system(size: 9.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(.tertiary)
@@ -483,6 +490,10 @@ struct CommandCenterView: View {
         /// How strongly the row is tinted. Only the states that want action
         /// get a wash; the rest stay quiet so the board reads at a glance.
         let emphasis: Double
+        /// Nothing in flight and nothing being asked: the pane has finished
+        /// and is waiting on you. The only state that gets the idle fidget,
+        /// because it is the only one a colour can't say out loud.
+        var isIdle: Bool = false
     }
 
     static func status(for entry: CommandCenterMonitor.Entry) -> Status {
@@ -495,7 +506,7 @@ struct CommandCenterView: View {
         if entry.isWorking {
             return Status(label: "working", color: .green, emphasis: 0.05)
         }
-        return Status(label: "idle", color: .secondary, emphasis: 0.03)
+        return Status(label: "idle", color: .secondary, emphasis: 0.03, isIdle: true)
     }
 
     /// The one extra line worth showing under the sentence, or nothing.
