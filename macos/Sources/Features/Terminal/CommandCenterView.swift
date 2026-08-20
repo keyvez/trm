@@ -206,7 +206,7 @@ struct CommandCenterView: View {
                 // The watermark is how the pane labels itself on screen, so
                 // it's the fastest way to map a row back to a cell.
                 Button {
-                    monitor.revealOverview(entry)
+                    monitor.reveal(entry)
                 } label: {
                     Text(entry.watermark)
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
@@ -217,7 +217,7 @@ struct CommandCenterView: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .help("Open this pane's Agent Overview")
+                .help("Go to this pane")
 
                 Text(entry.kind.displayName)
                     .font(.system(size: 10, weight: .medium, design: .rounded))
@@ -275,10 +275,10 @@ struct CommandCenterView: View {
             if NSEvent.modifierFlags.contains(.command) {
                 monitor.revealOverview(entry)
             } else {
-                monitor.reveal(entry)
+                focusedDraft = entry.id
             }
         }
-        .help("Click to go to this pane · ⌘-click for its Agent Overview · click the box to reply")
+        .help("Click to reply · ⌘-click for the Agent Overview · watermark to go to the pane")
         .modifier(CardChrome(
             fixedHeight: fixedHeight,
             composer: onSendToPane == nil ? nil : AnyView(composer(entry))
@@ -326,9 +326,15 @@ struct CommandCenterView: View {
             VStack(alignment: .leading, spacing: 5) {
                 VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
-                    Text(entry.watermark)
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundStyle(status.color)
+                    Button {
+                        monitor.reveal(entry)
+                    } label: {
+                        Text(entry.watermark)
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(status.color)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Go to this pane")
                     Text(status.label.uppercased())
                         .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                         .tracking(0.8)
@@ -376,10 +382,10 @@ struct CommandCenterView: View {
                     if NSEvent.modifierFlags.contains(.command) {
                         monitor.revealOverview(entry)
                     } else {
-                        monitor.reveal(entry)
+                        focusedDraft = entry.id
                     }
                 }
-                .help("Click to go to this pane · ⌘-click for its Agent Overview · click the box to reply")
+                .help("Click to reply · ⌘-click for the Agent Overview · watermark to go to the pane")
 
                 // Answering is the whole point of a board you read to decide
                 // what needs you: the quickest actions — "yes", "go ahead",
