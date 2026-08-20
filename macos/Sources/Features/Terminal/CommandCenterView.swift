@@ -369,7 +369,28 @@ struct CommandCenterView: View {
                     }
                 }
 
-                Text(monitor.briefings[entry.id] ?? CommandCenterMonitor.firstSentence(of: entry.message))
+                // What was done, above the conclusion it led to: read down
+                // the bullets to judge whether the sentence is the whole
+                // story, or skip them and take the sentence.
+                if !briefingBullets(entry).isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(briefingBullets(entry), id: \.self) { bullet in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text("•")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                                Text(bullet)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 1)
+                }
+
+                Text(briefingSentence(entry))
                     .font(.system(size: 15, weight: .regular, design: .monospaced))
                     .foregroundStyle(.primary)
                     .lineSpacing(3)
@@ -431,9 +452,23 @@ struct CommandCenterView: View {
         .help("Click to reply · ⌘-click for the Agent Overview · watermark to go to the pane")
     }
 
-    /// Briefing tiles: one sentence, one escalation line, and a reply box
-    /// twice the height of the detail view's — grown to fit it.
-    private static let briefingTileHeight: CGFloat = 216
+    /// Briefing tiles: a few bullets, one sentence, one escalation line, and a
+    /// reply box twice the height of the detail view's — grown to fit them.
+    private static let briefingTileHeight: CGFloat = 254
+
+    /// The headline for a row: the model's sentence when it has answered,
+    /// the message's own opening sentence until then.
+    private func briefingSentence(_ entry: CommandCenterMonitor.Entry) -> String {
+        monitor.briefings[entry.id]?.sentence
+            ?? CommandCenterMonitor.firstSentence(of: entry.message)
+    }
+
+    /// The lines above it. Falls back to the raw tool calls, which are a
+    /// plainer answer to "what did it do" than nothing at all.
+    private func briefingBullets(_ entry: CommandCenterMonitor.Entry) -> [String] {
+        let summarized = monitor.briefings[entry.id]?.bullets ?? []
+        return summarized.isEmpty ? Array(entry.activity.suffix(3)) : summarized
+    }
 
     /// How much of your attention a pane is asking for. Ordered by how much
     /// it costs to ignore.

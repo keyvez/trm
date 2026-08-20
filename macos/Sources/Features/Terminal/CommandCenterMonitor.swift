@@ -48,6 +48,11 @@ final class CommandCenterMonitor: ObservableObject {
         /// Everything this person has said to this agent, oldest first, as the
         /// transcript records it. The reply box walks back through this.
         let promptHistory: [String]
+        /// What the agent actually did this turn, newest last: the tool calls,
+        /// as short phrases. The briefing shows these above its sentence when
+        /// nothing better is available, and they are what the summarizer is
+        /// given to write from.
+        let activity: [String]
         /// Links found anywhere in the agent's message, whole.
         ///
         /// Kept apart from the prose because a card truncates and a truncated
@@ -88,9 +93,19 @@ final class CommandCenterMonitor: ObservableObject {
     /// in is worse than a spinner that lingers.
     private var scansCompleted = 0
 
-    /// One-sentence summaries, keyed by pane id. Populated only in briefing
-    /// mode, and only when a pane's message actually changes.
-    @Published private(set) var briefings: [ObjectIdentifier: String] = [:]
+    /// What a briefing says: the headline, and a few lines of what was done
+    /// to get there.
+    struct Briefing: Equatable {
+        /// One sentence, the thing you read first.
+        let sentence: String
+        /// Two or three short phrases above it — enough to judge whether the
+        /// sentence is the whole story without opening the pane.
+        let bullets: [String]
+    }
+
+    /// Summaries, keyed by pane. Populated only in briefing mode, and only
+    /// when a pane's message actually changes.
+    @Published private(set) var briefings: [ObjectIdentifier: Briefing] = [:]
 
     /// Whether to keep `briefings` up to date. Off by default: each refresh
     /// can be an LLM call, and the detail view doesn't use them.
@@ -260,6 +275,7 @@ final class CommandCenterMonitor: ObservableObject {
             message: message,
             prompt: transcript.lastUserPrompt,
             promptHistory: Self.promptHistory(transcript),
+            activity: Self.activityLines(transcript),
             links: Self.links(in: transcript),
             isWorking: transcript.isWorking,
             needsAttention: !questions.isEmpty,
@@ -344,6 +360,7 @@ final class CommandCenterMonitor: ObservableObject {
                 : (status ?? "Reading the transcript…"),
             prompt: nil,
             promptHistory: [],
+            activity: [],
             links: [],
             isWorking: false,
             needsAttention: false,
@@ -352,6 +369,22 @@ final class CommandCenterMonitor: ObservableObject {
             updatedAt: nil,
             surface: surface
         )
+    }
+
+    /// The turn's tool calls as short phrases — "Edited grid.zig", "Ran zig
+    /// build test" — oldest first, capped.
+    ///
+    /// This is the plainest available answer to "what did it just do", and it
+    /// needs no model: the transcript already names every call and its
+    /// subject.
+    nonisolated static func activityLines(_ transcript: AgentTranscript, limit: Int = 4) -> [String] {
+        let lines = transcript.activity.map { tool -> String in
+            guard let detail = tool.detail?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !detail.isEmpty else { return tool.name }
+            let trimmed = detail.count > 60 ? String(detail.prefix(60)) + "…" : detail
+            return "\(tool.name) \(trimmed)"
+        }
+        return Array(lines.suffix(limit))
     }
 
     /// Every link in the agent's current message, in the order they appear,
@@ -482,14 +515,21 @@ final class CommandCenterMonitor: ObservableObject {
             let hash = entry.message.hashValue
             guard briefingHashes[entry.id] != hash else { continue }
             briefingHashes[entry.id] = hash
-            briefings[entry.id] = Self.firstSentence(of: entry.message)
+            // Something to read immediately: the opening sentence, and the
+            // tool calls as they stand. The model replaces both when it
+            // answers.
+            briefings[entry.id] = Briefing(
+                sentence: Self.firstSentence(of: entry.message),
+                bullets: entry.activity)
 
             guard !briefingsInFlight.contains(entry.id) else { continue }
             briefingsInFlight.insert(entry.id)
             let message = entry.message
             let prompt = entry.prompt
+            let activity = entry.activity
             Task { [weak self] in
-                let summary = await Self.summarize(message: message, prompt: prompt)
+                let summary = await Self.summarize(
+                    message: message, prompt: prompt, activity: activity)
                 guard let self else { return }
                 self.briefingsInFlight.remove(entry.id)
                 // Only accept it if the pane hasn't moved on while we waited.
@@ -502,9 +542,12 @@ final class CommandCenterMonitor: ObservableObject {
     /// Ask the configured LLM for one sentence. Returns nil when there is no
     /// provider, the call fails, or it comes back empty — each of which leaves
     /// the local first-sentence summary in place.
-    private static func summarize(message: String, prompt: String?) async -> String? {
+    private static func summarize(
+        message: String, prompt: String?, activity: [String]
+    ) async -> Briefing? {
         let body = [
             prompt.map { "The person asked: \($0)" },
+            activity.isEmpty ? nil : "Tools it ran:\n" + activity.map { "- \($0)" }.joined(separator: "\n"),
             "The agent's message:\n\(message)",
         ].compactMap { $0 }.joined(separator: "\n\n")
 
@@ -514,14 +557,42 @@ final class CommandCenterMonitor: ObservableObject {
                     + "words, in past tense, plain text, no markdown. Lead with the outcome, "
                     + "not the process. If the agent is asking the person something, say what "
                     + "it needs. If it hit an error it could not resolve, say so plainly. "
-                    + "Return only the sentence.",
+                    + "Put that sentence on the first line. Then, on their own lines, up to "
+                    + "three bullets starting with \"- \", each at most 8 words, naming "
+                    + "concretely what it did — files changed, commands run, what came back. "
+                    + "No other text.",
                 user: body,
                 maxTokens: 80)
-            let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return cleaned.isEmpty ? nil : cleaned
+            return parseBriefing(text)
         } catch {
             return nil
         }
+    }
+
+    /// Pull a briefing out of the model's reply: bullet lines, and the one
+    /// line that isn't a bullet.
+    ///
+    /// Tolerant on purpose — a model that answers with the sentence first, or
+    /// uses `•` instead of `-`, still produces something usable rather than
+    /// nothing.
+    nonisolated static func parseBriefing(_ text: String) -> Briefing? {
+        var bullets: [String] = []
+        var sentences: [String] = []
+        for rawLine in text.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+            if let first = line.first, "-*•".contains(first) {
+                let bullet = line.dropFirst().trimmingCharacters(in: .whitespaces)
+                if !bullet.isEmpty { bullets.append(bullet) }
+            } else {
+                sentences.append(line)
+            }
+        }
+        // The sentence is the summary; if the model only gave bullets, the
+        // last one stands in rather than showing nothing.
+        let sentence = sentences.first ?? bullets.popLast() ?? ""
+        guard !sentence.isEmpty else { return nil }
+        return Briefing(sentence: sentence, bullets: Array(bullets.prefix(3)))
     }
 
     /// The opening sentence of a message, capped so a briefing stays one line

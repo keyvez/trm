@@ -86,6 +86,7 @@ struct CommandCenterLayoutTests {
             message: message,
             prompt: nil,
             promptHistory: promptHistory,
+            activity: [],
             links: [],
             isWorking: working,
             needsAttention: needsAttention,
@@ -149,6 +150,34 @@ struct CommandCenterLayoutTests {
         monitor.recordSentMessage(paneId: 92, text: "two")
         let row = entry(id: 92)
         #expect(monitor.messageHistory(for: row) == ["two", "one"])
+    }
+
+    // MARK: Briefing parsing
+
+    @Test func aBriefingIsASentenceAndItsBullets() {
+        let parsed = CommandCenterMonitor.parseBriefing(
+            "Fixed the socket leak and the tests pass.\n- Edited daemon.zig\n- Ran zig build test")
+        #expect(parsed?.sentence == "Fixed the socket leak and the tests pass.")
+        #expect(parsed?.bullets == ["Edited daemon.zig", "Ran zig build test"])
+    }
+
+    @Test func bulletsMayComeFirstOrUseOtherMarkers() {
+        // A model that leads with its bullets, or uses • instead of -, should
+        // still produce something usable.
+        let parsed = CommandCenterMonitor.parseBriefing(
+            "• Read grid.zig\n* Wrote a test\nAdded a regression test for the wrap bug.")
+        #expect(parsed?.sentence == "Added a regression test for the wrap bug.")
+        #expect(parsed?.bullets == ["Read grid.zig", "Wrote a test"])
+    }
+
+    @Test func bulletsOnlyStillYieldAHeadline() {
+        let parsed = CommandCenterMonitor.parseBriefing("- Ran the suite\n- All green")
+        #expect(parsed?.sentence == "All green")
+        #expect(parsed?.bullets == ["Ran the suite"])
+    }
+
+    @Test func nothingUsableIsNoBriefing() {
+        #expect(CommandCenterMonitor.parseBriefing("   \n\n  ") == nil)
     }
 
     // MARK: Links

@@ -426,7 +426,9 @@ final class CommandCenterServer: ObservableObject {
                 "needsAttention": entry.needsAttention,
                 "errors": entry.errorCount,
             ]
-            row["briefing"] = CommandCenterMonitor.shared.briefings[entry.id]
+            let briefing = CommandCenterMonitor.shared.briefings[entry.id]
+            row["briefing"] = briefing?.sentence
+            row["bullets"] = briefing?.bullets ?? entry.activity
             row["location"] = entry.location
             row["host"] = entry.host
             row["prompt"] = entry.prompt
