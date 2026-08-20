@@ -7739,9 +7739,8 @@ class BaseTerminalController: NSWindowController,
                 + "Mac's address, port \(server.port.map(String.init) ?? "?"), and a token.\n\n"
                 + "The phone can read the Command Center and type messages into the panes it "
                 + "lists — nothing else. Rotate the token to revoke every paired phone."
-            if let image = Self.qrImage(for: url, side: 220) {
-                alert.accessoryView = NSImageView(image: image)
-            }
+            alert.accessoryView = Self.pairingAccessory(
+                url: url, port: server.port, token: server.token)
             alert.addButton(withTitle: "Done")
             alert.addButton(withTitle: "Rotate Token")
             alert.addButton(withTitle: "Stop Serving")
@@ -7763,6 +7762,39 @@ class BaseTerminalController: NSWindowController,
                 handler(alert.runModal())
             }
         }
+    }
+
+    /// The QR code plus the same details in text.
+    ///
+    /// Two reasons it isn't only a code. An `NSImageView` handed straight to
+    /// `NSAlert` lays out at zero height and shows nothing — the frame has to
+    /// be explicit — and a code is useless when the phone can't be pointed at
+    /// this screen, or when the address it carries (a Bonjour name) doesn't
+    /// resolve from where the phone is. The token below it is selectable, so
+    /// the app's manual pairing form is always an option.
+    static func pairingAccessory(url: URL, port: UInt16?, token: String) -> NSView {
+        let side: CGFloat = 220
+        let width: CGFloat = 340
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: side + 66))
+
+        let details = NSTextField(labelWithString:
+            "Port \(port.map(String.init) ?? "?")\nToken  \(token)")
+        details.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        details.textColor = .secondaryLabelColor
+        details.alignment = .center
+        details.isSelectable = true
+        details.maximumNumberOfLines = 2
+        details.lineBreakMode = .byCharWrapping
+        details.frame = NSRect(x: 0, y: 4, width: width, height: 44)
+        container.addSubview(details)
+
+        let imageView = NSImageView(frame: NSRect(
+            x: (width - side) / 2, y: 56, width: side, height: side))
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.image = qrImage(for: url, side: side)
+        container.addSubview(imageView)
+
+        return container
     }
 
     /// A QR code for `url`, sized for a dialog.
