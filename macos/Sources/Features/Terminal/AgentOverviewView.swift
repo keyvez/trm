@@ -87,6 +87,10 @@ struct AgentOverviewView: View {
         // terminals, and matching their darker ground keeps the eye from
         // treating it as a bright document panel in a dark workspace.
         .background(terminalBackground)
+        // Nothing inside may paint outside the cell. A single child insisting
+        // on its intrinsic width is enough to overflow a narrow pane, and an
+        // overview drawn across its neighbour is worse than one that clips.
+        .clipped()
     }
 
     /// Reply to the agent without leaving the overview.
@@ -370,7 +374,16 @@ struct AgentOverviewView: View {
             }
 
             if let percent = pane.displayedTranscript.contextUsedPercent {
-                contextUsagePill(percent)
+                // Drawn only if it fits. `fixedSize` alone stopped the pill
+                // wrapping into a vertical stripe, but it also made the header
+                // refuse to shrink, so a narrow cell pushed the whole overview
+                // wider than its cell and it painted over the pane beside it.
+                // Either it has its room or it isn't there.
+                ViewThatFits(in: .horizontal) {
+                    contextUsagePill(percent)
+                    contextUsageDot(percent)
+                    Color.clear.frame(width: 0, height: 0)
+                }
             }
 
             Spacer()
@@ -1024,6 +1037,17 @@ struct AgentOverviewView: View {
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(Capsule().fill(color.opacity(0.12)))
+            .help("Agent context window \(percent)% full")
+    }
+
+    /// The context pill with the words taken away: in a pane too narrow for
+    /// "83% ctx", the colour is still worth having — it is the part you read
+    /// at a glance anyway, and the number is a hover away.
+    private func contextUsageDot(_ percent: Int) -> some View {
+        let color: Color = percent >= 80 ? .red : (percent >= 50 ? .orange : .secondary)
+        return Circle()
+            .fill(color.opacity(percent >= 50 ? 0.9 : 0.5))
+            .frame(width: 7, height: 7)
             .help("Agent context window \(percent)% full")
     }
 

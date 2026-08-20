@@ -34,6 +34,24 @@ final class CommandCenterServer: ObservableObject {
     /// Wire protocol version. The phone refuses a server it doesn't know.
     static let protocolVersion = 1
 
+    /// The port to ask for, so a paired phone keeps working across restarts.
+    ///
+    /// An ephemeral port made every pairing code expire the next time trm
+    /// launched: the phone kept dialling the old number and got "connection
+    /// refused", which reads exactly like a broken server. The port is
+    /// remembered and re-requested; if something else has taken it, a new one
+    /// is chosen and remembered instead — and the code has to be scanned
+    /// again, which is at least rare rather than every launch.
+    static let preferredPort: UInt16 = 51735
+
+    private static var rememberedPort: UInt16 {
+        get {
+            let saved = UserDefaults.standard.integer(forKey: "CommandCenterServerPort")
+            return saved > 0 && saved <= 65535 ? UInt16(saved) : preferredPort
+        }
+        set { UserDefaults.standard.set(Int(newValue), forKey: "CommandCenterServerPort") }
+    }
+
     @Published private(set) var isRunning = false
     @Published private(set) var port: UInt16?
     @Published private(set) var connectedClients: Int = 0
@@ -200,10 +218,21 @@ final class CommandCenterServer: ObservableObject {
         }
         guard listener == nil else { return }
         Self.isEnabledByDefault = true
+        startListener(on: Self.rememberedPort)
+    }
+
+    /// Bring up a listener, falling back to any free port if the one we want
+    /// is taken.
+    private func startListener(on preferred: UInt16?) {
         do {
             let params = NWParameters.tcp
             params.includePeerToPeer = true
-            let listener = try NWListener(using: params)
+            let listener: NWListener
+            if let preferred, let port = NWEndpoint.Port(rawValue: preferred) {
+                listener = try NWListener(using: params, on: port)
+            } else {
+                listener = try NWListener(using: params)
+            }
             listener.service = NWListener.Service(
                 name: Self.advertisedName,
                 type: Self.serviceType,
@@ -220,11 +249,24 @@ final class CommandCenterServer: ObservableObject {
                         let port = listener.port?.rawValue
                         self?.port = port
                         self?.isRunning = true
+                        // Remember it, so the next launch answers on the same
+                        // number the phone already has.
+                        if let port { Self.rememberedPort = port }
                         Self.logger.info("Command Center server ready on port \(port ?? 0)")
                         self?.settle(port.map { .success($0) }
                             ?? .failure(StartupFailure(reason: "The server came up without a port.")))
                     case .failed(let error):
                         Self.logger.error("Command Center server failed: \(error.localizedDescription)")
+                        // Most likely the remembered port is in use. Let go of
+                        // it and take whatever is free rather than refusing to
+                        // serve at all.
+                        if preferred != nil {
+                            Self.logger.info("Retrying the Command Center server on a free port")
+                            self?.listener?.cancel()
+                            self?.listener = nil
+                            self?.startListener(on: nil)
+                            return
+                        }
                         self?.settle(.failure(StartupFailure(reason: error.localizedDescription)))
                         self?.stop()
                     case .cancelled:
@@ -245,6 +287,10 @@ final class CommandCenterServer: ObservableObject {
                 Task { @MainActor in self?.pushSnapshotIfChanged() }
             }
         } catch {
+            if preferred != nil {
+                startListener(on: nil)
+                return
+            }
             Self.logger.error("Could not start Command Center server: \(error.localizedDescription)")
             settle(.failure(StartupFailure(reason: error.localizedDescription)))
         }
