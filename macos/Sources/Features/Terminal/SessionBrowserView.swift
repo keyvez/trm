@@ -236,15 +236,49 @@ private struct SessionTile: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            PaneWatermark(
-                text: session.watermark ?? session.command ?? "shell",
-                height: 132
-            )
+            if let summary = session.summary {
+                // What this session is *about*. Every agent pane runs the same
+                // command, so a tile showing the command is the same tile
+                // twelve times over; the conversation is what tells them apart.
+                VStack(alignment: .leading, spacing: 4) {
+                    if let prompt = session.lastPrompt, !prompt.isEmpty {
+                        HStack(alignment: .top, spacing: 4) {
+                            Image(systemName: "quote.opening")
+                                .font(.system(size: 8))
+                                .foregroundStyle(.tertiary)
+                            Text(prompt)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                    Text(summary)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .lineLimit(4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Spacer(minLength: 0)
+                }
+                .frame(height: 132, alignment: .top)
+            } else {
+                PaneWatermark(
+                    text: session.watermark ?? session.command ?? "shell",
+                    height: 132
+                )
+            }
 
             HStack(spacing: 5) {
-                Text(session.command ?? "shell")
+                Text(session.agentKind?.displayName ?? session.command ?? "shell")
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
+
+                if let watermark = session.watermark, session.summary != nil {
+                    Text(watermark)
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.16)))
+                }
 
                 if session.attached {
                     Circle()

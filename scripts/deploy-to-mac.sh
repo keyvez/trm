@@ -26,7 +26,7 @@ APP="$(cd "$(dirname "$0")/.." && pwd)/macos/build/ReleaseLocal/trm.app"
   exit 1
 }
 
-echo "Shipping $(basename "$APP") to $DEST…"
+echo "Shipping $(basename "$APP") to ${DEST}…"
 tar -C "$(dirname "$APP")" -czf - "$(basename "$APP")" | ssh -o BatchMode=yes "$DEST" '
 set -e
 rm -rf /tmp/trm.app.new && mkdir -p /tmp/trm.app.new

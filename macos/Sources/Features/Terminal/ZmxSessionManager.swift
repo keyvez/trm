@@ -341,6 +341,16 @@ enum ZmxSessionManager {
         let referenced: Bool
         /// The pane's watermark from its window's TOML, when it has one.
         var watermark: String?
+        /// Which agent is running here, when one is.
+        var agentKind: AgentKind?
+        /// The last thing the person asked this agent.
+        var lastPrompt: String?
+        /// A sentence of what the agent said back.
+        ///
+        /// A browser full of tiles reading `claude --dangerously-skip-permissions`
+        /// tells you nothing about which session is which — the conversation
+        /// does. The command is the fallback for a pane that is just a shell.
+        var summary: String?
         /// SSH destination the session lives on, or nil for a local session.
         /// A remote session's daemon runs on that machine; everything trm does
         /// with it — open, terminate — has to go over SSH.
@@ -420,19 +430,50 @@ enum ZmxSessionManager {
         DispatchQueue.concurrentPerform(iterations: names.count) { index in
             let name = names[index]
             let pid = shellPids[name]
-            let info = SessionInfo(
+            let paneCwd = pid.flatMap { cwd(ofPid: $0) }
+            var info = SessionInfo(
                 name: name,
-                cwd: pid.flatMap { cwd(ofPid: $0) },
+                cwd: paneCwd,
                 command: pid.flatMap { command(ofShellPid: $0) },
                 attached: attached.contains(name),
                 referenced: referenced.contains(name)
             )
+            // What the session is *doing*, when an agent is running it. The
+            // same locator the Agent Overview uses, so a tile and an overview
+            // never disagree about which conversation a pane is having.
+            if let pid, let located = AgentSessionLocator.locate(
+                shellPid: pid, paneCwd: paneCwd, zmxSession: name) {
+                let transcript = located.kind == .codex
+                    ? CodexTranscriptReader.parse(url: located.url)
+                    : AgentTranscriptReader.parse(url: located.url)
+                if let transcript {
+                    info.agentKind = located.kind
+                    info.lastPrompt = transcript.lastUserPrompt
+                    info.summary = summarize(transcript)
+                }
+            }
             lock.lock()
             results[index] = info
             lock.unlock()
         }
 
         return results.compactMap { $0 }
+    }
+
+    /// One line of what the agent last said, for a browser tile.
+    nonisolated static func summarize(_ transcript: AgentTranscript) -> String? {
+        for block in transcript.blocks {
+            guard case .paragraph(let text) = block else { continue }
+            let sentence = CommandCenterMonitor.firstSentence(of: text, limit: 200)
+            if !sentence.isEmpty { return sentence }
+        }
+        if let question = transcript.questions.first?.text, !question.isEmpty {
+            return question
+        }
+        if let tool = transcript.activity.last {
+            return tool.detail.map { "\(tool.name) \($0)" } ?? tool.name
+        }
+        return nil
     }
 
     /// Run zmx and return stdout as a string. Used by the browser's
@@ -567,13 +608,20 @@ enum ZmxSessionManager {
             "      esac;",
             "    done;",
             "    [ -n \"$N\" ] || continue;",
-            "    W=\"\"; M=\"\";",
+            "    W=\"\"; M=\"\"; T=\"\";",
+            // Where this session's agent writes, when its SessionStart hook
+            // recorded it. Only the recorded path is read: deriving it would
+            // mean running the full locate probe per session, and a browser
+            // isn't worth that many round trips.
+            "    R=\"$HOME/.trm/agent-sessions/$N\";",
+            "    [ -f \"$R\" ] && T=\"$(cat \"$R\" 2>/dev/null)\";",
+            "    [ -n \"$T\" ] && [ ! -f \"$T\" ] && T=\"\";",
             "    if [ -n \"$P\" ]; then",
             "      W=$(lsof -a -p \"$P\" -d cwd -Fn 2>/dev/null | sed -n \"s/^n//p\" | head -1);",
             "      K=$(pgrep -P \"$P\" 2>/dev/null | head -1);",
             "      [ -n \"$K\" ] && M=$(ps -o command= -p \"$K\" 2>/dev/null | head -1);",
             "    fi;",
-            "    printf \"%s\\t%s\\t%s\\t%s\\n\" \"$N\" \"$C\" \"$W\" \"$M\";",
+            "    printf \"%s\\t%s\\t%s\\t%s\\t%s\\n\" \"$N\" \"$C\" \"$W\" \"$M\" \"$T\";",
             "  done;",
             "done",
         ].joined(separator: " ")
@@ -601,12 +649,15 @@ enum ZmxSessionManager {
         }
 
         var result: [SessionInfo] = []
+        /// session name → transcript path on the far side.
+        var transcripts: [String: String] = [:]
         for line in out.components(separatedBy: .newlines) {
             let cols = line.components(separatedBy: "\t")
             guard cols.count >= 4, !cols[0].isEmpty else { continue }
             let clients = Int(cols[1]) ?? 0
             let cwd = cols[2].isEmpty ? nil : cols[2]
             let command = cols[3].isEmpty ? nil : cols[3]
+            if cols.count >= 5, !cols[4].isEmpty { transcripts[cols[0]] = cols[4] }
             result.append(SessionInfo(
                 name: cols[0],
                 cwd: cwd,
@@ -618,7 +669,61 @@ enum ZmxSessionManager {
                 remoteHost: host
             ))
         }
+        // One more round trip for the conversations, rather than one per
+        // session: a tile saying `claude --dangerously-skip-permissions` is
+        // the same tile for every pane on the machine.
+        if !transcripts.isEmpty {
+            let tails = remoteTranscriptTails(host: host, paths: transcripts)
+            for index in result.indices {
+                guard let text = tails[result[index].name], !text.isEmpty else { continue }
+                let isCodex = (transcripts[result[index].name] ?? "").contains("/.codex/")
+                let lines = text.components(separatedBy: .newlines)
+                let transcript = isCodex
+                    ? CodexTranscriptReader.parse(lines: lines)
+                    : AgentTranscriptReader.parse(lines: lines)
+                result[index].agentKind = isCodex ? .codex : .claude
+                result[index].lastPrompt = transcript.lastUserPrompt
+                result[index].summary = summarize(transcript)
+            }
+        }
+
         return RemoteSessions(host: host, sessions: result, error: nil)
+    }
+
+    /// Fetch the tail of each named transcript in one connection.
+    ///
+    /// Tails, not whole files: an agent's transcript runs to tens of megabytes
+    /// and a browser needs the last exchange. Each is fenced with a marker
+    /// naming its session so one reply carries them all.
+    nonisolated private static func remoteTranscriptTails(
+        host: String, paths: [String: String], bytesEach: Int = 160_000
+    ) -> [String: String] {
+        let script = paths.map { session, path in
+            // Session names are `trm-<hex>`; the path came from the machine
+            // itself. Both are quoted anyway — this string becomes a command.
+            "printf '\\n@@@%s@@@\\n' \"\(session)\"; tail -c \(bytesEach) \"\(path)\" 2>/dev/null;"
+        }.joined(separator: " ")
+
+        let run = runCapturing(
+            "/usr/bin/ssh",
+            ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, shWrapped(script)],
+            timeout: 25)
+        guard let out = run.output, run.status == 0 else { return [:] }
+
+        var result: [String: String] = [:]
+        var current: String?
+        var buffer: [String] = []
+        for line in out.components(separatedBy: .newlines) {
+            if line.hasPrefix("@@@"), line.hasSuffix("@@@"), line.count > 6 {
+                if let current { result[current] = buffer.joined(separator: "\n") }
+                current = String(line.dropFirst(3).dropLast(3))
+                buffer = []
+                continue
+            }
+            buffer.append(line)
+        }
+        if let current { result[current] = buffer.joined(separator: "\n") }
+        return result
     }
 
     /// Turn ssh's stderr into something worth showing a person.
