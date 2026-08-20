@@ -137,7 +137,43 @@ final class LinkTextView: NSTextView {
             return
         }
         let local = convert(event.locationInWindow, from: nil)
-        if let url = linkURL(at: local) { onLinkTap?(url) }
+        if let url = linkURL(at: local) {
+            flashLink(at: local)
+            onLinkTap?(url)
+        }
+    }
+
+    /// Briefly highlight the link that was just copied.
+    ///
+    /// A confirmation somewhere else on the pane is a confirmation you have to
+    /// go and find: the eye is on the thing it clicked. This paints the link's
+    /// own run for a moment, so the feedback is where the click was.
+    private func flashLink(at point: NSPoint) {
+        guard let layout = layoutManager, let container = textContainer,
+              let storage = textStorage, storage.length > 0 else { return }
+        let origin = textContainerOrigin
+        let containerPoint = NSPoint(x: point.x - origin.x, y: point.y - origin.y)
+        var fraction: CGFloat = 0
+        let index = layout.characterIndex(
+            for: containerPoint, in: container,
+            fractionOfDistanceBetweenInsertionPoints: &fraction)
+        guard index < storage.length else { return }
+
+        var range = NSRange(location: 0, length: 0)
+        guard storage.attribute(.link, at: index, effectiveRange: &range) != nil else { return }
+
+        storage.addAttribute(
+            .backgroundColor,
+            value: NSColor.controlAccentColor.withAlphaComponent(0.35),
+            range: range)
+        needsDisplay = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            guard let self, let storage = self.textStorage,
+                  NSMaxRange(range) <= storage.length else { return }
+            storage.removeAttribute(.backgroundColor, range: range)
+            self.needsDisplay = true
+        }
     }
 
     /// The link under a point in view coordinates, if any. A point past the

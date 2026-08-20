@@ -242,9 +242,9 @@ struct AgentOverviewView: View {
                 .foregroundStyle(Color.accentColor)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                .background(Capsule().fill(Color.accentColor.opacity(0.22)))
                 .padding(.bottom, 10)
-                .transition(.opacity)
+                .transition(.scale(scale: 0.9).combined(with: .opacity))
                 .allowsHitTesting(false)
             }
         }
@@ -1219,12 +1219,16 @@ private struct CopyableOverviewCodeBlock: View {
                 .allowsHitTesting(false)
         )
         .overlay(alignment: .topTrailing) {
-            if isHovering || didCopy {
-                Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(didCopy ? Color.green : Color.secondary)
-                    .padding(7)
-            }
+            // Always drawn, just faint until wanted: a copy button you can
+            // only find by hovering is one you don't know is there, and after
+            // a tap the checkmark has to be visible without hunting for it.
+            Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                .font(.system(size: didCopy ? 11 : 9, weight: .semibold))
+                .foregroundStyle(didCopy ? Color.green : Color.secondary)
+                .opacity(didCopy ? 1 : (isHovering ? 0.85 : 0.35))
+                .scaleEffect(didCopy ? 1.15 : 1)
+                .padding(7)
+                .animation(.spring(response: 0.25, dampingFraction: 0.6), value: didCopy)
         }
         .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .onHover { isHovering = $0 }
