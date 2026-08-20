@@ -7703,17 +7703,26 @@ class BaseTerminalController: NSWindowController,
     /// QR code that hands a phone the address and token.
     @IBAction func pairIPhoneAction(_ sender: Any?) {
         let server = CommandCenterServer.shared
-        server.start()
-
-        // The listener needs a moment to be assigned a port before there is
-        // anything to put in the code.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+        // Wait for the listener to actually settle rather than assuming it
+        // has: registering the Bonjour service — and, on recent macOS, the
+        // local network permission prompt — takes longer than any fixed delay
+        // worth waiting, and guessing reported a failure while it was still
+        // starting.
+        server.start { [weak self] result in
             guard let self else { return }
+            if case .failure(let failure) = result {
+                self.presentInternalCommandError(
+                    title: "Could Not Start Pairing",
+                    message: "The Command Center server didn't come up.\n\n\(failure.reason)\n\n"
+                        + "If macOS asked whether trm may find devices on your local network, "
+                        + "allow it (System Settings → Privacy & Security → Local Network) and "
+                        + "try again. An incoming-connections block in the firewall does this too.")
+                return
+            }
             guard let url = server.pairingURL() else {
                 self.presentInternalCommandError(
                     title: "Could Not Start Pairing",
-                    message: "The Command Center server didn't come up. Check that trm is allowed "
-                        + "to accept incoming connections in System Settings → Network → Firewall.")
+                    message: "The server is running but produced no pairing code.")
                 return
             }
 

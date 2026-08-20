@@ -38,9 +38,17 @@ final class CommandCenterServer: ObservableObject {
     @Published private(set) var port: UInt16?
     @Published private(set) var connectedClients: Int = 0
 
+    /// Why the listener didn't come up, in words a person can act on.
+    struct StartupFailure: Error {
+        let reason: String
+    }
+
     private var listener: NWListener?
     private var clients: [ObjectIdentifier: Client] = [:]
     private var pushTimer: Timer?
+    /// Callbacks waiting for the listener to settle, so the pairing dialog can
+    /// show a code or a reason instead of guessing after a fixed delay.
+    private var readinessWaiters: [(Result<UInt16, StartupFailure>) -> Void] = []
     /// Hash of the last snapshot sent, so an idle board sends nothing.
     private var lastSnapshotHash: Int?
 
@@ -93,7 +101,28 @@ final class CommandCenterServer: ObservableObject {
 
     // MARK: - Lifecycle
 
-    func start() {
+    /// Start serving and call back when the listener has actually settled.
+    ///
+    /// Not a fire-and-forget with a delay afterwards: coming up involves
+    /// registering a Bonjour service and, on recent macOS, possibly waiting
+    /// for the user to grant local network access — which took longer than the
+    /// third of a second the pairing dialog used to allow, so pairing reported
+    /// a server that "didn't come up" while it was still coming up.
+    func start(completion: ((Result<UInt16, StartupFailure>) -> Void)? = nil) {
+        if let completion {
+            if let port, isRunning {
+                completion(.success(port))
+            } else {
+                readinessWaiters.append(completion)
+                // Never leave the dialog waiting forever on a listener that
+                // neither succeeds nor fails.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                    self?.settle(.failure(StartupFailure(reason:
+                        "The server didn't come up within ten seconds. If macOS asked for "
+                        + "permission to use the local network, allow it and try again.")))
+                }
+            }
+        }
         guard listener == nil else { return }
         do {
             let params = NWParameters.tcp
@@ -112,12 +141,15 @@ final class CommandCenterServer: ObservableObject {
                 Task { @MainActor in
                     switch state {
                     case .ready:
-                        self?.port = listener.port?.rawValue
+                        let port = listener.port?.rawValue
+                        self?.port = port
                         self?.isRunning = true
-                        Self.logger.info(
-                            "Command Center server ready on port \(listener.port?.rawValue ?? 0)")
+                        Self.logger.info("Command Center server ready on port \(port ?? 0)")
+                        self?.settle(port.map { .success($0) }
+                            ?? .failure(StartupFailure(reason: "The server came up without a port.")))
                     case .failed(let error):
                         Self.logger.error("Command Center server failed: \(error.localizedDescription)")
+                        self?.settle(.failure(StartupFailure(reason: error.localizedDescription)))
                         self?.stop()
                     case .cancelled:
                         self?.isRunning = false
@@ -138,7 +170,15 @@ final class CommandCenterServer: ObservableObject {
             }
         } catch {
             Self.logger.error("Could not start Command Center server: \(error.localizedDescription)")
+            settle(.failure(StartupFailure(reason: error.localizedDescription)))
         }
+    }
+
+    /// Hand the outcome to whoever is waiting, once.
+    private func settle(_ result: Result<UInt16, StartupFailure>) {
+        let waiters = readinessWaiters
+        readinessWaiters.removeAll()
+        for waiter in waiters { waiter(result) }
     }
 
     func stop() {

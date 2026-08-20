@@ -63,6 +63,11 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_trm._tcp</string>
+		<!-- The Command Center server the iPhone app connects to. macOS gates
+		     local-network use by declared service, so advertising this one
+		     without listing it here fails on the user's machine and works
+		     nowhere useful. -->
+		<string>_trm-cc._tcp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>trm needs camera access for web apps like video calls in webview panes.</string>

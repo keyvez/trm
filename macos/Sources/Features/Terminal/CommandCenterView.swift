@@ -21,10 +21,10 @@ struct CommandCenterView: View {
 
     /// Which card's reply box has the keyboard.
     ///
-    /// Tapping a card puts the cursor here rather than sending you to the
-    /// pane: the board is read to decide what needs you, and the answer is
-    /// usually a sentence, not a visit. Going to the pane is still one
-    /// ⌘-click away, and the watermark still opens the full Overview.
+    /// Set by tapping the box itself, and kept there after sending so a
+    /// follow-up is just more typing. The card *around* the box navigates
+    /// instead — tap for the pane, ⌘-tap for the Overview — because a board
+    /// you read to decide where to go should take you there.
     @FocusState private var focusedDraft: ObjectIdentifier?
 
     /// Below this, one card per row reads better than a cramped two-up.
@@ -254,12 +254,12 @@ struct CommandCenterView: View {
         // ⌘-click peek.
         .onTapGesture {
             if NSEvent.modifierFlags.contains(.command) {
-                monitor.reveal(entry)
+                monitor.revealOverview(entry)
             } else {
-                focusedDraft = entry.id
+                monitor.reveal(entry)
             }
         }
-        .help("Click to reply · ⌘-click to go to this pane · watermark for the full Overview")
+        .help("Click to go to this pane · ⌘-click for its Agent Overview · click the box to reply")
         .modifier(CardChrome(
             fixedHeight: fixedHeight,
             composer: onSendToPane == nil ? nil : AnyView(composer(entry))
@@ -355,12 +355,12 @@ struct CommandCenterView: View {
                 .contentShape(Rectangle())
                 .onTapGesture {
                     if NSEvent.modifierFlags.contains(.command) {
-                        monitor.reveal(entry)
+                        monitor.revealOverview(entry)
                     } else {
-                        focusedDraft = entry.id
+                        monitor.reveal(entry)
                     }
                 }
-                .help("Click to reply · ⌘-click to go to this pane · watermark for the full Overview")
+                .help("Click to go to this pane · ⌘-click for its Agent Overview · click the box to reply")
 
                 // Answering is the whole point of a board you read to decide
                 // what needs you: the quickest actions — "yes", "go ahead",
