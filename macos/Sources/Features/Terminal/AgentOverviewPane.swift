@@ -278,7 +278,31 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// Command Center uses this to hold a place for the pane instead of
     /// leaving it off the board.
     var isResolvingRemoteAgent: Bool {
-        surface?.remoteHost != nil && remoteMirror?.locatedKind == nil
+        guard let surface, surface.remoteHost != nil else { return false }
+        // A remote pane with no session name has nothing to ask the other
+        // machine *about*: `refresh()` never takes the remote path, so no
+        // mirror is ever built and no probe is ever sent. Reporting that as
+        // "resolving" left such panes sitting on the board saying
+        // "Connecting…" for as long as they existed.
+        guard surface.remoteZmxSession != nil else { return false }
+        guard let mirror = remoteMirror else { return true }
+        // Resolved, whatever it found: no longer "connecting".
+        return mirror.isAwaitingFirstLocate
+    }
+
+    /// What the remote probe last said, when it has said anything. The board
+    /// shows this instead of a hopeful placeholder, so a pane whose agent
+    /// can't be found says why.
+    var remoteStatusMessage: String? {
+        guard surface?.remoteHost != nil else { return nil }
+        return remoteMirror?.statusMessage
+    }
+
+    /// Whether the remote probe found an agent to stream. A pane whose probe
+    /// came back with a transcript keeps its place on the board while that
+    /// transcript is still being read.
+    var agentTranscriptLocated: Bool {
+        remoteMirror?.locatedKind != nil
     }
 
     /// The watermark of the terminal this overview describes.

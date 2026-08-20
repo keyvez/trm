@@ -39,6 +39,8 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     private var statusLocked: String?
     private var locateInFlight = false
     private var lastLocateAt: Date?
+    /// Whether a locate has ever come back, whatever it said.
+    private var didAttemptLocateLocked = false
     private var lastStreamStartAt: Date?
     private var streamProcess: Process?
     private var mirrorHandle: FileHandle?
@@ -125,6 +127,15 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     var locatedKind: AgentKind? {
         lock.lock(); defer { lock.unlock() }
         return locatedKindLocked
+    }
+
+    /// True until the first probe returns. Distinguishes "the SSH round trip
+    /// hasn't come back" from "it came back and there is no agent here" —
+    /// which look identical from `locatedKind` alone, and made a pane whose
+    /// probe failed sit on the board saying "Connecting…" forever.
+    var isAwaitingFirstLocate: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !didAttemptLocateLocked
     }
 
     /// Human-readable state for the overview while not streaming.
@@ -314,6 +325,14 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
         P="$(codex_rollout "$CWD" "$STARTED")"
         # Same folder but older than this process: a session it resumed.
         [ -n "$P" ] || P="$(codex_rollout "$CWD" "")"
+        # No cwd match at all — usually because the agent's cwd couldn't be
+        # read. Matching on the folder is what stops two codex panes sharing
+        # one conversation, so it is tried first and only first; falling back
+        # to the newest live rollout is still better than reporting no agent
+        # for a pane that plainly has one.
+        if [ -z "$P" ]; then
+          P="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' 2>/dev/null -exec ls -t {} + 2>/dev/null | head -1)"
+        fi
         [ -n "$P" ] && { echo "OK codex $P"; exit 0; }
       fi
       echo "ERR no-transcript"; exit 0
@@ -342,6 +361,7 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
             self.lock.lock()
             self.locateInFlight = false
             self.lastLocateAt = Date()
+            self.didAttemptLocateLocked = true
             var pathChanged = false
             switch result {
             case .located(let kind, let path):

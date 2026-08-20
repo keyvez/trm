@@ -94,6 +94,10 @@ final class CommandCenterMonitor: ObservableObject {
     private var briefingHashes: [ObjectIdentifier: Int] = [:]
     private var briefingsInFlight: Set<ObjectIdentifier> = []
 
+    /// Panes already named in the log as unresolvable, so a 2.5 s poll
+    /// doesn't repeat itself forever.
+    private static var reportedUnresolvableRemotePanes: Set<Int> = []
+
     /// Headless overviews for panes that don't have one on screen, keyed by
     /// surface identity so they're reused across polls and dropped with the
     /// pane.
@@ -222,7 +226,10 @@ final class CommandCenterMonitor: ObservableObject {
         // *has* an agent holds its place on the board and says so.
         guard !transcript.isEmpty else {
             guard Self.hasAgent(surface: surface, pane: pane) else { return nil }
-            return pending(for: surface, resolving: pane.isResolvingRemoteAgent)
+            return pending(
+                for: surface,
+                resolving: pane.isResolvingRemoteAgent,
+                status: pane.remoteStatusMessage)
         }
 
         let questions = transcript.questions
@@ -276,7 +283,23 @@ final class CommandCenterMonitor: ObservableObject {
     /// been read. Remote panes can't be walked from here, so the mirror's own
     /// "still resolving" flag stands in.
     private static func hasAgent(surface: Ghostty.SurfaceView, pane: AgentOverviewPane) -> Bool {
-        if surface.remoteHost != nil { return pane.isResolvingRemoteAgent }
+        // A remote pane earns a place while its probe is still out, and keeps
+        // it once the probe found an agent. A probe that came back empty means
+        // this is an ordinary shell, and an ordinary shell is not an agent.
+        if surface.remoteHost != nil {
+            if pane.isResolvingRemoteAgent || pane.agentTranscriptLocated { return true }
+            // A remote pane trm can't ask about — no session name recorded —
+            // is worth saying so once, since from the outside it looks
+            // identical to a pane with no agent.
+            if surface.remoteZmxSession == nil, let paneId = surface.paneId,
+               !reportedUnresolvableRemotePanes.contains(paneId) {
+                reportedUnresolvableRemotePanes.insert(paneId)
+                TrmDiagnostics.log(
+                    "[command-center] pane \(paneId) on \(surface.remoteHost ?? "?") has no " +
+                    "recorded zmx session; its agent can't be resolved. Reconnect the pane.")
+            }
+            return false
+        }
         var shellPid: pid_t = 0
         if let session = surface.zmxSessionName,
            let serverShell = ZmxSessionManager.cachedServerShellPid(session: session) {
@@ -292,7 +315,7 @@ final class CommandCenterMonitor: ObservableObject {
     /// arrived: it holds the pane's place rather than letting the board look
     /// short.
     private static func pending(
-        for surface: Ghostty.SurfaceView, resolving: Bool
+        for surface: Ghostty.SurfaceView, resolving: Bool, status: String? = nil
     ) -> Entry {
         let paneId = surface.paneId ?? 0
         let watermark = Trm.shared.watermark(forPaneId: UInt32(paneId))?
@@ -305,7 +328,9 @@ final class CommandCenterMonitor: ObservableObject {
             kind: .claude,
             location: cwd.map { ($0 as NSString).lastPathComponent },
             host: surface.remoteHost,
-            message: resolving ? "Connecting…" : "Reading the transcript…",
+            message: resolving
+                ? "Connecting…"
+                : (status ?? "Reading the transcript…"),
             prompt: nil,
             isWorking: false,
             needsAttention: false,
