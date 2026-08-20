@@ -223,6 +223,10 @@ class AppDelegate: NSObject,
         // every time the app is killed rather than quit.
         RemoteAgentTranscriptMirror.reapOrphanedStreams()
 
+        // A phone is paired with this Mac, not with one run of the app, so
+        // serving resumes on its own if it was on when trm last quit.
+        CommandCenterServer.startIfPreviouslyEnabled()
+
         // Check if secure input was enabled when we last quit.
         if (UserDefaults.standard.bool(forKey: "SecureInput") != SecureInput.shared.enabled) {
             toggleSecureInput(self)

@@ -54,6 +54,23 @@ final class CommandCenterServer: ObservableObject {
 
     private init() {}
 
+    /// Whether this Mac serves the Command Center, remembered across launches.
+    ///
+    /// A paired phone is paired with the *machine*, not with one run of the
+    /// app: leaving the server tied to the pairing dialog meant every relaunch
+    /// silently dropped the phone, with nothing on either end saying so. Set
+    /// by pairing, cleared by Stop Serving.
+    static var isEnabledByDefault: Bool {
+        get { UserDefaults.standard.bool(forKey: "CommandCenterServerEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "CommandCenterServerEnabled") }
+    }
+
+    /// Bring the server back up if it was serving when trm last quit.
+    static func startIfPreviouslyEnabled() {
+        guard isEnabledByDefault else { return }
+        shared.start()
+    }
+
     // MARK: - Pairing
 
     /// Shared secret the phone must present. Generated once and kept in
@@ -86,6 +103,13 @@ final class CommandCenterServer: ObservableObject {
     }
 
     /// Everything the phone needs, as a URL small enough to be a QR code.
+    ///
+    /// Carries *every* address this Mac answers to rather than one, because
+    /// the right one depends on where the phone is standing: a Bonjour name
+    /// works on the same Wi-Fi and nowhere else, while a Tailscale address
+    /// works from anywhere and means nothing to a phone that isn't on the
+    /// tailnet. The phone tries them in order, so the code stays true when you
+    /// leave the house.
     func pairingURL() -> URL? {
         guard let port else { return nil }
         var components = URLComponents()
@@ -94,9 +118,58 @@ final class CommandCenterServer: ObservableObject {
         components.queryItems = [
             .init(name: "name", value: Host.current().localizedName ?? NSUserName()),
             .init(name: "port", value: String(port)),
+            .init(name: "hosts", value: Self.reachableAddresses().joined(separator: ",")),
             .init(name: "token", value: token),
         ]
         return components.url
+    }
+
+    /// Addresses this Mac can be reached at, best first.
+    ///
+    /// Tailscale leads: it is the one that survives leaving the network, and a
+    /// phone that has it will get there. Then the Bonjour name for the same
+    /// Wi-Fi, then any private LAN address as a last resort — some networks
+    /// block mDNS but route fine.
+    static func reachableAddresses() -> [String] {
+        var tailscale: [String] = []
+        var lan: [String] = []
+
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return [bonjourName] }
+        defer { freeifaddrs(head) }
+
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(pointer.pointee.ifa_flags)
+            guard flags & IFF_UP == IFF_UP, flags & IFF_LOOPBACK == 0,
+                  let address = pointer.pointee.ifa_addr,
+                  address.pointee.sa_family == UInt8(AF_INET) else { continue }
+
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                address, socklen_t(address.pointee.sa_len),
+                &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            let text = String(cString: host)
+
+            // Tailscale hands out 100.64.0.0/10, the carrier-grade NAT range.
+            let parts = text.split(separator: ".").compactMap { UInt8($0) }
+            guard parts.count == 4 else { continue }
+            if parts[0] == 100, parts[1] >= 64, parts[1] <= 127 {
+                tailscale.append(text)
+            } else if parts[0] == 192 && parts[1] == 168
+                        || parts[0] == 10
+                        || (parts[0] == 172 && parts[1] >= 16 && parts[1] <= 31) {
+                lan.append(text)
+            }
+        }
+
+        return tailscale + [bonjourName] + lan
+    }
+
+    /// The name this Mac answers to on the local network.
+    static var bonjourName: String {
+        let name = (Host.current().localizedName ?? NSUserName())
+            .replacingOccurrences(of: " ", with: "-")
+        return name.hasSuffix(".local") ? name : name + ".local"
     }
 
     // MARK: - Lifecycle
@@ -124,6 +197,7 @@ final class CommandCenterServer: ObservableObject {
             }
         }
         guard listener == nil else { return }
+        Self.isEnabledByDefault = true
         do {
             let params = NWParameters.tcp
             params.includePeerToPeer = true
@@ -182,6 +256,7 @@ final class CommandCenterServer: ObservableObject {
     }
 
     func stop() {
+        Self.isEnabledByDefault = false
         pushTimer?.invalidate()
         pushTimer = nil
         for (_, client) in clients { client.connection.cancel() }

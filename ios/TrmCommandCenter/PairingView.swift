@@ -46,7 +46,7 @@ struct PairingView: View {
                     Button("Connect") {
                         guard let portValue = UInt16(port) else { return }
                         apply(Pairing(
-                            name: host, host: host, port: portValue,
+                            name: host, host: host, hosts: [host], port: portValue,
                             token: token.trimmingCharacters(in: .whitespaces)))
                     }
                     .disabled(host.isEmpty || UInt16(port) == nil || token.isEmpty)

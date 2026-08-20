@@ -72,7 +72,13 @@ struct BoardEntry: Identifiable, Equatable {
 /// Where a Mac lives and how to prove we're allowed to talk to it.
 struct Pairing: Codable, Equatable {
     var name: String
+    /// The address currently believed to work; the first candidate until one
+    /// proves itself.
     var host: String
+    /// Every address the Mac said it answers to, best first — Tailscale, then
+    /// its Bonjour name, then LAN addresses. A phone moves between networks
+    /// and only one of these is right at a time.
+    var hosts: [String] = []
     var port: UInt16
     var token: String
 
@@ -85,17 +91,24 @@ struct Pairing: Codable, Equatable {
               let port = UInt16(portString) else { return nil }
         let name = items.first(where: { $0.name == "name" })?.value ?? "Mac"
         self.name = name
-        // The QR carries no address: the Mac may be on Wi-Fi now and a Tailnet
-        // later, and its Bonjour name is the thing that stays true. A manually
-        // entered host overrides this.
-        self.host = items.first(where: { $0.name == "host" })?.value ?? "\(name).local"
+        let advertised = (items.first(where: { $0.name == "hosts" })?.value ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let single = items.first(where: { $0.name == "host" })?.value
+        let candidates = advertised.isEmpty
+            ? [single ?? "\(name).local"].compactMap { $0 }
+            : advertised
+        self.hosts = candidates
+        self.host = candidates.first ?? "\(name).local"
         self.port = port
         self.token = token
     }
 
-    init(name: String, host: String, port: UInt16, token: String) {
+    init(name: String, host: String, hosts: [String] = [], port: UInt16, token: String) {
         self.name = name
         self.host = host
+        self.hosts = hosts.isEmpty ? [host] : hosts
         self.port = port
         self.token = token
     }
@@ -122,11 +135,15 @@ final class CommandCenterClient: ObservableObject {
     /// Panes whose reply is in flight, so a row can show it was sent.
     @Published private(set) var sending: Set<Int> = []
 
-    @AppStorage("pairing") private var pairingData: Data = Data()
+    @AppStorage("pairing") fileprivate var pairingData: Data = Data()
 
     private var connection: NWConnection?
     private var buffer = Data()
     private var reconnectAttempts = 0
+    /// Which candidate address is being tried right now.
+    private var candidateIndex = 0
+    /// Cancelled when a candidate answers; fires when it doesn't.
+    private var candidateTimeout: DispatchWorkItem?
 
     var pairing: Pairing? {
         get {
@@ -142,11 +159,39 @@ final class CommandCenterClient: ObservableObject {
     // MARK: - Connection
 
     func connect() {
+        candidateIndex = 0
+        connectToCandidate()
+    }
+
+    /// Try the current candidate, moving to the next when it doesn't answer.
+    ///
+    /// A Mac's Bonjour name and its Tailscale address are both true, in
+    /// different places, and the phone can't know which one it is standing in
+    /// — so it asks them in order rather than guessing.
+    private func connectToCandidate() {
         disconnect()
         guard let pairing else { state = .idle; return }
+        let candidates = pairing.hosts.isEmpty ? [pairing.host] : pairing.hosts
+        guard candidateIndex < candidates.count else {
+            state = .failed("Couldn't reach \(pairing.name) at any of its addresses.")
+            candidateIndex = 0
+            scheduleReconnect()
+            return
+        }
+        let candidate = candidates[candidateIndex]
         state = .connecting
 
-        let host = NWEndpoint.Host(pairing.host)
+        // Don't sit on an address that isn't answering: a wrong one usually
+        // hangs rather than refuses, and there is another to try.
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.candidateIndex += 1
+            self.connectToCandidate()
+        }
+        candidateTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
+
+        let host = NWEndpoint.Host(candidate)
         let port = NWEndpoint.Port(rawValue: pairing.port) ?? .any
         let params = NWParameters.tcp
         params.includePeerToPeer = true
@@ -158,15 +203,24 @@ final class CommandCenterClient: ObservableObject {
                 guard let self else { return }
                 switch state {
                 case .ready:
+                    self.candidateTimeout?.cancel()
                     self.reconnectAttempts = 0
+                    // Remember what worked, so the next launch starts there.
+                    if var updated = self.pairing, updated.host != candidate {
+                        updated.host = candidate
+                        self.pairingData = (try? JSONEncoder().encode(updated)) ?? self.pairingData
+                    }
                     self.send(["type": "hello", "token": pairing.token, "client": "iphone"])
                     self.receive()
-                case .failed(let error):
-                    self.state = .failed(error.localizedDescription)
-                    self.scheduleReconnect()
+                case .failed:
+                    self.candidateTimeout?.cancel()
+                    self.candidateIndex += 1
+                    self.connectToCandidate()
                 case .cancelled:
                     break
                 case .waiting(let error):
+                    // Still trying; the timeout above moves on if it stays
+                    // stuck.
                     self.state = .failed(error.localizedDescription)
                 default:
                     break
@@ -177,6 +231,8 @@ final class CommandCenterClient: ObservableObject {
     }
 
     func disconnect() {
+        candidateTimeout?.cancel()
+        candidateTimeout = nil
         connection?.cancel()
         connection = nil
         buffer.removeAll()

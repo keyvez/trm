@@ -289,6 +289,12 @@ struct CommandCenterView: View {
                 focusedDraft = entry.id
             }
         }
+        // The whole card takes a drop: aiming a dragged screenshot at a
+        // reply box a few points tall is a game nobody wants to play.
+        .onDrop(of: [.fileURL, .image, .png, .tiff], isTargeted: nil) { providers in
+            attach(providers: providers, to: entry)
+            return true
+        }
         .help("Click to reply · ⌘-click for the Agent Overview · watermark to go to the pane")
     }
 
@@ -415,6 +421,12 @@ struct CommandCenterView: View {
             } else {
                 focusedDraft = entry.id
             }
+        }
+        // The whole card takes a drop: aiming a dragged screenshot at a
+        // reply box a few points tall is a game nobody wants to play.
+        .onDrop(of: [.fileURL, .image, .png, .tiff], isTargeted: nil) { providers in
+            attach(providers: providers, to: entry)
+            return true
         }
         .help("Click to reply · ⌘-click for the Agent Overview · watermark to go to the pane")
     }
@@ -587,25 +599,56 @@ struct CommandCenterView: View {
     private func attach(providers: [NSItemProvider], to entry: CommandCenterMonitor.Entry) {
         guard let surface = entry.surface else { return }
         for provider in providers {
-            _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) {
-                data, _ in
-                guard let data,
-                      let path = String(data: data, encoding: .utf8),
-                      let url = URL(string: path) ?? URL(string: path.removingPercentEncoding ?? "")
-                else { return }
-                Task { @MainActor in
-                    guard let bytes = try? Data(contentsOf: url) else {
-                        attachmentStatus[entry.id] = "Couldn't read \(url.lastPathComponent)."
-                        clearStatusLater(entry.id)
-                        return
+            // A drag from Finder is a file URL — the original bytes and name.
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) {
+                    data, _ in
+                    guard let data,
+                          let path = String(data: data, encoding: .utf8),
+                          let url = URL(string: path)
+                            ?? URL(string: path.removingPercentEncoding ?? "")
+                    else { return }
+                    Task { @MainActor in
+                        guard let bytes = try? Data(contentsOf: url) else {
+                            attachmentStatus[entry.id] = "Couldn't read \(url.lastPathComponent)."
+                            clearStatusLater(entry.id)
+                            return
+                        }
+                        await stage(
+                            .init(
+                                data: bytes,
+                                filename: CommandCenterAttachments.uniqueName(
+                                    for: url.lastPathComponent, now: Date())),
+                            to: entry, on: surface)
                     }
-                    await stage(
-                        .init(
-                            data: bytes,
-                            filename: CommandCenterAttachments.uniqueName(
-                                for: url.lastPathComponent, now: Date())),
-                        to: entry, on: surface)
                 }
+                continue
+            }
+
+            // A drag out of Preview, Photos, or a browser hands over image
+            // data with no file behind it, so it gets a name here.
+            for identifier in [UTType.png.identifier, UTType.tiff.identifier, UTType.image.identifier]
+            where provider.hasItemConformingToTypeIdentifier(identifier) {
+                _ = provider.loadDataRepresentation(forTypeIdentifier: identifier) { data, _ in
+                    guard let data, !data.isEmpty else { return }
+                    let isTIFF = identifier == UTType.tiff.identifier
+                    let bytes: Data
+                    if isTIFF, let rep = NSBitmapImageRep(data: data),
+                       let png = rep.representation(using: .png, properties: [:]) {
+                        bytes = png
+                    } else {
+                        bytes = data
+                    }
+                    Task { @MainActor in
+                        await stage(
+                            .init(
+                                data: bytes,
+                                filename: CommandCenterAttachments.generatedName(
+                                    ext: "png", now: Date())),
+                            to: entry, on: surface)
+                    }
+                }
+                break
             }
         }
     }
