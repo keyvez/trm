@@ -412,6 +412,25 @@ struct AgentTranscriptTests {
         #expect(transcript.lastUserPrompt == "second")
     }
 
+    @Test func aNewOverviewShowsTheConversationAndNotTheToolStrip() {
+        // The overview is for reading what the agent said; the list of
+        // commands it ran is available in the terminal underneath, and both
+        // it and the error list are a click away in the section menu.
+        #expect(AgentOverviewSections.default.contains(.prompt))
+        #expect(AgentOverviewSections.default.contains(.reply))
+        #expect(AgentOverviewSections.default.contains(.questions))
+        #expect(!AgentOverviewSections.default.contains(.activity))
+        #expect(!AgentOverviewSections.default.contains(.errors))
+    }
+
+    @Test func aSavedPaneKeepsTheSectionsItWasSavedWith() {
+        // Changing the default must not reach back into layouts someone
+        // already arranged: a checkpoint that names activity still restores
+        // with it.
+        let restored = AgentOverviewSections(tomlValue: "prompt,activity,reply,questions")
+        #expect(restored.contains(.activity))
+    }
+
     @Test func legacyOverviewModesOptIntoQuestionsAndCanDisableThem() {
         let migrated = AgentOverviewSections(tomlValue: "prompt,activity,reply")
         #expect(migrated.contains(.questions))

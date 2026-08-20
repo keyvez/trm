@@ -171,9 +171,14 @@ struct AgentOverviewSections: OptionSet, Hashable {
     static let questions = AgentOverviewSections(rawValue: 1 << 4)
 
     static let all: AgentOverviewSections = [.prompt, .questions, .activity, .reply, .errors]
-    /// What a new overview shows: everything except the errors list, which is
-    /// noise until something actually fails.
-    static let `default`: AgentOverviewSections = [.prompt, .questions, .activity, .reply]
+    /// What a new overview shows: the conversation, and nothing else.
+    ///
+    /// Activity and errors are both off. The overview exists to be *read* —
+    /// what you asked, what it said, what it needs — and a strip of tool calls
+    /// pushes that down the pane to make room for a list you can get from the
+    /// terminal underneath at any time. Both are one click away in the section
+    /// menu when a session turns into an investigation.
+    static let `default`: AgentOverviewSections = [.prompt, .questions, .reply]
 
     /// The individual sections, in display order, for building menus.
     static let allCases: [AgentOverviewSections] = [.prompt, .questions, .activity, .reply, .errors]
