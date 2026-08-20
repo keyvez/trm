@@ -32,6 +32,10 @@ struct CommandCenterView: View {
     /// it, or why it couldn't.
     @State private var attachmentStatus: [ObjectIdentifier: String] = [:]
 
+    /// Set briefly after a link is tapped, driving the "copied" pill — the
+    /// same confirmation the Agent Overview uses.
+    @State private var copiedLink: String?
+
     /// Which card's reply box has the keyboard.
     ///
     /// Set by tapping the box itself, and kept there after sending so a
@@ -266,6 +270,8 @@ struct CommandCenterView: View {
                 .lineLimit(fixedHeight == nil ? nil : 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            links(entry)
+
         }
         .modifier(CardChrome(
             fixedHeight: fixedHeight,
@@ -374,6 +380,8 @@ struct CommandCenterView: View {
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                links(entry)
                 }
 
                 // Answering is the whole point of a board you read to decide
@@ -519,6 +527,51 @@ struct CommandCenterView: View {
                     .background(.regularMaterial, in: Capsule())
                     .offset(y: -14)
                     .transition(.opacity)
+            }
+        }
+    }
+
+    /// Links the agent printed, whole and tappable.
+    ///
+    /// A card truncates its prose, and a truncated URL is worthless — so they
+    /// are pulled out of the message and given their own row, where they
+    /// survive the line limits. Tapping copies, which is what the Agent
+    /// Overview does with a link and what you almost always want from an
+    /// address an agent just printed: somewhere else to paste it.
+    @ViewBuilder
+    private func links(_ entry: CommandCenterMonitor.Entry) -> some View {
+        if !entry.links.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(entry.links, id: \.self) { link in
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(link, forType: .string)
+                        copiedLink = link
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            if copiedLink == link { copiedLink = nil }
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: copiedLink == link ? "checkmark" : "link")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text(copiedLink == link ? "Copied" : link)
+                                .font(.system(size: 11, design: .monospaced))
+                                .lineLimit(1)
+                                // Trim the front, not the back: the end of a
+                                // URL — the path, the port — is the part that
+                                // tells you which one this is.
+                                .truncationMode(.head)
+                        }
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule().fill(Color.accentColor.opacity(0.12))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy \(link)")
+                }
             }
         }
     }

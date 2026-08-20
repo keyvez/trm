@@ -48,6 +48,12 @@ final class CommandCenterMonitor: ObservableObject {
         /// Everything this person has said to this agent, oldest first, as the
         /// transcript records it. The reply box walks back through this.
         let promptHistory: [String]
+        /// Links found anywhere in the agent's message, whole.
+        ///
+        /// Kept apart from the prose because a card truncates and a truncated
+        /// URL is worthless — the one thing on a status board you actually
+        /// want to grab is the server address the agent just printed.
+        let links: [String]
         /// True while the newest transcript entry is a tool call with no
         /// result yet: the agent is mid-task rather than waiting on you.
         let isWorking: Bool
@@ -254,6 +260,7 @@ final class CommandCenterMonitor: ObservableObject {
             message: message,
             prompt: transcript.lastUserPrompt,
             promptHistory: Self.promptHistory(transcript),
+            links: Self.links(in: transcript),
             isWorking: transcript.isWorking,
             needsAttention: !questions.isEmpty,
             errorCount: errors.count,
@@ -337,6 +344,7 @@ final class CommandCenterMonitor: ObservableObject {
                 : (status ?? "Reading the transcript…"),
             prompt: nil,
             promptHistory: [],
+            links: [],
             isWorking: false,
             needsAttention: false,
             errorCount: 0,
@@ -344,6 +352,42 @@ final class CommandCenterMonitor: ObservableObject {
             updatedAt: nil,
             surface: surface
         )
+    }
+
+    /// Every link in the agent's current message, in the order they appear,
+    /// deduplicated and capped.
+    ///
+    /// Read from the full message rather than the truncated summary: the whole
+    /// point is that a URL survives the card's line limits intact.
+    nonisolated static func links(in transcript: AgentTranscript, limit: Int = 4) -> [String] {
+        var text = ""
+        for block in transcript.blocks {
+            if case .paragraph(let paragraph) = block { text += paragraph + "\n" }
+        }
+        return links(inText: text, limit: limit)
+    }
+
+    /// Pure link extraction, so the trimming rules are testable.
+    nonisolated static func links(inText text: String, limit: Int = 4) -> [String] {
+        guard !text.isEmpty,
+              let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        else { return [] }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        var found: [String] = []
+        var seen: Set<String> = []
+        detector.enumerateMatches(in: text, range: range) { match, _, stop in
+            guard let match, let url = match.url else { return }
+            // Markdown and prose leave punctuation clinging to a URL; a
+            // trailing `)` or `.` is almost never part of the address.
+            var string = url.absoluteString
+            while let last = string.last, ").,;:]}".contains(last) {
+                string.removeLast()
+            }
+            guard string.contains("://"), seen.insert(string).inserted else { return }
+            found.append(string)
+            if found.count >= limit { stop.pointee = true }
+        }
+        return found
     }
 
     /// Prompts from the parse window, oldest first, deduplicated against

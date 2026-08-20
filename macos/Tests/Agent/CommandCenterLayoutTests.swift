@@ -86,6 +86,7 @@ struct CommandCenterLayoutTests {
             message: message,
             prompt: nil,
             promptHistory: promptHistory,
+            links: [],
             isWorking: working,
             needsAttention: needsAttention,
             errorCount: errorCount,
@@ -148,6 +149,31 @@ struct CommandCenterLayoutTests {
         monitor.recordSentMessage(paneId: 92, text: "two")
         let row = entry(id: 92)
         #expect(monitor.messageHistory(for: row) == ["two", "one"])
+    }
+
+    // MARK: Links
+
+    @Test func linksAreFoundWholeAndDeduplicated() {
+        let text = "Serving on http://localhost:3000/admin — see http://localhost:3000/admin again"
+        #expect(CommandCenterMonitor.links(inText: text) == ["http://localhost:3000/admin"])
+    }
+
+    @Test func trailingPunctuationIsNotPartOfTheAddress() {
+        // Prose and markdown leave these clinging to a URL; pasting one with a
+        // bracket on the end sends you nowhere.
+        #expect(CommandCenterMonitor.links(inText: "up at https://example.com/x.")
+            == ["https://example.com/x"])
+        #expect(CommandCenterMonitor.links(inText: "(see https://example.com/y)")
+            == ["https://example.com/y"])
+    }
+
+    @Test func barePathsAndPlainWordsAreNotLinks() {
+        #expect(CommandCenterMonitor.links(inText: "edit src/main.zig then run it").isEmpty)
+    }
+
+    @Test func linkListIsCapped() {
+        let text = (1...9).map { "http://h\($0).test/" }.joined(separator: " ")
+        #expect(CommandCenterMonitor.links(inText: text, limit: 4).count == 4)
     }
 
     // MARK: Attachments
