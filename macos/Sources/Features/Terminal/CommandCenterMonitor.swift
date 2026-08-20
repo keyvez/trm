@@ -93,13 +93,15 @@ final class CommandCenterMonitor: ObservableObject {
     /// in is worse than a spinner that lingers.
     private var scansCompleted = 0
 
-    /// What a briefing says: the headline, and a few lines of what was done
-    /// to get there.
+    /// What a briefing says: the headline, and — only when there is more
+    /// worth knowing — a few plain-English lines of what was done.
     struct Briefing: Equatable {
         /// One sentence, the thing you read first.
         let sentence: String
-        /// Two or three short phrases above it — enough to judge whether the
-        /// sentence is the whole story without opening the pane.
+        /// Short phrases in English, or empty. Deliberately never the tool
+        /// calls themselves: "Bash npm test" names the command, not what came
+        /// of it, and a column of those is the thing the terminal is already
+        /// showing one pane away.
         let bullets: [String]
     }
 
@@ -297,8 +299,11 @@ final class CommandCenterMonitor: ObservableObject {
             return question
         }
         if let tool = transcript.activity.last {
-            let detail = tool.detail.map { ": \($0)" } ?? ""
-            return (tool.finished ? "Ran \(tool.name)" : "Running \(tool.name)") + detail
+            // The tool's name, not the command line it ran. A briefing that
+            // reads "Bash: zig build -Doptimize=ReleaseFast test" is the
+            // terminal's job, one pane away; here it only has to say the agent
+            // is mid-task and roughly at what.
+            return tool.finished ? "Ran \(tool.name)" : "Running \(tool.name)…"
         }
         return transcript.isWorking ? "Working…" : "Waiting"
     }
@@ -518,9 +523,12 @@ final class CommandCenterMonitor: ObservableObject {
             // Something to read immediately: the opening sentence, and the
             // tool calls as they stand. The model replaces both when it
             // answers.
+            // Until the summarizer answers there is a sentence and nothing
+            // else. The tool calls are what it writes *from*, not something to
+            // show: "Bash npm test" is the command, not what was done with it.
             briefings[entry.id] = Briefing(
                 sentence: Self.firstSentence(of: entry.message),
-                bullets: entry.activity)
+                bullets: [])
 
             guard !briefingsInFlight.contains(entry.id) else { continue }
             briefingsInFlight.insert(entry.id)
@@ -557,10 +565,13 @@ final class CommandCenterMonitor: ObservableObject {
                     + "words, in past tense, plain text, no markdown. Lead with the outcome, "
                     + "not the process. If the agent is asking the person something, say what "
                     + "it needs. If it hit an error it could not resolve, say so plainly. "
-                    + "Put that sentence on the first line. Then, on their own lines, up to "
-                    + "three bullets starting with \"- \", each at most 8 words, naming "
-                    + "concretely what it did — files changed, commands run, what came back. "
-                    + "No other text.",
+                    + "Put that sentence on the first line.\n\n"
+                    + "Then, ONLY if there is more worth knowing than the sentence carries, "
+                    + "add up to three bullets on their own lines starting with \"- \". "
+                    + "Each is a short plain-English phrase about what changed or what was "
+                    + "learned — never a command line, a tool name, or a flag. Write "
+                    + "\"rewrote the retry loop\", not \"Bash: npm test\". If the sentence "
+                    + "already says everything, give no bullets at all. No other text.",
                 user: body,
                 maxTokens: 80)
             return parseBriefing(text)

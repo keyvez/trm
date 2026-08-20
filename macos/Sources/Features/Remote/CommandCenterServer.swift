@@ -433,7 +433,9 @@ final class CommandCenterServer: ObservableObject {
             ]
             let briefing = CommandCenterMonitor.shared.briefings[entry.id]
             row["briefing"] = briefing?.sentence
-            row["bullets"] = briefing?.bullets ?? entry.activity
+            // Prose bullets or none — the phone shouldn't show a column of
+            // command lines any more than the panel should.
+            row["bullets"] = briefing?.bullets ?? []
             row["location"] = entry.location
             row["host"] = entry.host
             row["prompt"] = entry.prompt

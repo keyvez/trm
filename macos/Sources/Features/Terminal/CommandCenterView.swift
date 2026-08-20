@@ -463,11 +463,11 @@ struct CommandCenterView: View {
             ?? CommandCenterMonitor.firstSentence(of: entry.message)
     }
 
-    /// The lines above it. Falls back to the raw tool calls, which are a
-    /// plainer answer to "what did it do" than nothing at all.
+    /// The lines above it, when the summary has more to say than its
+    /// sentence. Empty is the normal case and reads fine: a row is a sentence
+    /// unless there is genuinely more.
     private func briefingBullets(_ entry: CommandCenterMonitor.Entry) -> [String] {
-        let summarized = monitor.briefings[entry.id]?.bullets ?? []
-        return summarized.isEmpty ? Array(entry.activity.suffix(3)) : summarized
+        monitor.briefings[entry.id]?.bullets ?? []
     }
 
     /// How much of your attention a pane is asking for. Ordered by how much
