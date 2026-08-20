@@ -415,12 +415,12 @@ final class CommandCenterMonitor: ObservableObject {
         var seen: Set<String> = []
         detector.enumerateMatches(in: text, range: range) { match, _, stop in
             guard let match, let url = match.url else { return }
-            // Markdown and prose leave punctuation clinging to a URL; a
-            // trailing `)` or `.` is almost never part of the address.
+            // Prose and markdown leave debris clinging to a URL. A trailing
+            // `)` or `.` is almost never part of an address, and neither are
+            // the emphasis markers an agent wraps one in — `**https://…**`
+            // arrived as a link ending in two stars, which pastes nowhere.
             var string = url.absoluteString
-            while let last = string.last, ").,;:]}".contains(last) {
-                string.removeLast()
-            }
+            string = Self.trimmingURLDebris(string)
             guard string.contains("://"), seen.insert(string).inserted else { return }
             found.append(string)
             if found.count >= limit { stop.pointee = true }
@@ -478,6 +478,54 @@ final class CommandCenterMonitor: ObservableObject {
         return (pending + entry.promptHistory.reversed()).filter { seen.insert($0).inserted }
     }
 
+    /// Strip the punctuation prose leaves stuck to a URL.
+    ///
+    /// Two passes are needed because the detector hands some of it back
+    /// percent-encoded: a URL inside backticks arrives ending in `%60`, which
+    /// no amount of trimming raw characters will find.
+    static let urlDebris = ").,;:]}*_~`'\"<>"
+
+    nonisolated static func trimmingURLDebris(_ url: String) -> String {
+        var string = url
+        var changed = true
+        while changed {
+            changed = false
+            if let last = string.last, urlDebris.contains(last) {
+                string.removeLast()
+                changed = true
+                continue
+            }
+            // A trailing %XX that decodes to the same debris.
+            if string.count > 3 {
+                let tail = String(string.suffix(3))
+                if tail.hasPrefix("%"),
+                   let decoded = tail.removingPercentEncoding,
+                   decoded.count == 1, let char = decoded.first,
+                   urlDebris.contains(char) {
+                    string.removeLast(3)
+                    changed = true
+                }
+            }
+        }
+        while let first = string.first, "*_~`'\"<(".contains(first) {
+            string.removeFirst()
+        }
+        return string
+    }
+
+    /// Inline markdown taken out, for the places that show plain text.
+    ///
+    /// The overview renders emphasis properly; a briefing row and a phone card
+    /// show a string, so `**shipped**` should read as shipped rather than as
+    /// its own punctuation.
+    nonisolated static func withoutInlineMarkdown(_ text: String) -> String {
+        var result = text
+        for marker in ["**", "__", "~~", "`"] {
+            result = result.replacingOccurrences(of: marker, with: "")
+        }
+        return result
+    }
+
     /// The agent's message as one paragraph of plain text.
     ///
     /// Code blocks and images are dropped rather than flattened: this is a
@@ -490,7 +538,7 @@ final class CommandCenterMonitor: ObservableObject {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { parts.append(trimmed) }
         }
-        let joined = parts.joined(separator: "\n\n")
+        let joined = withoutInlineMarkdown(parts.joined(separator: "\n\n"))
         guard joined.count > limit else { return joined }
         let cut = joined.prefix(limit)
         // Break at the last sentence end so the summary doesn't stop mid-word.
@@ -609,7 +657,7 @@ final class CommandCenterMonitor: ObservableObject {
     /// The opening sentence of a message, capped so a briefing stays one line
     /// rather than a paragraph.
     nonisolated static func firstSentence(of text: String, limit: Int = 160) -> String {
-        let flat = text
+        let flat = withoutInlineMarkdown(text)
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !flat.isEmpty else { return "" }

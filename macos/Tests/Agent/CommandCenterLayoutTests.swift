@@ -196,6 +196,23 @@ struct CommandCenterLayoutTests {
             == ["https://example.com/y"])
     }
 
+    @Test func markdownEmphasisIsNotPartOfTheAddress() {
+        // Seen in the wild: an agent wrapped a URL in bold and the chip
+        // carried the stars, so copying it pasted an address that goes
+        // nowhere.
+        #expect(CommandCenterMonitor.links(inText: "see **https://claude.ai/code/artifact/e33**")
+            == ["https://claude.ai/code/artifact/e33"])
+        #expect(CommandCenterMonitor.links(inText: "<https://example.com/x>")
+            == ["https://example.com/x"])
+        #expect(CommandCenterMonitor.links(inText: "`https://example.com/y`")
+            == ["https://example.com/y"])
+    }
+
+    @Test func briefingSentencesLoseTheirMarkdown() {
+        #expect(CommandCenterMonitor.firstSentence(of: "**Shipped** the `retry` fix.")
+            == "Shipped the retry fix.")
+    }
+
     @Test func barePathsAndPlainWordsAreNotLinks() {
         #expect(CommandCenterMonitor.links(inText: "edit src/main.zig then run it").isEmpty)
     }
