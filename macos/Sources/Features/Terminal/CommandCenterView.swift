@@ -267,10 +267,15 @@ struct CommandCenterView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
         }
-        .contentShape(Rectangle())
+        .modifier(CardChrome(
+            fixedHeight: fixedHeight,
+            composer: onSendToPane == nil ? nil : AnyView(composer(entry))
+        ))
+        // Outside the chrome so the card's padding is part of the target.
         // SwiftUI's tap gestures don't carry modifiers, so the flags are read
         // at the moment of the tap — the pattern TrmGridView already uses for
         // ⌘-click peek.
+        .contentShape(Rectangle())
         .onTapGesture {
             if NSEvent.modifierFlags.contains(.command) {
                 monitor.revealOverview(entry)
@@ -279,10 +284,6 @@ struct CommandCenterView: View {
             }
         }
         .help("Click to reply · ⌘-click for the Agent Overview · watermark to go to the pane")
-        .modifier(CardChrome(
-            fixedHeight: fixedHeight,
-            composer: onSendToPane == nil ? nil : AnyView(composer(entry))
-        ))
     }
 
     /// Card padding and the reply box, kept out of the card's tap gesture so
@@ -374,18 +375,6 @@ struct CommandCenterView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 }
-                // Only the reading half navigates. The composer sits outside
-                // the gesture so clicking into the box puts a cursor there
-                // rather than sending you to the pane mid-thought.
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if NSEvent.modifierFlags.contains(.command) {
-                        monitor.revealOverview(entry)
-                    } else {
-                        focusedDraft = entry.id
-                    }
-                }
-                .help("Click to reply · ⌘-click for the Agent Overview · watermark to go to the pane")
 
                 // Answering is the whole point of a board you read to decide
                 // what needs you: the quickest actions — "yes", "go ahead",
@@ -407,6 +396,19 @@ struct CommandCenterView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(status.color.opacity(status.emphasis))
         )
+        // The whole card, not just the words on it: padding, the status bar,
+        // and the empty space beside a short sentence are all places a person
+        // aims at when they mean "this one". The text field and the send
+        // button consume their own clicks, so the composer still behaves.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if NSEvent.modifierFlags.contains(.command) {
+                monitor.revealOverview(entry)
+            } else {
+                focusedDraft = entry.id
+            }
+        }
+        .help("Click to reply · ⌘-click for the Agent Overview · watermark to go to the pane")
     }
 
     /// Briefing tiles: one sentence, one escalation line, and a reply box
