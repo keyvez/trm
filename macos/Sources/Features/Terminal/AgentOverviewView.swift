@@ -352,7 +352,86 @@ struct AgentOverviewView: View {
 
     // MARK: - Header
 
+    /// Below this the header can't hold its controls without pushing the
+    /// overview wider than its cell, so they move into one menu.
+    private static let compactHeaderWidth: CGFloat = 380
+
     private var header: some View {
+        // Measured rather than guessed: the same overview is a narrow column
+        // in a six-pane grid and a wide sheet when peeked, and the controls
+        // that fit differ completely.
+        GeometryReader { geo in
+            headerRow(compact: geo.size.width < Self.compactHeaderWidth)
+        }
+        .frame(height: 26)
+    }
+
+    /// Everything after the title, folded into a single menu.
+    ///
+    /// A narrow pane can't show eleven controls, and shrinking them all is how
+    /// the header ended up taller than the text it labels. One button opens
+    /// the lot; what stays outside is what you reach for mid-read — paging
+    /// turns, and closing.
+    private var headerOverflowMenu: some View {
+        Menu {
+            Section("Show") {
+                ForEach(AgentOverviewSections.allCases, id: \.rawValue) { section in
+                    Toggle(isOn: Binding(
+                        get: { pane.sections.contains(section) },
+                        set: { isOn in
+                            var next = pane.sections
+                            if isOn { next.insert(section) } else { next.remove(section) }
+                            pane.sections = next
+                        }
+                    )) {
+                        Text(section.menuTitle)
+                    }
+                }
+                Button("Show Everything") { pane.sections = .all }
+            }
+
+            Section("Type") {
+                ForEach(AgentOverviewFontFamily.allCases, id: \.rawValue) { family in
+                    Button {
+                        pane.fontFamily = family
+                    } label: {
+                        Label(family.menuTitle, systemImage: pane.fontFamily == family
+                              ? "checkmark" : family.symbolName)
+                    }
+                }
+                Button("Smaller Text", action: decreaseActiveFontSize)
+                    .disabled(!canDecreaseActiveFontSize)
+                Button("Larger Text", action: increaseActiveFontSize)
+                    .disabled(!canIncreaseActiveFontSize)
+                Button("Reset Text Size (\(Int((activeFontScale * 100).rounded()))%)",
+                       action: resetActiveFontSize)
+                Toggle(isOn: Binding(
+                    get: { pane.bionicEnabled },
+                    set: { _ in pane.toggleBionic() }
+                )) {
+                    Text("Bionic Reading")
+                }
+            }
+
+            Divider()
+            Button("Refresh") { pane.refresh() }
+            if let onClose {
+                Button("Close Overview") { onClose(pane) }
+            }
+        } label: {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 18, height: 16)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Overview options")
+    }
+
+    @ViewBuilder
+    private func headerRow(compact: Bool) -> some View {
         HStack(spacing: 8) {
             // No grab bar here: every pane cell now carries the shared
             // drag/peek bar above its content, so a second handle inside the
@@ -365,6 +444,10 @@ struct AgentOverviewView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .truncationMode(.tail)
+                // First to give way: a clipped title costs nothing, a header
+                // that won't fit costs the pane beside it.
+                .layoutPriority(-1)
 
             if pane.displayedTranscript.isWorking {
                 ProgressView()
@@ -416,123 +499,130 @@ struct AgentOverviewView: View {
             }
             .foregroundStyle(.secondary)
 
+            if compact {
+                headerOverflowMenu
+            }
+
             // What the pane shows. A long session holds far more than fits in
             // a narrow column, and which part matters depends on the moment —
             // catching up, checking the last answer, watching progress, or
             // finding what broke.
-            Menu {
-                // Independent toggles: the sections are additive, so watching
-                // the agent's commands while reading its reply is one
-                // selection rather than a choice between two modes.
-                ForEach(AgentOverviewSections.allCases, id: \.rawValue) { section in
-                    Toggle(isOn: Binding(
-                        get: { pane.sections.contains(section) },
-                        set: { isOn in
-                            var next = pane.sections
-                            if isOn { next.insert(section) } else { next.remove(section) }
-                            pane.sections = next
+            if !compact {
+                Menu {
+                    // Independent toggles: the sections are additive, so watching
+                    // the agent's commands while reading its reply is one
+                    // selection rather than a choice between two modes.
+                    ForEach(AgentOverviewSections.allCases, id: \.rawValue) { section in
+                        Toggle(isOn: Binding(
+                            get: { pane.sections.contains(section) },
+                            set: { isOn in
+                                var next = pane.sections
+                                if isOn { next.insert(section) } else { next.remove(section) }
+                                pane.sections = next
+                            }
+                        )) {
+                            Text("\(section.menuTitle) — \(section.menuSubtitle)")
                         }
-                    )) {
-                        Text("\(section.menuTitle) — \(section.menuSubtitle)")
                     }
+                    Divider()
+                    Button("Show Everything") { pane.sections = .all }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: pane.sections.symbolName)
+                            .font(.system(size: 10))
+                        Text(pane.sections.barLabel)
+                            .font(.system(size: 10))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 7, weight: .semibold))
+                    }
+                    .foregroundStyle(.secondary)
                 }
-                Divider()
-                Button("Show Everything") { pane.sections = .all }
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: pane.sections.symbolName)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Choose what this overview shows")
+
+                Menu {
+                    ForEach(AgentOverviewFontFamily.allCases, id: \.rawValue) { family in
+                        Button {
+                            pane.fontFamily = family
+                        } label: {
+                            Label(family.menuTitle, systemImage: pane.fontFamily == family
+                                  ? "checkmark" : family.symbolName)
+                        }
+                    }
+                } label: {
+                    Image(systemName: pane.fontFamily.symbolName)
                         .font(.system(size: 10))
-                    Text(pane.sections.barLabel)
-                        .font(.system(size: 10))
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 7, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 16)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Overview font: \(pane.fontFamily.menuTitle)")
+
+
+                // Text size. The overview is a reading surface in a column whose
+                // width the user controls, so the comfortable size varies — and
+                // it's per pane, not global, so a narrow overview and a wide one
+                // can differ. Click the percentage to reset.
+                HStack(spacing: 2) {
+                    Button(action: decreaseActiveFontSize) {
+                        Image(systemName: "textformat.size.smaller")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canDecreaseActiveFontSize)
+                    .help(isPeeked ? "Smaller peek text" : "Smaller pane text")
+
+                    Button(action: resetActiveFontSize) {
+                        Text("\(Int((activeFontScale * 100).rounded()))%")
+                            .font(.system(size: 9, weight: .medium))
+                            .monospacedDigit()
+                    }
+                    .buttonStyle(.plain)
+                    .help(isPeeked ? "Reset peek text size" : "Reset pane text size")
+
+                    Button(action: increaseActiveFontSize) {
+                        Image(systemName: "textformat.size.larger")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canIncreaseActiveFontSize)
+                    .help(isPeeked ? "Larger peek text" : "Larger pane text")
                 }
                 .foregroundStyle(.secondary)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Choose what this overview shows")
 
-            Menu {
-                ForEach(AgentOverviewFontFamily.allCases, id: \.rawValue) { family in
-                    Button {
-                        pane.fontFamily = family
-                    } label: {
-                        Label(family.menuTitle, systemImage: pane.fontFamily == family
-                              ? "checkmark" : family.symbolName)
-                    }
-                }
-            } label: {
-                Image(systemName: pane.fontFamily.symbolName)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16, height: 16)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Overview font: \(pane.fontFamily.menuTitle)")
+                OverviewSpeakButton(
+                    speaker: pane.speaker,
+                    text: OverviewSpeaker.spokenText(blocks: pane.displayedTranscript.blocks)
+                )
 
-            // Text size. The overview is a reading surface in a column whose
-            // width the user controls, so the comfortable size varies — and
-            // it's per pane, not global, so a narrow overview and a wide one
-            // can differ. Click the percentage to reset.
-            HStack(spacing: 2) {
-                Button(action: decreaseActiveFontSize) {
-                    Image(systemName: "textformat.size.smaller")
-                        .font(.system(size: 10))
+                Button(action: { pane.toggleBionic() }) {
+                    Text("B")
+                        .font(.system(size: 11, weight: .bold, design: .serif))
+                        .foregroundStyle(pane.bionicEnabled ? Color.accentColor : Color.secondary)
+                        .frame(width: 18, height: 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(pane.bionicEnabled
+                                      ? Color.accentColor.opacity(0.18)
+                                      : Color.clear)
+                        )
                 }
                 .buttonStyle(.plain)
-                .disabled(!canDecreaseActiveFontSize)
-                .help(isPeeked ? "Smaller peek text" : "Smaller pane text")
+                .help(pane.bionicEnabled ? "Turn off bionic reading" : "Turn on bionic reading")
 
-                Button(action: resetActiveFontSize) {
-                    Text("\(Int((activeFontScale * 100).rounded()))%")
-                        .font(.system(size: 9, weight: .medium))
-                        .monospacedDigit()
+                Button(action: { pane.refresh() }) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help(isPeeked ? "Reset peek text size" : "Reset pane text size")
-
-                Button(action: increaseActiveFontSize) {
-                    Image(systemName: "textformat.size.larger")
-                        .font(.system(size: 10))
-                }
-                .buttonStyle(.plain)
-                .disabled(!canIncreaseActiveFontSize)
-                .help(isPeeked ? "Larger peek text" : "Larger pane text")
+                .help("Refresh")
             }
-            .foregroundStyle(.secondary)
-
-            OverviewSpeakButton(
-                speaker: pane.speaker,
-                text: OverviewSpeaker.spokenText(blocks: pane.displayedTranscript.blocks)
-            )
-
-            Button(action: { pane.toggleBionic() }) {
-                Text("B")
-                    .font(.system(size: 11, weight: .bold, design: .serif))
-                    .foregroundStyle(pane.bionicEnabled ? Color.accentColor : Color.secondary)
-                    .frame(width: 18, height: 16)
-                    .background(
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(pane.bionicEnabled
-                                  ? Color.accentColor.opacity(0.18)
-                                  : Color.clear)
-                    )
-            }
-            .buttonStyle(.plain)
-            .help(pane.bionicEnabled ? "Turn off bionic reading" : "Turn on bionic reading")
-
-            Button(action: { pane.refresh() }) {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Refresh")
 
             if let onClose {
                 Button(action: { onClose(pane) }) {
