@@ -150,6 +150,40 @@ struct CommandCenterLayoutTests {
         #expect(monitor.messageHistory(for: row) == ["two", "one"])
     }
 
+    // MARK: Attachments
+
+    @Test func attachmentPathIsAppendedToWhateverIsTyped() {
+        #expect(CommandCenterAttachments.draft("", appending: "/tmp/a.png") == "/tmp/a.png ")
+        #expect(CommandCenterAttachments.draft("look at ", appending: "/tmp/a.png")
+            == "look at /tmp/a.png ")
+        #expect(CommandCenterAttachments.draft("  ", appending: "~/x.log") == "~/x.log ")
+    }
+
+    @Test func draggedFilesKeepTheirNameAndExtension() {
+        let now = Date(timeIntervalSince1970: 1_787_000_000)
+        let name = CommandCenterAttachments.uniqueName(for: "Build Output.LOG", now: now)
+        #expect(name.hasPrefix("Build-Output-"))
+        #expect(name.hasSuffix(".log"))
+        // Nothing a shell would need quoted, since the path goes into a
+        // message unquoted.
+        #expect(!name.contains(" "))
+    }
+
+    @Test func twoDragsOfTheSameFileDoNotCollide() {
+        let now = Date(timeIntervalSince1970: 1_787_000_000)
+        let first = CommandCenterAttachments.uniqueName(for: "shot.png", now: now)
+        let second = CommandCenterAttachments.uniqueName(for: "shot.png", now: now)
+        #expect(first != second)
+    }
+
+    @Test func pastedImageDataGetsAName() {
+        let now = Date(timeIntervalSince1970: 1_787_000_000)
+        let name = CommandCenterAttachments.generatedName(ext: "png", now: now)
+        #expect(name.hasPrefix("trm-"))
+        #expect(name.hasSuffix(".png"))
+        #expect(CommandCenterAttachments.generatedName(ext: "", now: now).hasSuffix(".bin"))
+    }
+
     // MARK: firstSentence
 
     @Test func briefingTakesTheOpeningSentence() {

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Every running agent's current message, in one scrolling list.
 ///
@@ -26,6 +27,10 @@ struct CommandCenterView: View {
     @State private var draftBeforeHistory: [ObjectIdentifier: String] = [:]
     /// Local key monitor, live only while a reply box has focus.
     @State private var keyMonitor: Any?
+
+    /// What each pane's box is doing about an attachment right now: copying
+    /// it, or why it couldn't.
+    @State private var attachmentStatus: [ObjectIdentifier: String] = [:]
 
     /// Which card's reply box has the keyboard.
     ///
@@ -490,6 +495,96 @@ struct CommandCenterView: View {
             .buttonStyle(.plain)
             .disabled(binding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
+        // Drop a screenshot, a log, a diff: it is staged where the agent can
+        // read it and its path goes in the message.
+        .onDrop(of: [.fileURL, .image], isTargeted: nil) { providers in
+            attach(providers: providers, to: entry)
+            return true
+        }
+        .overlay(alignment: .topLeading) {
+            if let status = attachmentStatus[entry.id] {
+                Text(status)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.regularMaterial, in: Capsule())
+                    .offset(y: -14)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    // MARK: - Attachments
+
+    /// Take dropped items, put them where the pane's agent can read them, and
+    /// leave the path in the box.
+    ///
+    /// The path goes in the draft rather than being sent on its own: an
+    /// attachment almost always comes with a sentence about what to do with
+    /// it, and a path you can see before you send is a path you can correct.
+    private func attach(providers: [NSItemProvider], to entry: CommandCenterMonitor.Entry) {
+        guard let surface = entry.surface else { return }
+        for provider in providers {
+            _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) {
+                data, _ in
+                guard let data,
+                      let path = String(data: data, encoding: .utf8),
+                      let url = URL(string: path) ?? URL(string: path.removingPercentEncoding ?? "")
+                else { return }
+                Task { @MainActor in
+                    guard let bytes = try? Data(contentsOf: url) else {
+                        attachmentStatus[entry.id] = "Couldn't read \(url.lastPathComponent)."
+                        clearStatusLater(entry.id)
+                        return
+                    }
+                    await stage(
+                        .init(
+                            data: bytes,
+                            filename: CommandCenterAttachments.uniqueName(
+                                for: url.lastPathComponent, now: Date())),
+                        to: entry, on: surface)
+                }
+            }
+        }
+    }
+
+    /// Attach whatever is on the pasteboard, if it is a file or an image.
+    /// Returns false when it is ordinary text, which should paste normally.
+    private func attachFromPasteboard(to entry: CommandCenterMonitor.Entry) -> Bool {
+        guard let surface = entry.surface else { return false }
+        let payloads = CommandCenterAttachments.payloads(from: .general)
+        guard !payloads.isEmpty else { return false }
+        Task { @MainActor in
+            for payload in payloads { await stage(payload, to: entry, on: surface) }
+        }
+        return true
+    }
+
+    @MainActor
+    private func stage(
+        _ payload: CommandCenterAttachments.Payload,
+        to entry: CommandCenterMonitor.Entry,
+        on surface: Ghostty.SurfaceView
+    ) async {
+        if surface.remoteHost != nil {
+            attachmentStatus[entry.id] = "Copying \(payload.filename) to \(surface.remoteHost ?? "")…"
+        }
+        let result = await CommandCenterAttachments.stage(payload, for: surface)
+        switch result {
+        case .success(let path):
+            drafts[entry.id] = CommandCenterAttachments.draft(drafts[entry.id] ?? "", appending: path)
+            historyIndex[entry.id] = -1
+            focusedDraft = entry.id
+            attachmentStatus[entry.id] = nil
+        case .failure(let error):
+            attachmentStatus[entry.id] = error.message
+            clearStatusLater(entry.id)
+        }
+    }
+
+    private func clearStatusLater(_ id: ObjectIdentifier) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { attachmentStatus[id] = nil }
     }
 
     // MARK: - History
@@ -505,9 +600,20 @@ struct CommandCenterView: View {
             // 126 = up, 125 = down. Plain presses only: modified arrows still
             // mean selection and word movement.
             guard let id = focusedDraft,
-                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
-                  event.keyCode == 126 || event.keyCode == 125,
                   let entry = monitor.entries.first(where: { $0.id == id })
+            else { return event }
+
+            // ⌘V of a file or an image attaches it; ⌘V of text pastes as
+            // usual, which is why this only swallows the event when there was
+            // something to attach.
+            if event.keyCode == 9,
+               event.modifierFlags.contains(.command),
+               event.modifierFlags.intersection([.option, .control]).isEmpty {
+                return attachFromPasteboard(to: entry) ? nil : event
+            }
+
+            guard event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                  event.keyCode == 126 || event.keyCode == 125
             else { return event }
             return step(entry, back: event.keyCode == 126) ? nil : event
         }
