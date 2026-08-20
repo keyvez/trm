@@ -234,6 +234,16 @@ private struct SessionTile: View {
 
     @State private var hovering = false
 
+    private func statusChip(_ text: String, color: Color, help: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(color.opacity(0.15)))
+            .help(help)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let summary = session.summary {
@@ -280,19 +290,21 @@ private struct SessionTile: View {
                         .background(Capsule().fill(Color.accentColor.opacity(0.16)))
                 }
 
-                if session.attached {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 5, height: 5)
-                        .help("Attached to a window")
-                } else if !session.referenced {
-                    // Live, but no saved layout points at it: exactly the
-                    // state a lost pane ends up in.
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 5, height: 5)
-                        .help("Detached — no saved window refers to this")
-                }
+                // Whether anything is looking at this session, said in words.
+                // It was a five-point dot with a tooltip, which is the kind of
+                // thing you only find if you already know it is there — and
+                // "is this one still open somewhere?" is the question the
+                // browser exists to answer.
+                statusChip(
+                    session.attached ? "Attached" : "Detached",
+                    color: session.attached
+                        ? Color.accentColor
+                        : (session.referenced ? Color.secondary : Color.orange),
+                    help: session.attached
+                        ? "A window is showing this session"
+                        : (session.referenced
+                            ? "Running, and a saved window refers to it"
+                            : "Running, and no saved window refers to it"))
 
                 Spacer(minLength: 0)
 

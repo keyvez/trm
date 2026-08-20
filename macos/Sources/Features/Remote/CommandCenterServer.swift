@@ -227,6 +227,11 @@ final class CommandCenterServer: ObservableObject {
         do {
             let params = NWParameters.tcp
             params.includePeerToPeer = true
+            // Reload Latest UI deliberately overlaps the old and new app, so
+            // the new one asks for a port the outgoing one still holds.
+            // Without this it fell back to an ephemeral port — and every
+            // phone paired to the old number got "connection refused".
+            params.allowLocalEndpointReuse = true
             let listener: NWListener
             if let preferred, let port = NWEndpoint.Port(rawValue: preferred) {
                 listener = try NWListener(using: params, on: port)
@@ -249,9 +254,11 @@ final class CommandCenterServer: ObservableObject {
                         let port = listener.port?.rawValue
                         self?.port = port
                         self?.isRunning = true
-                        // Remember it, so the next launch answers on the same
-                        // number the phone already has.
-                        if let port { Self.rememberedPort = port }
+                        // Only a *chosen* port is worth remembering. Recording
+                        // a fallback would make one unlucky launch permanent,
+                        // and the next start would ask for the wrong number
+                        // rather than the one paired phones know.
+                        if let port, preferred != nil { Self.rememberedPort = port }
                         Self.logger.info("Command Center server ready on port \(port ?? 0)")
                         self?.settle(port.map { .success($0) }
                             ?? .failure(StartupFailure(reason: "The server came up without a port.")))

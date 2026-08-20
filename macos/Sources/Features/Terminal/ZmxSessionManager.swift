@@ -591,6 +591,10 @@ enum ZmxSessionManager {
         // thing travels as a single ssh argument, and a here-doc or embedded
         // newlines would have to survive the login shell on the other side.
         [
+            // Transcript resolution, shared with the Agent Overview's probe so
+            // a tile and an overview can't disagree about which conversation a
+            // session is having.
+            AgentProbeShell.functions,
             "Z=\"\(remoteZmxPath)\";",
             "[ -x \"$Z\" ] || exit 0;",
             "D=\"$HOME/.trm/zmx\";",
@@ -608,20 +612,20 @@ enum ZmxSessionManager {
             "      esac;",
             "    done;",
             "    [ -n \"$N\" ] || continue;",
-            "    W=\"\"; M=\"\"; T=\"\";",
-            // Where this session's agent writes, when its SessionStart hook
-            // recorded it. Only the recorded path is read: deriving it would
-            // mean running the full locate probe per session, and a browser
-            // isn't worth that many round trips.
-            "    R=\"$HOME/.trm/agent-sessions/$N\";",
-            "    [ -f \"$R\" ] && T=\"$(cat \"$R\" 2>/dev/null)\";",
-            "    [ -n \"$T\" ] && [ ! -f \"$T\" ] && T=\"\";",
+            "    W=\"\"; M=\"\"; T=\"\"; AKIND=\"\";",
             "    if [ -n \"$P\" ]; then",
             "      W=$(lsof -a -p \"$P\" -d cwd -Fn 2>/dev/null | sed -n \"s/^n//p\" | head -1);",
             "      K=$(pgrep -P \"$P\" 2>/dev/null | head -1);",
             "      [ -n \"$K\" ] && M=$(ps -o command= -p \"$K\" 2>/dev/null | head -1);",
+            // What this session is *saying*, resolved the same way the Agent
+            // Overview resolves it — the hook's record where there is one, the
+            // process tree and file times otherwise. Reading only the record
+            // meant a machine without the hook showed a wall of identical
+            // command lines.
+            "      RT=\"$(resolve_transcript \"$P\" \"$N\")\";",
+            "      if [ -n \"$RT\" ]; then AKIND=\"${RT%% *}\"; T=\"${RT#* }\"; fi;",
             "    fi;",
-            "    printf \"%s\\t%s\\t%s\\t%s\\t%s\\n\" \"$N\" \"$C\" \"$W\" \"$M\" \"$T\";",
+            "    printf \"%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n\" \"$N\" \"$C\" \"$W\" \"$M\" \"$T\" \"$AKIND\";",
             "  done;",
             "done",
         ].joined(separator: " ")
@@ -651,6 +655,8 @@ enum ZmxSessionManager {
         var result: [SessionInfo] = []
         /// session name → transcript path on the far side.
         var transcripts: [String: String] = [:]
+        /// session name → which agent wrote it, as the probe reported.
+        var kinds: [String: String] = [:]
         for line in out.components(separatedBy: .newlines) {
             let cols = line.components(separatedBy: "\t")
             guard cols.count >= 4, !cols[0].isEmpty else { continue }
@@ -658,6 +664,7 @@ enum ZmxSessionManager {
             let cwd = cols[2].isEmpty ? nil : cols[2]
             let command = cols[3].isEmpty ? nil : cols[3]
             if cols.count >= 5, !cols[4].isEmpty { transcripts[cols[0]] = cols[4] }
+            if cols.count >= 6, !cols[5].isEmpty { kinds[cols[0]] = cols[5] }
             result.append(SessionInfo(
                 name: cols[0],
                 cwd: cwd,
@@ -676,7 +683,8 @@ enum ZmxSessionManager {
             let tails = remoteTranscriptTails(host: host, paths: transcripts)
             for index in result.indices {
                 guard let text = tails[result[index].name], !text.isEmpty else { continue }
-                let isCodex = (transcripts[result[index].name] ?? "").contains("/.codex/")
+                let isCodex = kinds[result[index].name] == "codex"
+                    || (transcripts[result[index].name] ?? "").contains("/.codex/")
                 let lines = text.components(separatedBy: .newlines)
                 let transcript = isCodex
                     ? CodexTranscriptReader.parse(lines: lines)

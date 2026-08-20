@@ -25,6 +25,11 @@ struct CommandCenterView: View {
     @State private var historyIndex: [ObjectIdentifier: Int] = [:]
     /// What was in the box before walking back, so Down returns it.
     @State private var draftBeforeHistory: [ObjectIdentifier: String] = [:]
+    /// The last text *we* put in a box. A TextField writes back through its
+    /// binding when its contents change, including changes we made — without
+    /// this, stepping through history looked like typing and cleared the very
+    /// state that remembers the draft.
+    @State private var historyEcho: [ObjectIdentifier: String] = [:]
     /// Local key monitor, live only while a reply box has focus.
     @State private var keyMonitor: Any?
 
@@ -526,8 +531,13 @@ struct CommandCenterView: View {
             get: { drafts[entry.id] ?? "" },
             set: { newValue in
                 // Editing means you have left the history and are writing
-                // again; the next Up starts from the newest message.
-                if newValue != drafts[entry.id] { historyIndex[entry.id] = -1 }
+                // again; the next Up starts from the newest message. A write
+                // that matches what history just put there is our own echo,
+                // not the user, and must not reset anything.
+                if newValue != drafts[entry.id], newValue != historyEcho[entry.id] {
+                    historyIndex[entry.id] = -1
+                    draftBeforeHistory[entry.id] = nil
+                }
                 drafts[entry.id] = newValue
             }
         )
@@ -779,30 +789,39 @@ struct CommandCenterView: View {
 
         if back {
             guard current + 1 < history.count else { return false }
+            // Whatever is in the box on the way in is kept, so walking all the
+            // way back down returns you to it — half-written and all.
             if current < 0 { draftBeforeHistory[entry.id] = drafts[entry.id] ?? "" }
             historyIndex[entry.id] = current + 1
-            drafts[entry.id] = history[current + 1]
+            apply(history[current + 1], to: entry)
             return true
         }
 
         guard current >= 0 else { return false }
         if current == 0 {
             historyIndex[entry.id] = -1
-            drafts[entry.id] = draftBeforeHistory[entry.id] ?? ""
+            apply(draftBeforeHistory[entry.id] ?? "", to: entry)
+            draftBeforeHistory[entry.id] = nil
         } else {
             historyIndex[entry.id] = current - 1
-            drafts[entry.id] = history[current - 1]
+            apply(history[current - 1], to: entry)
         }
         return true
+    }
+
+    /// Put text in a box without it counting as typing.
+    private func apply(_ text: String, to entry: CommandCenterMonitor.Entry) {
+        historyEcho[entry.id] = text
+        drafts[entry.id] = text
     }
 
     private func send(_ entry: CommandCenterMonitor.Entry) {
         let text = (drafts[entry.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let surface = entry.surface else { return }
         onSendToPane?(surface, text)
-        drafts[entry.id] = ""
+        apply("", to: entry)
         historyIndex[entry.id] = -1
-        draftBeforeHistory[entry.id] = ""
+        draftBeforeHistory[entry.id] = nil
         focusedDraft = entry.id
     }
 }
