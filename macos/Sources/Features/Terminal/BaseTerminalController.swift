@@ -3256,6 +3256,13 @@ class BaseTerminalController: NSWindowController,
             "[send] paneId=\(surface.paneId.map(String.init) ?? "?") " +
             "bytes=\(body.utf8.count) head=\(hex)")
 
+        // Every path into an agent goes through here — the overview's box, the
+        // Command Center's, the phone — so this is where the history of what
+        // you have said to a pane is written down.
+        if let paneId = surface.paneId {
+            CommandCenterMonitor.shared.recordSentMessage(paneId: paneId, text: body)
+        }
+
         sendTextToSurface(surface, text: body)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.sendTextToSurface(surface, text: "\r")

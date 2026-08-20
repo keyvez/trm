@@ -19,6 +19,14 @@ struct CommandCenterView: View {
 
     @State private var drafts: [ObjectIdentifier: String] = [:]
 
+    /// How far back through a pane's history the reply box has walked, per
+    /// pane. -1 is "not in history, this is what you typed".
+    @State private var historyIndex: [ObjectIdentifier: Int] = [:]
+    /// What was in the box before walking back, so Down returns it.
+    @State private var draftBeforeHistory: [ObjectIdentifier: String] = [:]
+    /// Local key monitor, live only while a reply box has focus.
+    @State private var keyMonitor: Any?
+
     /// Which card's reply box has the keyboard.
     ///
     /// Set by tapping the box itself, and kept there after sending so a
@@ -92,6 +100,12 @@ struct CommandCenterView: View {
         .onDisappear {
             monitor.briefingsEnabled = false
             monitor.unsubscribe()
+            removeKeyMonitor()
+        }
+        .onChange(of: focusedDraft) { focused in
+            // The monitor exists only while a box has the keyboard, so arrow
+            // keys anywhere else in the app are untouched.
+            if focused != nil { installKeyMonitor() } else { removeKeyMonitor() }
         }
         .onChange(of: briefingMode) { enabled in
             monitor.briefingsEnabled = enabled
@@ -370,7 +384,7 @@ struct CommandCenterView: View {
                 if fixedHeight != nil { Spacer(minLength: 0) }
 
                 if onSendToPane != nil {
-                    composer(entry)
+                    composer(entry, large: true)
                         .padding(.top, 1)
                 }
             }
@@ -384,9 +398,9 @@ struct CommandCenterView: View {
         )
     }
 
-    /// Briefing tiles are shorter than detail cards: one sentence, one
-    /// escalation line, one reply box.
-    private static let briefingTileHeight: CGFloat = 176
+    /// Briefing tiles: one sentence, one escalation line, and a reply box
+    /// twice the height of the detail view's — grown to fit it.
+    private static let briefingTileHeight: CGFloat = 216
 
     /// How much of your attention a pane is asking for. Ordered by how much
     /// it costs to ignore.
@@ -436,19 +450,27 @@ struct CommandCenterView: View {
                   : (entry.isWorking ? "Working" : "Idle"))
     }
 
-    private func composer(_ entry: CommandCenterMonitor.Entry) -> some View {
+    /// `large` doubles the box for briefing mode, where the row is a
+    /// decision to act on and the reply is the action — a one-line field you
+    /// have to squint at is the wrong shape for that.
+    private func composer(_ entry: CommandCenterMonitor.Entry, large: Bool = false) -> some View {
         let binding = Binding(
             get: { drafts[entry.id] ?? "" },
-            set: { drafts[entry.id] = $0 }
+            set: { newValue in
+                // Editing means you have left the history and are writing
+                // again; the next Up starts from the newest message.
+                if newValue != drafts[entry.id] { historyIndex[entry.id] = -1 }
+                drafts[entry.id] = newValue
+            }
         )
         return HStack(spacing: 6) {
             TextField("Reply…", text: binding, axis: .vertical)
                 .textFieldStyle(.plain)
-                .lineLimit(1...4)
-                .font(.system(size: 11.5, design: .monospaced))
+                .lineLimit(large ? 2...8 : 1...4)
+                .font(.system(size: large ? 13 : 11.5, design: .monospaced))
                 .focused($focusedDraft, equals: entry.id)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
+                .padding(.horizontal, large ? 10 : 8)
+                .padding(.vertical, large ? 10 : 5)
                 .background(
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .fill(Color.primary.opacity(focusedDraft == entry.id ? 0.10 : 0.06))
@@ -463,11 +485,64 @@ struct CommandCenterView: View {
                 send(entry)
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 15))
+                    .font(.system(size: large ? 22 : 15))
             }
             .buttonStyle(.plain)
             .disabled(binding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
+    }
+
+    // MARK: - History
+
+    /// Up walks back through what you have said to this pane, Down comes
+    /// forward again — the shell convention, in the box that behaves most like
+    /// a prompt. The history merges what trm sent with what the agent recorded,
+    /// so a message typed at the pane and one sent from here are the same
+    /// history.
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // 126 = up, 125 = down. Plain presses only: modified arrows still
+            // mean selection and word movement.
+            guard let id = focusedDraft,
+                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                  event.keyCode == 126 || event.keyCode == 125,
+                  let entry = monitor.entries.first(where: { $0.id == id })
+            else { return event }
+            return step(entry, back: event.keyCode == 126) ? nil : event
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+    }
+
+    /// Move one step through `entry`'s history. Returns false when there is
+    /// nowhere to go, so the key press falls through to the text field and
+    /// still moves the cursor.
+    private func step(_ entry: CommandCenterMonitor.Entry, back: Bool) -> Bool {
+        let history = monitor.messageHistory(for: entry)
+        guard !history.isEmpty else { return false }
+        let current = historyIndex[entry.id] ?? -1
+
+        if back {
+            guard current + 1 < history.count else { return false }
+            if current < 0 { draftBeforeHistory[entry.id] = drafts[entry.id] ?? "" }
+            historyIndex[entry.id] = current + 1
+            drafts[entry.id] = history[current + 1]
+            return true
+        }
+
+        guard current >= 0 else { return false }
+        if current == 0 {
+            historyIndex[entry.id] = -1
+            drafts[entry.id] = draftBeforeHistory[entry.id] ?? ""
+        } else {
+            historyIndex[entry.id] = current - 1
+            drafts[entry.id] = history[current - 1]
+        }
+        return true
     }
 
     private func send(_ entry: CommandCenterMonitor.Entry) {
@@ -475,6 +550,8 @@ struct CommandCenterView: View {
         guard !text.isEmpty, let surface = entry.surface else { return }
         onSendToPane?(surface, text)
         drafts[entry.id] = ""
+        historyIndex[entry.id] = -1
+        draftBeforeHistory[entry.id] = ""
         focusedDraft = entry.id
     }
 }

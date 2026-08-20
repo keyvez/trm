@@ -73,7 +73,8 @@ struct CommandCenterLayoutTests {
         working: Bool = false,
         needsAttention: Bool = false,
         errorCount: Int = 0,
-        errorText: String? = nil
+        errorText: String? = nil,
+        promptHistory: [String] = []
     ) -> CommandCenterMonitor.Entry {
         .init(
             id: anchors.identity(id),
@@ -84,6 +85,7 @@ struct CommandCenterLayoutTests {
             host: nil,
             message: message,
             prompt: nil,
+            promptHistory: promptHistory,
             isWorking: working,
             needsAttention: needsAttention,
             errorCount: errorCount,
@@ -116,6 +118,36 @@ struct CommandCenterLayoutTests {
         #expect(CommandCenterView.escalation(
             for: entry(id: 4, errorCount: 2, errorText: "exit status 1"))
             == "2 errors this turn — exit status 1")
+    }
+
+    // MARK: Message history
+
+    @MainActor
+    @Test func historyIsNewestFirstWithoutRepeats() {
+        let monitor = CommandCenterMonitor.shared
+        let row = entry(id: 90, promptHistory: ["first", "second", "second", "third"])
+        // The transcript is oldest-first; walking back with Up wants the
+        // reverse, and a prompt repeated in the transcript is one entry.
+        #expect(monitor.messageHistory(for: row) == ["third", "second", "first"])
+    }
+
+    @MainActor
+    @Test func messagesTrmSentComeBeforeTheTranscriptCatchesUp() {
+        let monitor = CommandCenterMonitor.shared
+        monitor.recordSentMessage(paneId: 91, text: "just sent this")
+        // Already in the transcript: recorded once, from the transcript.
+        monitor.recordSentMessage(paneId: 91, text: "older message")
+        let row = entry(id: 91, promptHistory: ["older message"])
+        #expect(monitor.messageHistory(for: row) == ["just sent this", "older message"])
+    }
+
+    @MainActor
+    @Test func aPaneWithNoTranscriptStillRemembersWhatWasSent() {
+        let monitor = CommandCenterMonitor.shared
+        monitor.recordSentMessage(paneId: 92, text: "one")
+        monitor.recordSentMessage(paneId: 92, text: "two")
+        let row = entry(id: 92)
+        #expect(monitor.messageHistory(for: row) == ["two", "one"])
     }
 
     // MARK: firstSentence

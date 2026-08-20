@@ -45,6 +45,9 @@ final class CommandCenterMonitor: ObservableObject {
         let message: String
         /// The last thing the human asked, for context when the reply is terse.
         let prompt: String?
+        /// Everything this person has said to this agent, oldest first, as the
+        /// transcript records it. The reply box walks back through this.
+        let promptHistory: [String]
         /// True while the newest transcript entry is a tool call with no
         /// result yet: the agent is mid-task rather than waiting on you.
         let isWorking: Bool
@@ -250,6 +253,7 @@ final class CommandCenterMonitor: ObservableObject {
             host: surface.remoteHost,
             message: message,
             prompt: transcript.lastUserPrompt,
+            promptHistory: Self.promptHistory(transcript),
             isWorking: transcript.isWorking,
             needsAttention: !questions.isEmpty,
             errorCount: errors.count,
@@ -332,6 +336,7 @@ final class CommandCenterMonitor: ObservableObject {
                 ? "Connecting…"
                 : (status ?? "Reading the transcript…"),
             prompt: nil,
+            promptHistory: [],
             isWorking: false,
             needsAttention: false,
             errorCount: 0,
@@ -339,6 +344,56 @@ final class CommandCenterMonitor: ObservableObject {
             updatedAt: nil,
             surface: surface
         )
+    }
+
+    /// Prompts from the parse window, oldest first, deduplicated against
+    /// consecutive repeats and capped — this is a reply box's history, not an
+    /// archive.
+    private static func promptHistory(_ transcript: AgentTranscript, limit: Int = 50) -> [String] {
+        var result: [String] = []
+        for turn in transcript.turns {
+            guard let prompt = turn.prompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !prompt.isEmpty, prompt != result.last else { continue }
+            result.append(prompt)
+        }
+        return Array(result.suffix(limit))
+    }
+
+    // MARK: - Sent messages
+
+    /// Messages sent from trm, per pane, with when they went.
+    ///
+    /// The transcript is the real record of what this person has said to an
+    /// agent — including messages sent from here, once the agent writes them
+    /// down. Until it does there is a gap of a second or two, and for a pane
+    /// whose program keeps no transcript there is a gap forever, so what trm
+    /// sent is kept alongside and merged in.
+    private var sentMessages: [Int: [(text: String, at: Date)]] = [:]
+
+    func recordSentMessage(paneId: Int, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var log = sentMessages[paneId] ?? []
+        log.append((text: trimmed, at: Date()))
+        sentMessages[paneId] = Array(log.suffix(50))
+    }
+
+    /// What this person has said to a pane, newest first: everything trm sent
+    /// that the transcript hasn't caught up with yet, then the transcript's
+    /// own prompts in reverse.
+    ///
+    /// Interleaving by wall-clock isn't needed and would be worse: the
+    /// transcript already holds both sources in true send order once it
+    /// settles, so the only thing to splice is the recent tail trm knows
+    /// about and the agent hasn't recorded.
+    func messageHistory(for entry: Entry) -> [String] {
+        let recorded = Set(entry.promptHistory)
+        let pending = (sentMessages[entry.paneId] ?? [])
+            .filter { !recorded.contains($0.text) }
+            .sorted { $0.at > $1.at }
+            .map(\.text)
+        var seen: Set<String> = []
+        return (pending + entry.promptHistory.reversed()).filter { seen.insert($0).inserted }
     }
 
     /// The agent's message as one paragraph of plain text.
