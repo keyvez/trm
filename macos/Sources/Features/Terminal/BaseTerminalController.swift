@@ -204,6 +204,14 @@ class BaseTerminalController: NSWindowController,
 
     /// The currently peeked sub-pane (expanded overlay), or `nil` if no peek.
     @Published var peekedPane: ObjectIdentifier? = nil
+    /// The overview `peekPane` opened for this peek, if it opened one.
+    ///
+    /// Peek is a transient gesture; the overview it brings along has to be
+    /// transient too. Left open, every glance at a pane would spend a grid
+    /// cell permanently, and a few peeks would rearrange a layout the person
+    /// spent real effort on. Only an overview peek itself created is closed —
+    /// one that was already open was someone's decision and stays.
+    private var overviewOpenedForPeek: AgentOverviewPane? = nil
     /// Horizontal presentation offset for the single live peek tree.
     @Published var peekSlideOffset: CGFloat = 0
     /// Keeps the active/incoming watermark prominent during navigation.
@@ -1606,6 +1614,26 @@ class BaseTerminalController: NSWindowController,
         return agentOverviewPanes.contains { $0.surface === surface }
     }
 
+    /// Whether a pane is running an agent, cheaply enough to ask on a tap.
+    ///
+    /// A remote pane is taken at its word when trm recorded a session for it:
+    /// asking properly costs an SSH round trip, and the overview makes that
+    /// call itself and shows whatever it finds. A local pane is checked
+    /// against its process tree — the same test the Command Center uses to
+    /// decide whether a pane belongs on the board.
+    func paneHasAgent(_ surface: Ghostty.SurfaceView) -> Bool {
+        if surface.remoteHost != nil { return surface.remoteZmxSession != nil }
+        var shellPid: pid_t = 0
+        if let session = surface.zmxSessionName,
+           let serverShell = ZmxSessionManager.cachedServerShellPid(session: session) {
+            shellPid = serverShell
+        } else if let paneId = surface.paneId {
+            shellPid = Trm.shared.paneChildPid(paneId: UInt32(paneId))
+        }
+        guard shellPid > 0 else { return false }
+        return AgentSessionLocator.agentProcess(underShell: shellPid) != nil
+    }
+
     /// Open (or focus) the agent overview for a terminal pane.
     ///
     /// The view is inserted immediately to the right of its terminal pane,
@@ -1922,8 +1950,53 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
+    /// Close the overview a peek opened, if it is still there.
+    ///
+    /// Called before a new peek as well as on dismissal: peeking a second pane
+    /// while the first is still peeked never passes through `dismissPeek`, and
+    /// without this the first pane's overview would be stranded in the grid.
+    private func closeOverviewOpenedForPeek() {
+        guard let overview = overviewOpenedForPeek else { return }
+        overviewOpenedForPeek = nil
+        // A pane that closed took its overview with it; nothing left to do.
+        guard agentOverviewPanes.contains(where: { $0 === overview }) else { return }
+        closeAgentOverview(overview)
+    }
+
     /// Show the peek overlay for a stacked pane.
-    func peekPane(_ pane: GridPane) {
+    ///
+    /// An agent's terminal peeked on its own is half the pane. The terminal is
+    /// the transcript scrolling past; the overview is what it came to — what
+    /// was asked, what the agent said, what it wants from you. Peek means "I
+    /// want to work in this one now", which is precisely when both halves are
+    /// wanted, and having to open the overview by hand every time made the
+    /// gesture take two steps to do one thing.
+    ///
+    /// Only the *existence* of the overview is arranged here: the overlay
+    /// already draws a terminal together with its bound overview, in either
+    /// direction, so nothing about the peek itself has to change.
+    ///
+    /// Gated on there actually being an agent. An overview of a plain shell
+    /// has nothing to show and still costs a grid cell, which is a worse
+    /// trade than the one keystroke it saves.
+    /// - Parameter transientOverview: an overview the *caller* opened purely to
+    ///   have something to peek — ⌘-clicking a Command Center card, say. It is
+    ///   closed with the peek for the same reason peek's own is: nobody asked
+    ///   for a permanent pane, they asked to look at something.
+    func peekPane(_ pane: GridPane, transientOverview: AgentOverviewPane? = nil) {
+        closeOverviewOpenedForPeek()
+
+        var opened = transientOverview
+        if opened == nil,
+           case .terminal(let surface) = pane,
+           !isLayoutEditingDisabled,
+           !hasAgentOverview(for: pane),
+           paneHasAgent(surface) {
+            showAgentOverview(for: pane)
+            opened = agentOverviewPanes.last { $0.surface === surface }
+        }
+        overviewOpenedForPeek = opened
+
         peekNavigationGeneration += 1
         peekSlideOffset = 0
         isPeekNavigationAnimating = false
@@ -1950,10 +2023,6 @@ class BaseTerminalController: NSWindowController,
             surfaceToFocus = children.lazy.compactMap {
                 if case .terminal(let s) = $0 { return s } else { return nil }
             }.first
-        case .agentOverview(let overview):
-            // Peeking an overview expands its bound terminal beside it, so
-            // typing should reach the agent that's now on screen.
-            surfaceToFocus = overview.surface
         default:
             surfaceToFocus = nil
         }
@@ -1968,6 +2037,8 @@ class BaseTerminalController: NSWindowController,
         peekSlideOffset = 0
         isPeekNavigationAnimating = false
         peekedPane = nil
+        // Put the grid back the way it was found.
+        closeOverviewOpenedForPeek()
     }
 
     /// Move through visual grid panes while the expanded peek remains open.
@@ -3554,8 +3625,13 @@ class BaseTerminalController: NSWindowController,
             // An agent overview only describes this surface, so it goes with it.
             closeAgentOverviews(forSurface: view)
 
-            // Dismiss peek if the peeked pane is being closed.
-            if peekedPane == paneID { peekedPane = nil }
+            // Dismiss peek if the peeked pane is being closed. Its overview
+            // went with it in `closeAgentOverviews` just above, so this only
+            // drops the reference peek was holding.
+            if peekedPane == paneID {
+                peekedPane = nil
+                overviewOpenedForPeek = nil
+            }
 
             // Update grid shape if in grid mode.
             // - Standalone pane (not in stack): decrement gridRowCols (cell disappears)
@@ -6412,6 +6488,7 @@ class BaseTerminalController: NSWindowController,
         // Drop stale peek state for panes that no longer exist.
         if let peeked = peekedPane, !flatIDs.contains(peeked) {
             peekedPane = nil
+            overviewOpenedForPeek = nil
         }
     }
 

@@ -798,14 +798,21 @@ final class CommandCenterMonitor: ObservableObject {
         }
 
         let pane = GridPane.terminal(surface)
-        if !controller.hasAgentOverview(for: pane) {
+        // An overview opened *here* exists only to answer this click. Escape
+        // should leave the grid as it found it — the person wanted to read an
+        // agent, not to permanently spend a cell on it. One that was already
+        // open is someone's arrangement and outlives the peek.
+        let openedForThisReveal = !controller.hasAgentOverview(for: pane)
+        if openedForThisReveal {
             controller.showAgentOverview(for: pane)
         }
         guard let overview = controller.agentOverviewPanes.first(where: { $0.surface === surface })
         else { return }
         // Peeking the overview expands its terminal alongside it, so this ends
         // with both halves of the pair on screen.
-        controller.peekPane(.agentOverview(overview))
+        controller.peekPane(
+            .agentOverview(overview),
+            transientOverview: openedForThisReveal ? overview : nil)
     }
 
     private static func controller(owning surface: Ghostty.SurfaceView) -> BaseTerminalController? {

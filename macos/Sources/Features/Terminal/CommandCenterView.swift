@@ -357,13 +357,6 @@ struct CommandCenterView: View {
                         .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                         .tracking(0.8)
                         .foregroundStyle(status.color.opacity(0.9))
-                    // "Idle" is the state you most want to act on and the
-                    // one the colour bar says least about, so it gets the
-                    // only motion on the board: the dog has brought the
-                    // frisbee back and is waiting for the next throw.
-                    if status.isIdle {
-                        FetchIdleAnimation()
-                    }
                     Text(entry.kind.displayName)
                         .font(.system(size: 9.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(.tertiary)
@@ -384,7 +377,7 @@ struct CommandCenterView: View {
                 // What was done, above the conclusion it led to: read down
                 // the bullets to judge whether the sentence is the whole
                 // story, or skip them and take the sentence.
-                if !briefingBullets(entry).isEmpty {
+                if !status.isIdle, !briefingBullets(entry).isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(briefingBullets(entry), id: \.self) { bullet in
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -402,6 +395,16 @@ struct CommandCenterView: View {
                     .padding(.bottom, 1)
                 }
 
+                // An idle row has the least to say and is the one most worth
+                // acting on, and the colour bar says nothing about it — so it
+                // spends its body on the thing that does: the dog has brought
+                // the frisbee back and is waiting for the next throw. The
+                // sentence it replaces is by definition the *previous* turn's,
+                // and it is still one tap away in the pane.
+                if status.isIdle {
+                    FetchIdleAnimation(height: (fixedHeight ?? 210) * 0.6)
+                        .frame(maxWidth: .infinity)
+                } else {
                 Text(briefingSentence(entry))
                     .font(.system(size: 15, weight: .regular, design: .monospaced))
                     .foregroundStyle(.primary)
@@ -409,6 +412,7 @@ struct CommandCenterView: View {
                     .fixedSize(horizontal: false, vertical: fixedHeight == nil)
                     .lineLimit(fixedHeight == nil ? nil : 3)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
 
                 // The escalation line: only drawn when something actually
                 // wants a decision, so its presence is the signal.
