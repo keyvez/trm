@@ -1,23 +1,40 @@
 import SwiftUI
 
-/// The board: one card per agent, ordered as the Mac orders its panes.
+/// The board: one section per paired Mac, one card per agent inside it.
+///
+/// Grouped by machine rather than merged into one flat list, because a
+/// watermark ("trm", "pe") is only unique within the machine that issued it,
+/// and because a machine that can't be reached is itself something you need to
+/// see. A flat list would render "the mini is unreachable" and "the mini has
+/// nothing running" as the same empty space.
 struct BoardView: View {
     @EnvironmentObject private var client: CommandCenterClient
     @State private var showingPairing = false
-    @State private var drafts: [Int: String] = [:]
-    @FocusState private var focusedDraft: Int?
+    @State private var drafts: [String: String] = [:]
+    @FocusState private var focusedDraft: String?
 
     var body: some View {
         NavigationStack {
             Group {
-                if client.pairing == nil {
+                if !client.isPaired {
                     unpaired
-                } else if client.entries.isEmpty {
-                    waiting
                 } else {
-                    List(client.entries) { entry in
-                        card(entry)
-                            .listRowInsets(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
+                    List {
+                        ForEach(client.links) { link in
+                            Section {
+                                if link.entries.isEmpty {
+                                    placeholder(for: link)
+                                } else {
+                                    ForEach(link.entries) { entry in
+                                        card(entry)
+                                            .listRowInsets(EdgeInsets(
+                                                top: 10, leading: 14, bottom: 10, trailing: 14))
+                                    }
+                                }
+                            } header: {
+                                header(for: link)
+                            }
+                        }
                     }
                     .listStyle(.plain)
                     .refreshable { client.refresh() }
@@ -30,7 +47,7 @@ struct BoardView: View {
                     Button {
                         showingPairing = true
                     } label: {
-                        Image(systemName: client.pairing == nil ? "qrcode.viewfinder" : "gearshape")
+                        Image(systemName: client.isPaired ? "gearshape" : "qrcode.viewfinder")
                     }
                 }
             }
@@ -40,13 +57,10 @@ struct BoardView: View {
         }
     }
 
+    /// One machine, or the app's name when several are on screen and no single
+    /// one owns the title.
     private var title: String {
-        switch client.state {
-        case .connected(let host): return host
-        case .connecting: return "Connecting…"
-        case .failed: return "Offline"
-        case .idle: return "trm"
-        }
+        client.links.count == 1 ? client.links[0].name : "trm"
     }
 
     // MARK: - States
@@ -55,40 +69,83 @@ struct BoardView: View {
         ContentUnavailableView {
             Label("Not paired", systemImage: "qrcode.viewfinder")
         } description: {
-            Text("On your Mac, choose View → Pair iPhone… and scan the code.")
+            Text("On your Mac, choose View → Pair iPhone… and scan the code. "
+                 + "Pair each machine you run agents on — they're dialled separately.")
         } actions: {
             Button("Scan Code") { showingPairing = true }
                 .buttonStyle(.borderedProminent)
         }
     }
 
-    private var waiting: some View {
-        VStack(spacing: 10) {
-            if case .failed(let message) = client.state {
-                Image(systemName: "wifi.exclamationmark")
-                    .font(.largeTitle)
-                    .foregroundStyle(.secondary)
-                Text("Can't reach your Mac")
-                    .font(.headline)
-                // Monospaced because the second line is an address: at
-                // footnote size, telling 51735 from 51733 in a proportional
-                // face is exactly the comparison this screen exists to let
-                // you make.
+    /// The machine's name and what its own connection is doing. Per machine
+    /// and not global: one Mac being asleep says nothing about the others.
+    private func header(for link: MachineLink) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(tint(for: link.state))
+                .frame(width: 7, height: 7)
+            Text(link.name)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .textCase(nil)
+            Spacer()
+            Text(stateLabel(for: link))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textCase(nil)
+        }
+    }
+
+    /// What to show inside a machine's section when it has no rows. "Can't
+    /// reach it", "still asking" and "nothing running" are three different
+    /// answers and each one is worth its own words.
+    @ViewBuilder
+    private func placeholder(for link: MachineLink) -> some View {
+        switch link.state {
+        case .failed(let message):
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Can't reach \(link.name)", systemImage: "wifi.exclamationmark")
+                    .font(.system(size: 13, weight: .medium))
                 Text(message)
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
                     .textSelection(.enabled)
-                Button("Try Again") { client.connect() }
+                Button("Try Again") { client.refresh() }
                     .buttonStyle(.bordered)
-            } else {
+                    .controlSize(.small)
+            }
+            .padding(.vertical, 4)
+        case .connected:
+            Text("No agents running.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+        case .connecting, .idle:
+            HStack(spacing: 8) {
                 ProgressView()
                 Text("Checking for agents…")
-                    .font(.footnote)
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(30)
+    }
+
+    private func stateLabel(for link: MachineLink) -> String {
+        switch link.state {
+        case .connected:
+            let count = link.entries.count
+            return count == 1 ? "1 agent" : "\(count) agents"
+        case .connecting: return "connecting"
+        case .idle: return "idle"
+        case .failed: return "offline"
+        }
+    }
+
+    private func tint(for state: LinkState) -> Color {
+        switch state {
+        case .connected: return .green
+        case .connecting: return .yellow
+        case .failed: return .red
+        case .idle: return .secondary
+        }
     }
 
     // MARK: - Card
@@ -108,6 +165,13 @@ struct BoardView: View {
                 Text(entry.agent)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
+                // A session with no window open on it is still a live agent —
+                // this only says there is nothing to walk over and look at.
+                if entry.detached {
+                    Text("DETACHED")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
                 Spacer()
                 if let updated = entry.updatedAt {
                     Text(updated, style: .relative)
@@ -152,8 +216,8 @@ struct BoardView: View {
 
     private func replyBox(_ entry: BoardEntry) -> some View {
         let binding = Binding(
-            get: { drafts[entry.pane] ?? "" },
-            set: { drafts[entry.pane] = $0 }
+            get: { drafts[entry.id] ?? "" },
+            set: { drafts[entry.id] = $0 }
         )
         return HStack(spacing: 8) {
             TextField("Reply…", text: binding, axis: .vertical)
@@ -166,14 +230,14 @@ struct BoardView: View {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .fill(Color.primary.opacity(0.06))
                 )
-                .focused($focusedDraft, equals: entry.pane)
+                .focused($focusedDraft, equals: entry.id)
                 .submitLabel(.send)
                 .onSubmit { send(entry) }
 
             Button {
                 send(entry)
             } label: {
-                Image(systemName: client.sending.contains(entry.pane)
+                Image(systemName: client.isSending(entry)
                       ? "arrow.up.circle" : "arrow.up.circle.fill")
                     .font(.system(size: 22))
             }
@@ -182,10 +246,10 @@ struct BoardView: View {
     }
 
     private func send(_ entry: BoardEntry) {
-        let text = (drafts[entry.pane] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = (drafts[entry.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        client.send(text: text, toPane: entry.pane)
-        drafts[entry.pane] = ""
+        client.send(text: text, to: entry)
+        drafts[entry.id] = ""
         focusedDraft = nil
     }
 }

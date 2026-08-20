@@ -320,15 +320,25 @@ final class CommandCenterMonitor: ObservableObject {
         // this is an ordinary shell, and an ordinary shell is not an agent.
         if surface.remoteHost != nil {
             if pane.isResolvingRemoteAgent || pane.agentTranscriptLocated { return true }
-            // A remote pane trm can't ask about — no session name recorded —
-            // is worth saying so once, since from the outside it looks
-            // identical to a pane with no agent.
-            if surface.remoteZmxSession == nil, let paneId = surface.paneId,
+            // Every drop is logged once, because a pane that isn't on the
+            // board is indistinguishable from a pane that has no agent — and
+            // "ten agents, five rows" is unanswerable without knowing which
+            // five were dropped and why. Only the no-session case used to say
+            // anything, which is the rarer of the two.
+            if let paneId = surface.paneId,
                !reportedUnresolvableRemotePanes.contains(paneId) {
                 reportedUnresolvableRemotePanes.insert(paneId)
-                TrmDiagnostics.log(
-                    "[command-center] pane \(paneId) on \(surface.remoteHost ?? "?") has no " +
-                    "recorded zmx session; its agent can't be resolved. Reconnect the pane.")
+                let host = surface.remoteHost ?? "?"
+                if let session = surface.remoteZmxSession {
+                    TrmDiagnostics.log(
+                        "[command-center] pane \(paneId) on \(host) dropped: probe for session " +
+                        "\(session) finished without locating an agent transcript. The pane is " +
+                        "treated as an ordinary shell until it resolves.")
+                } else {
+                    TrmDiagnostics.log(
+                        "[command-center] pane \(paneId) on \(host) has no " +
+                        "recorded zmx session; its agent can't be resolved. Reconnect the pane.")
+                }
             }
             return false
         }

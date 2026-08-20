@@ -355,6 +355,13 @@ enum ZmxSessionManager {
         /// A remote session's daemon runs on that machine; everything trm does
         /// with it — open, terminate — has to go over SSH.
         var remoteHost: String?
+        /// True while the agent's newest transcript entry is a tool call with
+        /// no result yet. Read from the same transcript the summary comes
+        /// from, so a session tile and a board row can't disagree about
+        /// whether the agent is mid-task or waiting.
+        var isWorking = false
+        /// True when the agent asked something and is blocked on the answer.
+        var needsAttention = false
 
         var id: String { name }
 
@@ -450,6 +457,8 @@ enum ZmxSessionManager {
                     info.agentKind = located.kind
                     info.lastPrompt = transcript.lastUserPrompt
                     info.summary = summarize(transcript)
+                    info.isWorking = transcript.isWorking
+                    info.needsAttention = !transcript.questions.isEmpty
                 }
             }
             lock.lock()
@@ -522,6 +531,21 @@ enum ZmxSessionManager {
             cmd += " \(logical)"
         }
         return cmd
+    }
+
+    /// Type text into a session's pty, whether or not anything is attached.
+    ///
+    /// `zmx send` writes to the daemon, which is multi-client — the same
+    /// property `trm mirror` is built on. That is what lets a phone answer an
+    /// agent running on a machine with no window open for it: there is no
+    /// surface in the middle, and none is needed.
+    ///
+    /// The text is passed as one argument rather than interpolated into a
+    /// shell command; a reply is arbitrary prose and will contain quotes.
+    @discardableResult
+    static func sendText(_ text: String, toSession name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        return runZmx(["send", name, text]) == 0
     }
 
     /// Run the bundled zmx synchronously with ZMX_DIR set. Short-lived

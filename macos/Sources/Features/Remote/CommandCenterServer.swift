@@ -32,7 +32,11 @@ final class CommandCenterServer: ObservableObject {
     static let serviceType = "_trm-cc._tcp"
 
     /// Wire protocol version. The phone refuses a server it doesn't know.
-    static let protocolVersion = 1
+    ///
+    /// 2 addresses rows by an opaque `id` (`pane:7`, `session:trm-a3335756`)
+    /// instead of a pane number, because the board now carries rows that have
+    /// no pane on this machine at all — the sessions it hosts.
+    static let protocolVersion = 2
 
     /// The port to ask for, so a paired phone keeps working across restarts.
     ///
@@ -434,19 +438,56 @@ final class CommandCenterServer: ObservableObject {
             send(snapshotPayload(), to: client)
 
         case "send":
+            // `id` is protocol 2. A phone still on 1 addresses by pane number
+            // and never learns otherwise — it doesn't check the version we
+            // send it — so accept both. Without this, an un-updated phone
+            // keeps drawing a board and silently drops every reply, which is
+            // the worst of the available failures.
             guard client.authenticated,
-                  let paneId = object["pane"] as? Int,
                   let text = object["text"] as? String else { return }
-            let delivered = deliver(text: text, toPaneId: paneId)
-            send(["type": "ack", "pane": paneId, "delivered": delivered], to: client)
+            let rowId: String
+            if let id = object["id"] as? String {
+                rowId = id
+            } else if let pane = object["pane"] as? Int {
+                rowId = "pane:\(pane)"
+            } else {
+                return
+            }
+            let delivered = deliver(text: text, to: rowId)
+            // Ack carries both spellings for the same reason: an older phone
+            // clears its in-flight row on `pane`, a current one on `id`.
+            var ack: [String: Any] = ["type": "ack", "id": rowId, "delivered": delivered]
+            if rowId.hasPrefix("pane:"), let pane = Int(rowId.dropFirst("pane:".count)) {
+                ack["pane"] = pane
+            }
+            send(ack, to: client)
             // The reply changes the board; don't make the phone wait for the
-            // next tick to see its own message land.
+            // next tick to see its own message land. A paneless session's row
+            // is rebuilt by a scan rather than read live, so force one.
             CommandCenterMonitor.shared.refresh()
+            HostSessionBoard.shared.refresh()
             send(snapshotPayload(), to: client)
 
         default:
             break
         }
+    }
+
+    /// Route a reply to whatever the row actually is.
+    ///
+    /// `pane:<id>` goes through the pane, exactly as the panel's compose box
+    /// does — the surface is here, and typing into it is what the person at
+    /// the desk would see happen. `session:<name>` has no pane on this
+    /// machine and goes to the daemon directly.
+    private func deliver(text: String, to rowId: String) -> Bool {
+        if rowId.hasPrefix("pane:"), let paneId = Int(rowId.dropFirst("pane:".count)) {
+            return deliver(text: text, toPaneId: paneId)
+        }
+        if rowId.hasPrefix("session:") {
+            let name = String(rowId.dropFirst("session:".count))
+            return HostSessionBoard.deliver(text: text, toSession: name)
+        }
+        return false
     }
 
     /// Type a message into the pane behind an entry, exactly as the panel's
@@ -466,6 +507,9 @@ final class CommandCenterServer: ObservableObject {
     private func pushSnapshotIfChanged() {
         let authenticated = clients.values.filter(\.authenticated)
         guard !authenticated.isEmpty else { return }
+        // Cheap when the last scan is still fresh; the scan itself is slow and
+        // runs on its own cadence.
+        HostSessionBoard.shared.refreshIfStale()
         let payload = snapshotPayload()
         let hash = "\(payload)".hashValue
         guard hash != lastSnapshotHash else { return }
@@ -474,8 +518,9 @@ final class CommandCenterServer: ObservableObject {
     }
 
     private func snapshotPayload() -> [String: Any] {
-        let entries: [[String: Any]] = CommandCenterMonitor.shared.entries.map { entry in
+        var entries: [[String: Any]] = CommandCenterMonitor.shared.entries.map { entry in
             var row: [String: Any] = [
+                "id": "pane:\(entry.paneId)",
                 "pane": entry.paneId,
                 "watermark": entry.watermark,
                 "agent": entry.kind.displayName,
@@ -496,6 +541,34 @@ final class CommandCenterServer: ObservableObject {
             row["updatedAt"] = entry.updatedAt?.timeIntervalSince1970
             return row
         }
+
+        // Then the agents this machine is running that nobody here is looking
+        // at. From a phone these are the whole point: the sessions live on the
+        // machine that hosts them, and whether a window happens to be open for
+        // one says nothing about whether it needs you.
+        entries += HostSessionBoard.shared.sessions.map { info in
+            var row: [String: Any] = [
+                "id": "session:\(info.name)",
+                // A session name is a hash; the watermark is what the pane
+                // called itself, and the only readable identity a paneless
+                // row has. Falling back to the name is better than blank.
+                "watermark": info.watermark ?? info.name,
+                "agent": info.agentKind?.displayName ?? "shell",
+                "message": info.summary ?? info.command ?? "",
+                "working": info.isWorking,
+                "needsAttention": info.needsAttention,
+                "errors": 0,
+                // Says the row has no pane here, so the phone can show it as
+                // a session rather than implying there is a window to reveal.
+                "detached": !info.attached,
+            ]
+            row["briefing"] = info.summary
+            row["bullets"] = [String]()
+            row["location"] = info.shortCwd
+            row["prompt"] = info.lastPrompt
+            return row
+        }
+
         return ["type": "snapshot", "entries": entries]
     }
 

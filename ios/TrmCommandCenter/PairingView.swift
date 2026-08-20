@@ -57,12 +57,37 @@ struct PairingView: View {
                          + "Tailscale, put that address here instead — the token is the same.")
                 }
 
-                if client.pairing != nil {
+                // Every machine already paired, with what its connection is
+                // actually doing. A Mac that is paired but unreachable is the
+                // case worth seeing here — it is indistinguishable from an
+                // idle one on the board itself.
+                if !client.links.isEmpty {
                     Section {
-                        Button("Forget this Mac", role: .destructive) {
-                            client.pairing = nil
-                            dismiss()
+                        ForEach(client.links) { link in
+                            HStack(spacing: 10) {
+                                Circle()
+                                    .fill(Self.tint(for: link.state))
+                                    .frame(width: 8, height: 8)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(link.name)
+                                    Text("\(link.pairing.host):\(String(link.pairing.port))")
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(Self.label(for: link.state))
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
+                        .onDelete { offsets in
+                            for index in offsets { client.unpair(client.links[index]) }
+                        }
+                    } header: {
+                        Text("Paired Macs")
+                    } footer: {
+                        Text("Each Mac is dialled directly, so one being asleep "
+                             + "doesn't hide the others' agents. Swipe to forget one.")
                     }
                 }
             }
@@ -73,19 +98,34 @@ struct PairingView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .onAppear {
-                if let existing = client.pairing {
-                    host = existing.host
-                    port = String(existing.port)
-                    token = existing.token
-                }
-            }
+            // Deliberately not prefilled from an existing pairing: this form
+            // adds a machine now rather than editing the one machine there
+            // used to be, and starting it full of the mini's details is how
+            // you accidentally overwrite the mini with the laptop.
         }
     }
 
     private func apply(_ pairing: Pairing) {
-        client.pairing = pairing
+        client.pair(pairing)
         dismiss()
+    }
+
+    private static func label(for state: LinkState) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .failed: return "offline"
+        }
+    }
+
+    private static func tint(for state: LinkState) -> Color {
+        switch state {
+        case .connected: return .green
+        case .connecting: return .yellow
+        case .failed: return .red
+        case .idle: return .secondary
+        }
     }
 }
 
