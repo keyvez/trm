@@ -295,6 +295,20 @@ enum GridPane: Identifiable {
     case agentOverview(AgentOverviewPane)
     case stack([GridPane])
 
+    /// Whether this pane contains something that wants raw keys — a terminal,
+    /// on its own or inside a stack.
+    ///
+    /// Used to decide whether a shortcut may be taken from the pane: Escape
+    /// belongs to whatever is running in a terminal, and nothing else on the
+    /// grid has that claim.
+    var isTerminalLike: Bool {
+        switch self {
+        case .terminal: return true
+        case .stack(let children): return children.contains { $0.isTerminalLike }
+        case .webview, .plugin, .agentOverview: return false
+        }
+    }
+
     /// Whether this cell contains the given terminal surface, looking inside
     /// stacks. `id` reports a stack's first child, so it can't answer this.
     func containsSurface(_ surfaceID: ObjectIdentifier) -> Bool {

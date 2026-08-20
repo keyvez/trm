@@ -23,6 +23,8 @@ struct AgentOverviewView: View {
     @State private var draft: String = ""
     @State private var didSend = false
     @FocusState private var draftFocused: Bool
+    /// Live only while the compose box has focus; see `TextFieldKeyRelay`.
+    @State private var editingKeyMonitor: Any?
 
     /// Whether body text can be selected with the mouse. Off in a grid cell,
     /// where the overview is a preview and a plain click means "peek this" —
@@ -101,6 +103,18 @@ struct AgentOverviewView: View {
                 .font(readingFont(12.5))
                 .focused($draftFocused)
                 .onSubmit(send)
+                .onChange(of: draftFocused) { focused in
+                    if focused {
+                        guard editingKeyMonitor == nil else { return }
+                        editingKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+                            event in
+                            TextFieldKeyRelay.handle(event) ? nil : event
+                        }
+                    } else if let monitor = editingKeyMonitor {
+                        NSEvent.removeMonitor(monitor)
+                        editingKeyMonitor = nil
+                    }
+                }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
                 .background(
@@ -1001,6 +1015,12 @@ struct AgentOverviewView: View {
         return Text("\(percent)% ctx")
             .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
             .foregroundStyle(color)
+            // A narrow pane squeezed this to one character wide, so it wrapped
+            // per character and grew the header into a tall column of
+            // near-invisible red letters. It keeps its own width or it isn't
+            // drawn at all.
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(Capsule().fill(color.opacity(0.12)))

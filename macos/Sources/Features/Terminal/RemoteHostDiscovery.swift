@@ -39,11 +39,26 @@ final class RemoteHostDiscovery {
         /// TXT entry). Machines don't share usernames, and a bare hostname
         /// makes ssh guess with the *connecting* machine's username.
         let user: String?
+        /// The machine's tailnet address, when it advertises one. Preferred
+        /// over the mDNS name for anything that has to keep working after you
+        /// walk out of the building.
+        var tailscaleHost: String?
 
         var id: String { "\(name)|\(sshDestination):\(port)" }
 
         /// Destination string for an SSH command.
+        ///
+        /// The tailnet address wins when there is one. Both are true on the
+        /// LAN; only one of them is true anywhere else, and a remote pane is
+        /// worth having precisely when you aren't sitting next to the machine.
         var sshDestination: String {
+            let address = tailscaleHost ?? hostname
+            if let user { return "\(user)@\(address)" }
+            return address
+        }
+
+        /// The mDNS destination, for when the tailnet one can't be reached.
+        var localDestination: String {
             if let user { return "\(user)@\(hostname)" }
             return hostname
         }
@@ -76,10 +91,19 @@ final class RemoteHostDiscovery {
             params.includePeerToPeer = false
             let listener = try NWListener(using: params)
 
-            let record = NWTXTRecord([
+            var entries = [
                 "ssh_port": String(sshPort),
                 "ssh_user": NSUserName(),
-            ])
+            ]
+            // Bonjour only reaches across one network, but the pane it creates
+            // outlives that network: a `.local` name is dead the moment you
+            // leave the Wi-Fi you made the pane on. Advertising the tailnet
+            // address means the pane is created with an address that still
+            // works from a café.
+            if let tailscale = Self.tailscaleAddress {
+                entries["ts_host"] = tailscale
+            }
+            let record = NWTXTRecord(entries)
             listener.service = NWListener.Service(
                 name: Self.localHostName,
                 type: Self.serviceType,
@@ -177,6 +201,7 @@ final class RemoteHostDiscovery {
 
             var port = 22
             var user: String?
+            var tailscaleHost: String?
             if case let .bonjour(txt) = result.metadata {
                 if case let .string(value) = txt.getEntry(for: "ssh_port"),
                    let parsed = Int(value), parsed > 0, parsed < 65536 {
@@ -191,9 +216,18 @@ final class RemoteHostDiscovery {
                    value.unicodeScalars.allSatisfy({ Self.allowedUserChars.contains($0) }) {
                     user = value
                 }
+                // Held to the same character set as everything else that ends
+                // up inside an ssh command: any LAN peer can publish TXT data.
+                if case let .string(value) = txt.getEntry(for: "ts_host"),
+                   !value.isEmpty, value.count <= 253,
+                   value.unicodeScalars.allSatisfy({ Self.allowedHostChars.contains($0) }) {
+                    tailscaleHost = value
+                }
             }
 
-            found.append(Host(name: name, hostname: hostname, port: port, user: user))
+            found.append(Host(
+                name: name, hostname: hostname, port: port,
+                user: user, tailscaleHost: tailscaleHost))
         }
 
         // A machine can be advertised twice — by a running trm and by the
@@ -219,6 +253,39 @@ final class RemoteHostDiscovery {
     /// SSH destinations are validated against before shell interpolation.
     private static let allowedUserChars = CharacterSet.alphanumerics
         .union(CharacterSet(charactersIn: "._-"))
+
+    /// Characters allowed in an advertised `ts_host` — a hostname or an IP,
+    /// nothing that could carry shell meaning.
+    private static let allowedHostChars = CharacterSet.alphanumerics
+        .union(CharacterSet(charactersIn: ".-"))
+
+    /// This machine's tailnet address, if it is on one.
+    ///
+    /// Read straight off the interfaces — Tailscale hands out 100.64.0.0/10,
+    /// the carrier-grade NAT range — so this works whether or not the
+    /// `tailscale` CLI is installed or on PATH.
+    static var tailscaleAddress: String? {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return nil }
+        defer { freeifaddrs(head) }
+
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(pointer.pointee.ifa_flags)
+            guard flags & IFF_UP == IFF_UP, flags & IFF_LOOPBACK == 0,
+                  let address = pointer.pointee.ifa_addr,
+                  address.pointee.sa_family == UInt8(AF_INET) else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                address, socklen_t(address.pointee.sa_len),
+                &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            let text = String(cString: host)
+            let parts = text.split(separator: ".").compactMap { UInt8($0) }
+            if parts.count == 4, parts[0] == 100, parts[1] >= 64, parts[1] <= 127 {
+                return text
+            }
+        }
+        return nil
+    }
 
     // MARK: - Names
 

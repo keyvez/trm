@@ -712,9 +712,15 @@ struct CommandCenterView: View {
             // something to attach.
             if event.keyCode == 9,
                event.modifierFlags.contains(.command),
-               event.modifierFlags.intersection([.option, .control]).isEmpty {
-                return attachFromPasteboard(to: entry) ? nil : event
+               event.modifierFlags.intersection([.option, .control]).isEmpty,
+               attachFromPasteboard(to: entry) {
+                return nil
             }
+
+            // The terminal beside this box answers ⌘C and ⌘V for the whole
+            // window, so without this the reply box could be typed into but
+            // never copied from or pasted into.
+            if TextFieldKeyRelay.handle(event) { return nil }
 
             guard event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
                   event.keyCode == 126 || event.keyCode == 125

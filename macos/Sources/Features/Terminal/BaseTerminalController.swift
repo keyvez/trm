@@ -4429,6 +4429,21 @@ class BaseTerminalController: NSWindowController,
             dismissTemporaryURLPreview()
             return nil
         }
+
+        // Escape closes a peeked pane and puts the grid back.
+        //
+        // Only for panes that don't want the key themselves: Escape belongs to
+        // whatever is running in a peeked *terminal* — vim, an agent's prompt —
+        // and stealing it there would be worse than not having the shortcut.
+        // An overview, a webview or a plugin pane has no such claim.
+        if window?.isKeyWindow == true, event.keyCode == 53,
+           let peeked = peekedPane,
+           let pane = gridPanes.first(where: { $0.id == peeked }),
+           !pane.isTerminalLike {
+            dismissPeek()
+            return nil
+        }
+
         guard window?.isKeyWindow == true, peekedPane != nil else { return event }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard flags == [.command, .shift],

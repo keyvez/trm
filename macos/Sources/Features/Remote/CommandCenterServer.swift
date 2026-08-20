@@ -131,7 +131,9 @@ final class CommandCenterServer: ObservableObject {
     /// Wi-Fi, then any private LAN address as a last resort — some networks
     /// block mDNS but route fine.
     static func reachableAddresses() -> [String] {
-        var tailscale: [String] = []
+        // The tailnet address comes from the same place remote panes get
+        // theirs, so a phone and a pane agree about where this Mac is.
+        var tailscale: [String] = RemoteHostDiscovery.tailscaleAddress.map { [$0] } ?? []
         var lan: [String] = []
 
         var head: UnsafeMutablePointer<ifaddrs>?
@@ -154,7 +156,7 @@ final class CommandCenterServer: ObservableObject {
             let parts = text.split(separator: ".").compactMap { UInt8($0) }
             guard parts.count == 4 else { continue }
             if parts[0] == 100, parts[1] >= 64, parts[1] <= 127 {
-                tailscale.append(text)
+                if !tailscale.contains(text) { tailscale.append(text) }
             } else if parts[0] == 192 && parts[1] == 168
                         || parts[0] == 10
                         || (parts[0] == 172 && parts[1] >= 16 && parts[1] <= 31) {
