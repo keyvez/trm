@@ -356,9 +356,14 @@ final class CommandCenterServer: ObservableObject {
             // length check first avoids comparing against a huge input.
             let presented = object["token"] as? String ?? ""
             guard presented.count == token.count, presented == token else {
-                send(["type": "error", "message": "bad token"], to: client)
-                client.connection.cancel()
-                drop(client.connection)
+                // Close only once the refusal is actually on the wire.
+                // Cancelling straight after `send` reset the connection before
+                // the bytes left, so the phone saw a dropped socket and had
+                // nothing to tell the user — observed while testing this.
+                send(["type": "error", "message": "bad token"], to: client) { [weak self] in
+                    client.connection.cancel()
+                    self?.drop(client.connection)
+                }
                 return
             }
             client.authenticated = true
@@ -439,9 +444,20 @@ final class CommandCenterServer: ObservableObject {
         return ["type": "snapshot", "entries": entries]
     }
 
-    private func send(_ payload: [String: Any], to client: Client) {
-        guard var data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+    private func send(
+        _ payload: [String: Any], to client: Client, then finished: (() -> Void)? = nil
+    ) {
+        guard var data = try? JSONSerialization.data(withJSONObject: payload) else {
+            finished?()
+            return
+        }
         data.append(0x0a)
-        client.connection.send(content: data, completion: .idempotent)
+        guard let finished else {
+            client.connection.send(content: data, completion: .idempotent)
+            return
+        }
+        client.connection.send(content: data, completion: .contentProcessed { _ in
+            Task { @MainActor in finished() }
+        })
     }
 }
