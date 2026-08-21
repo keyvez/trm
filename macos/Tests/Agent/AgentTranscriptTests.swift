@@ -682,6 +682,31 @@ struct AgentTranscriptTests {
         #expect(AgentTranscriptReader.parse(url: missing) == nil)
     }
 
+    // MARK: - Worktree occupancy
+
+    /// A pane sitting in the repository means the repository is attended.
+    @Test func aPaneInTheWorktreeCountsAsOccupied() {
+        #expect(GitWorktreeWatcher.isOccupied("/w/repo", by: ["/w/repo"]))
+    }
+
+    /// Containment, not equality: a pane deep inside still attends the root,
+    /// and testing for an exact match would open a redundant pane for it.
+    @Test func aPaneBelowTheWorktreeCountsAsOccupied() {
+        #expect(GitWorktreeWatcher.isOccupied("/w/repo", by: ["/w/repo/src/termania"]))
+    }
+
+    /// The trap this function exists for: worktrees are named `repo-<branch>`,
+    /// so a plain prefix test would decide `/w/repo-feat` is inside `/w/repo`
+    /// and silently never give the new worktree a pane.
+    @Test func aSiblingWorktreeIsNotInsideTheRepo() {
+        #expect(!GitWorktreeWatcher.isOccupied("/w/repo-feat", by: ["/w/repo"]))
+        #expect(!GitWorktreeWatcher.isOccupied("/w/repo", by: ["/w/repo-feat"]))
+    }
+
+    @Test func noPanesMeansUnoccupied() {
+        #expect(!GitWorktreeWatcher.isOccupied("/w/repo", by: []))
+    }
+
     // MARK: - Working detection
 
     /// The case that made a board of busy agents read IDLE: an agent thinking

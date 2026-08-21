@@ -35,22 +35,32 @@ final class GitWorktreeWatcher {
     /// Called with the path of each newly-appeared worktree.
     var onWorktreeAppeared: ((String) -> Void)?
 
-    /// Every worktree path already accounted for.
+    /// Every worktree path already offered a pane.
     ///
-    /// Seeded from the first scan of each repository rather than starting
-    /// empty, so opening trm in a repo that already has six worktrees doesn't
-    /// announce six "new" ones. Only what appears *after* trm is looking
-    /// counts as new.
+    /// Not a record of what existed at startup — a worktree that was already
+    /// there when trm opened still wants a pane, which is the whole point of
+    /// having them on the shelf. This only stops the same one being offered
+    /// twice, so a pane you deliberately closed stays closed.
     private var known: Set<String> = []
-    /// Repositories whose baseline has been taken.
-    private var baselined: Set<String> = []
     private var timer: Timer?
     private var isScanning = false
+    /// When watching began, for the settling window below.
+    private var startedAt: Date?
+
+    /// How long to let panes report where they are before deciding a worktree
+    /// has none.
+    ///
+    /// A restored window's surfaces take a moment to have a working directory,
+    /// and acting inside that gap would open a second pane for a worktree that
+    /// already has one on screen. Nothing is lost by waiting: the scan that
+    /// runs after it sees the same worktrees.
+    private static let settling: TimeInterval = 10
 
     private init() {}
 
     func start() {
         guard timer == nil else { return }
+        startedAt = Date()
         timer = Timer.scheduledTimer(withTimeInterval: Self.interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.scan() }
         }
@@ -82,20 +92,35 @@ final class GitWorktreeWatcher {
                 Self.worktrees(under: directories)
             }.value
 
-            for (root, paths) in found {
-                guard baselined.contains(root) else {
-                    // First sight of this repository: everything it already
-                    // has is the starting state, not news.
-                    baselined.insert(root)
-                    known.formUnion(paths)
-                    continue
-                }
+            // Let panes settle before concluding a worktree hasn't got one.
+            if let startedAt, Date().timeIntervalSince(startedAt) < Self.settling { return }
+
+            let occupied = Self.paneDirectories().map(Self.normalize)
+            for (_, paths) in found {
                 for path in paths where !known.contains(path) {
                     known.insert(path)
-                    Self.logger.info("New worktree appeared: \(path, privacy: .public)")
+                    // The repository you are already sitting in is itself a
+                    // worktree in git's listing, and so is any other one that
+                    // already has a pane. Offering those a second pane would
+                    // duplicate what is on screen — which is why this asks
+                    // "is anything already here", not "is this new".
+                    guard !Self.isOccupied(path, by: occupied) else { continue }
+                    Self.logger.info("Worktree without a pane: \(path, privacy: .public)")
                     onWorktreeAppeared?(path)
                 }
             }
+        }
+    }
+
+    /// Whether any pane already sits in this worktree.
+    ///
+    /// Containment rather than equality: a pane deep in `repo/src/termania` is
+    /// still a pane in `repo`, and testing for an exact match would decide the
+    /// repository was unattended and open a redundant pane for it. The
+    /// separator check keeps `repo-feat` from counting as inside `repo`.
+    nonisolated static func isOccupied(_ worktree: String, by directories: [String]) -> Bool {
+        directories.contains { dir in
+            dir == worktree || dir.hasPrefix(worktree.hasSuffix("/") ? worktree : worktree + "/")
         }
     }
 
