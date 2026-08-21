@@ -89,6 +89,28 @@ struct TrmGridView: View {
     /// The currently peeked sub-pane (expanded overlay), or nil.
     var peekedPane: ObjectIdentifier? = nil
 
+    /// How wide the peek is drawn, as a fraction of the window.
+    ///
+    /// Two values, because the two peek layouts want different widths and
+    /// remembering one number for both would mean every switch between them
+    /// undid the last adjustment: a terminal shown beside its overview needs
+    /// the whole window to be worth reading, while a single pane at full width
+    /// is just the grid with a scrim over it.
+    ///
+    /// Persisted, so the width you settle on is the width you get next time.
+    @AppStorage("PeekPairWidthFraction") private var pairWidthFraction: Double = 1.0
+    @AppStorage("PeekSoloWidthFraction") private var soloWidthFraction: Double = 0.5
+
+    /// The fraction a drag started from, so the gesture measures against where
+    /// it began rather than accumulating rounding each frame.
+    @State private var peekResizeStart: Double?
+
+    static let defaultPairWidthFraction = 1.0
+    static let defaultSoloWidthFraction = 0.5
+    /// Narrow enough to tuck a peek aside, never so narrow it can't be grabbed
+    /// again.
+    private static let peekWidthRange: ClosedRange<Double> = 0.3...1.0
+
     /// Absolute horizontal offset driven by the controller's two-stage peek
     /// navigation animation.
     var peekSlideOffset: CGFloat = 0
@@ -1282,34 +1304,46 @@ struct TrmGridView: View {
                 }
 
             Group {
-                if let pair {
-                    GeometryReader { geo in
-                        let pairGap = max(gap, 4)
-                        let paneWidth = max(0, (geo.size.width - pairGap) / 2)
+                GeometryReader { geo in
+                    let isPair = pair != nil
+                    let fraction = isPair ? pairWidthFraction : soloWidthFraction
+                    // A floor in points as well as a fraction: on a small
+                    // window 30% of the width is unreadable, and a peek you
+                    // can't read is a peek that failed at its one job.
+                    let contentWidth = min(
+                        geo.size.width, max(320, geo.size.width * fraction))
 
-                        HStack(spacing: pairGap) {
-                            peekTerminal(pair.surface)
-                                .frame(width: paneWidth, height: geo.size.height)
-
-                            peekOverview(pair.overview)
-                                .frame(width: paneWidth, height: geo.size.height)
-                        }
-                        .frame(width: geo.size.width, height: geo.size.height)
-                    }
-                } else {
-                    // Existing behavior for a pane with no agent/overview pairing.
-                    GeometryReader { geo in
-                        HStack {
-                            Spacer()
-                            if let surface = peekedSurface {
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        Group {
+                            if let pair {
+                                let pairGap = max(gap, 4)
+                                let paneWidth = max(0, (contentWidth - pairGap) / 2)
+                                HStack(spacing: pairGap) {
+                                    peekTerminal(pair.surface)
+                                        .frame(width: paneWidth, height: geo.size.height)
+                                    peekOverview(pair.overview)
+                                        .frame(width: paneWidth, height: geo.size.height)
+                                }
+                            } else if let surface = peekedSurface {
                                 peekTerminal(surface)
-                                    .frame(width: geo.size.width * 0.5, height: geo.size.height)
+                                    .frame(width: contentWidth, height: geo.size.height)
                             } else if let overview = peekedOverview {
                                 peekOverview(overview)
-                                    .frame(width: geo.size.width * 0.5, height: geo.size.height)
+                                    .frame(width: contentWidth, height: geo.size.height)
                             }
-                            Spacer()
                         }
+                        .frame(width: contentWidth, height: geo.size.height)
+                        // A grip on each edge. The peek is centred, so either
+                        // one can drive the whole width and reaching for the
+                        // nearer edge always works.
+                        .overlay(alignment: .leading) {
+                            peekResizeGrip(isPair: isPair, windowWidth: geo.size.width, edge: -1)
+                        }
+                        .overlay(alignment: .trailing) {
+                            peekResizeGrip(isPair: isPair, windowWidth: geo.size.width, edge: 1)
+                        }
+                        Spacer(minLength: 0)
                     }
                 }
             }
@@ -1317,6 +1351,59 @@ struct TrmGridView: View {
             .offset(x: peekSlideOffset)
         }
         .transition(.opacity)
+    }
+
+    /// The drag grip on one edge of the peek.
+    ///
+    /// `edge` is -1 on the left and +1 on the right. The content is centred, so
+    /// a pointer that travels `dx` opens the same distance on *both* sides —
+    /// the width changes by twice the drag, which is what makes the edge stay
+    /// under the cursor instead of drifting away at half speed.
+    ///
+    /// Double-click restores the default. Getting back to a known size is the
+    /// thing you want most after a drag that went too far, and hunting for it
+    /// by hand never quite lands.
+    private func peekResizeGrip(isPair: Bool, windowWidth: CGFloat, edge: Double) -> some View {
+        let current = isPair ? pairWidthFraction : soloWidthFraction
+        return Rectangle()
+            .fill(Color.clear)
+            .frame(width: 14)
+            .overlay {
+                Capsule()
+                    .fill(Color.secondary.opacity(peekResizeStart == nil ? 0.35 : 0.75))
+                    .frame(width: 4, height: 44)
+            }
+            .contentShape(Rectangle())
+            .onHover { inside in
+                // `set()` rather than push/pop: a peek can be dismissed while
+                // the pointer is still over the grip, and an unbalanced push
+                // leaves the resize cursor stuck over the whole window.
+                if inside { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        guard windowWidth > 0 else { return }
+                        let base = peekResizeStart ?? current
+                        if peekResizeStart == nil { peekResizeStart = base }
+                        let delta = 2 * Double(value.translation.width) * edge / Double(windowWidth)
+                        let next = min(
+                            Self.peekWidthRange.upperBound,
+                            max(Self.peekWidthRange.lowerBound, base + delta))
+                        if isPair { pairWidthFraction = next } else { soloWidthFraction = next }
+                    }
+                    .onEnded { _ in peekResizeStart = nil }
+            )
+            .onTapGesture(count: 2) {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    if isPair {
+                        pairWidthFraction = Self.defaultPairWidthFraction
+                    } else {
+                        soloWidthFraction = Self.defaultSoloWidthFraction
+                    }
+                }
+            }
+            .help("Drag to resize · double-click to reset")
     }
 
     private func peekTerminal(_ surface: Ghostty.SurfaceView) -> some View {
