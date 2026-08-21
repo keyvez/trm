@@ -75,6 +75,23 @@ struct AgentTranscript: Equatable {
         }
     }
 
+    /// The directory name Claude Code gives a project, for a working directory.
+    ///
+    /// It flattens `/`, `.` and `_` all to `-`. Only `/` was being replaced,
+    /// which is right until a path contains either of the others — and then
+    /// the lookup silently finds nothing and the pane is reported as an
+    /// ordinary shell. Two live examples, both agents missing from the board:
+    /// `/Users/g/dev/flan_mcp` is `-Users-g-dev-flan-mcp`, and
+    /// `…/fasmac/.worktrees/feature/genui-a2ui` is
+    /// `-Users-g-dev-fasmac--worktrees-feature-genui-a2ui` — the `/.` becoming
+    /// a double dash.
+    ///
+    /// Worth knowing that worktrees make this failure ordinary rather than
+    /// rare: `.worktrees/` in a path is a dot in every one of them.
+    nonisolated static func claudeProjectDirName(forCwd cwd: String) -> String {
+        String(cwd.map { "/._".contains($0) ? "-" : $0 })
+    }
+
     /// True when the agent appears to still be working.
     ///
     /// Two signals, because either one alone is wrong half the time.
@@ -565,7 +582,7 @@ enum AgentTranscriptReader {
     /// Map a working directory to its Claude project transcript directory.
     /// e.g. `/Users/foo/dev/trm` → `~/.claude/projects/-Users-foo-dev-trm`
     static func projectDir(forCwd cwd: String) -> URL {
-        let encoded = cwd.replacingOccurrences(of: "/", with: "-")
+        let encoded = AgentTranscript.claudeProjectDirName(forCwd: cwd)
         return URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent(".claude/projects")
             .appendingPathComponent(encoded)

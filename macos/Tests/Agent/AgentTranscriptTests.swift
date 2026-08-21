@@ -682,6 +682,31 @@ struct AgentTranscriptTests {
         #expect(AgentTranscriptReader.parse(url: missing) == nil)
     }
 
+    // MARK: - Claude project directory encoding
+
+    /// The ordinary case, and the one that always worked.
+    @Test func slashesBecomeDashes() {
+        #expect(AgentTranscript.claudeProjectDirName(forCwd: "/Users/foo/dev/trm")
+                == "-Users-foo-dev-trm")
+    }
+
+    /// A real agent missing from the board: only `/` was folded, so a project
+    /// with an underscore was looked up under a directory that never existed
+    /// and the pane was reported as an ordinary shell.
+    @Test func underscoresBecomeDashes() {
+        #expect(AgentTranscript.claudeProjectDirName(forCwd: "/Users/g/dev/flan_mcp")
+                == "-Users-g-dev-flan-mcp")
+    }
+
+    /// The other one, and the reason this matters more now than it did: a
+    /// worktree path contains `.worktrees`, so the `/.` folds to a double
+    /// dash. Every worktree hits this.
+    @Test func dotsBecomeDashesSoWorktreesResolve() {
+        #expect(AgentTranscript.claudeProjectDirName(
+            forCwd: "/Users/g/dev/fasmac/.worktrees/feature/genui-a2ui")
+                == "-Users-g-dev-fasmac--worktrees-feature-genui-a2ui")
+    }
+
     // MARK: - Worktree occupancy
 
     /// A pane sitting in the repository means the repository is attended.

@@ -125,7 +125,7 @@ enum AgentProbeShell {
         "    [ -n \"$P\" ] && echo \"codex $P\"; return 0;",
         "  fi;",
         "  [ -n \"$ACWD\" ] || return 0;",
-        "  ENC=\"$(printf %s \"$ACWD\" | tr / -)\";",
+        "  ENC=\"$(printf %s \"$ACWD\" | tr './_' '---')\";",
         "  P=\"$(born_after \"$HOME/.claude/projects/$ENC\" \"$AP\")\";",
         "  [ -n \"$P\" ] && echo \"claude $P\";",
         "};",

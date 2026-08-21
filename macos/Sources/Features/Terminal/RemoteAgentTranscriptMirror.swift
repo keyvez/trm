@@ -340,7 +340,7 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
       [ -n "$OPEN" ] && { echo "OK $AGENT_KIND $OPEN"; exit 0; }
       CWD="$(cwd_of "$AGENT_PID")"
       if [ "$AGENT_KIND" = claude ] && [ -n "$CWD" ]; then
-        ENC="$(printf %s "$CWD" | tr / -)"
+        ENC="$(printf %s "$CWD" | tr './_' '---')"
         P="$(born_after "$HOME/.claude/projects/$ENC" "$AGENT_PID")"
         [ -n "$P" ] && { echo "OK claude $P"; exit 0; }
       fi
@@ -364,7 +364,7 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
 
     CWD="$(cwd_of "$SHELL_PID")"
     if [ -n "$CWD" ]; then
-      ENC="$(printf %s "$CWD" | tr / -)"
+      ENC="$(printf %s "$CWD" | tr './_' '---')"
       P="$(newest_jsonl "$HOME/.claude/projects/$ENC")"
       [ -n "$P" ] && { echo "OK claude $P"; exit 0; }
     fi

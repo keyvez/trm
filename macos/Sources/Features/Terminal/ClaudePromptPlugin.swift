@@ -293,9 +293,10 @@ final class ClaudePromptPlugin: ObservableObject, ServicePlugin, ObservableServi
     // MARK: - File System Helpers
 
     /// Maps a cwd path to its Claude project directory.
-    /// e.g. `/Users/foo/dev/trm` → `~/.claude/projects/-Users-foo-dev-trm`
+    /// e.g. `/Users/foo/dev/trm` → `~/.claude/projects/-Users-foo-dev-trm`.
+    /// `.` and `_` flatten to `-` as well; see `claudeProjectDirName`.
     nonisolated private static func claudeProjectDir(forCwd cwd: String) -> URL {
-        let encoded = cwd.replacingOccurrences(of: "/", with: "-")
+        let encoded = AgentTranscript.claudeProjectDirName(forCwd: cwd)
         return URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent(".claude/projects")
             .appendingPathComponent(encoded)
