@@ -31,3 +31,7 @@ trm-*.zip
 
 # iOS app build output
 ios/build/
+
+# Local xcodebuild derived data (macos/build is a machine-specific symlink)
+macos/build-release/
+ios/build-ios/

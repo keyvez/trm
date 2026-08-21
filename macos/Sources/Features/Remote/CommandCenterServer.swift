@@ -66,6 +66,20 @@ final class CommandCenterServer: ObservableObject {
     }
 
     private var listener: NWListener?
+    /// A second listener bound to IPv6, on the same port.
+    ///
+    /// The main listener is an IPv6 wildcard socket, and Darwin delivers IPv4
+    /// to it as mapped addresses — which works on loopback and on ordinary
+    /// interfaces like `en0`, and does **not** work on the point-to-point
+    /// `/32` utun that Tailscale assigns. The symptom is precise and
+    /// misleading: the board is reachable from the same Wi-Fi and times out
+    /// from anywhere else, which reads like a Tailscale problem and isn't.
+    /// (sshd looks fine beside it only because launchd socket-activates it
+    /// with a real IPv4 socket.)
+    ///
+    /// Bonjour advertisement stays on the main listener so the service is
+    /// published once; this one only accepts.
+    private var listenerV6: NWListener?
     private var clients: [ObjectIdentifier: Client] = [:]
     private var pushTimer: Timer?
     /// Callbacks waiting for the listener to settle, so the pairing dialog can
@@ -225,6 +239,43 @@ final class CommandCenterServer: ObservableObject {
         startListener(on: Self.rememberedPort)
     }
 
+    /// Bind IPv6 on the port the main listener settled on.
+    ///
+    /// Failure here is logged and otherwise ignored: the IPv4 listener
+    /// already covers every address the pairing code hands out, so the worst
+    /// case is no IPv6 rather than no server.
+    private func startIPv6Companion(on port: UInt16) {
+        listenerV6?.cancel()
+        listenerV6 = nil
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+        let params = NWParameters.tcp
+        // Both sockets want the same port, which is only legal with reuse.
+        params.allowLocalEndpointReuse = true
+        (params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options)?.version = .v6
+        do {
+            let v6 = try NWListener(using: params, on: nwPort)
+            v6.newConnectionHandler = { [weak self] connection in
+                Task { @MainActor in self?.accept(connection) }
+            }
+            v6.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    Self.logger.info("Command Center IPv6 listener ready on port \(port)")
+                case .failed(let error):
+                    Self.logger.error(
+                        "Command Center IPv6 listener failed: \(error.localizedDescription)")
+                default:
+                    break
+                }
+            }
+            v6.start(queue: .main)
+            listenerV6 = v6
+        } catch {
+            Self.logger.error(
+                "Could not bind the Command Center IPv6 listener: \(error.localizedDescription)")
+        }
+    }
+
     /// Bring up a listener, falling back to any free port if the one we want
     /// is taken.
     private func startListener(on preferred: UInt16?) {
@@ -236,6 +287,14 @@ final class CommandCenterServer: ObservableObject {
             // Without this it fell back to an ephemeral port — and every
             // phone paired to the old number got "connection refused".
             params.allowLocalEndpointReuse = true
+            // IPv4 explicitly, rather than an IPv6 socket taking IPv4 as
+            // mapped addresses. Darwin does not deliver mapped IPv4 to the
+            // point-to-point /32 utun that Tailscale assigns, so the board was
+            // reachable from the same Wi-Fi and timed out from everywhere
+            // else — which reads like a Tailscale fault and isn't. Every
+            // address the pairing code advertises is IPv4; IPv6 is added
+            // beside this one, best effort.
+            (params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options)?.version = .v4
             let listener: NWListener
             if let preferred, let port = NWEndpoint.Port(rawValue: preferred) {
                 listener = try NWListener(using: params, on: port)
@@ -263,6 +322,7 @@ final class CommandCenterServer: ObservableObject {
                         // and the next start would ask for the wrong number
                         // rather than the one paired phones know.
                         if let port, preferred != nil { Self.rememberedPort = port }
+                        if let port { self?.startIPv6Companion(on: port) }
                         Self.logger.info("Command Center server ready on port \(port ?? 0)")
                         self?.settle(port.map { .success($0) }
                             ?? .failure(StartupFailure(reason: "The server came up without a port.")))
@@ -323,6 +383,8 @@ final class CommandCenterServer: ObservableObject {
         connectedClients = 0
         listener?.cancel()
         listener = nil
+        listenerV6?.cancel()
+        listenerV6 = nil
         isRunning = false
         port = nil
         lastSnapshotHash = nil
@@ -598,10 +660,13 @@ final class CommandCenterServer: ObservableObject {
         entries += HostSessionBoard.shared.sessions.map { info in
             var row: [String: Any] = [
                 "id": "session:\(info.name)",
-                // A session name is a hash; the watermark is what the pane
-                // called itself, and the only readable identity a paneless
-                // row has. Falling back to the name is better than blank.
-                "watermark": info.watermark ?? info.name,
+                // A session name is a hash and identifies nothing to a human.
+                // The watermark is what the pane called itself, but a machine
+                // that hosts sessions without displaying them has no window
+                // TOMLs to take one from — which is exactly the machine this
+                // row comes from. The working directory is the next best name
+                // and usually the one you'd have chosen: `dev/trm`, `dev/pe`.
+                "watermark": info.watermark ?? info.shortCwd ?? info.name,
                 "agent": info.agentKind?.displayName ?? "shell",
                 "message": info.summary ?? info.command ?? "",
                 "working": info.isWorking,
