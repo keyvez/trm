@@ -377,7 +377,7 @@ struct CommandCenterView: View {
                 // What was done, above the conclusion it led to: read down
                 // the bullets to judge whether the sentence is the whole
                 // story, or skip them and take the sentence.
-                if !status.isIdle, !briefingBullets(entry).isEmpty {
+                if !briefingBullets(entry).isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(briefingBullets(entry), id: \.self) { bullet in
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -395,16 +395,6 @@ struct CommandCenterView: View {
                     .padding(.bottom, 1)
                 }
 
-                // An idle row has the least to say and is the one most worth
-                // acting on, and the colour bar says nothing about it — so it
-                // spends its body on the thing that does: the dog has brought
-                // the frisbee back and is waiting for the next throw. The
-                // sentence it replaces is by definition the *previous* turn's,
-                // and it is still one tap away in the pane.
-                if status.isIdle {
-                    FetchIdleAnimation(height: (fixedHeight ?? 210) * 0.6)
-                        .frame(maxWidth: .infinity)
-                } else {
                 Text(briefingSentence(entry))
                     .font(.system(size: 15, weight: .regular, design: .monospaced))
                     .foregroundStyle(.primary)
@@ -412,7 +402,6 @@ struct CommandCenterView: View {
                     .fixedSize(horizontal: false, vertical: fixedHeight == nil)
                     .lineLimit(fixedHeight == nil ? nil : 3)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                }
 
                 // The escalation line: only drawn when something actually
                 // wants a decision, so its presence is the signal.
@@ -568,6 +557,18 @@ struct CommandCenterView: View {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .fill(Color.primary.opacity(focusedDraft == entry.id ? 0.10 : 0.06))
                 )
+                // An idle pane's dog waits inside the box you would answer it
+                // in, which is the only place on the card where "throw me the
+                // next one" is an instruction rather than an ornament. It sits
+                // at the trailing edge so it is never under the placeholder or
+                // the first words of a draft, and goes the moment the agent
+                // has something to say.
+                .background(alignment: .trailing) {
+                    if Self.status(for: entry).isIdle {
+                        FetchIdleAnimation(size: large ? 9 : 7)
+                            .padding(.trailing, 8)
+                    }
+                }
                 .overlay(
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .stroke(Color.accentColor.opacity(focusedDraft == entry.id ? 0.55 : 0))

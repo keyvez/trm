@@ -533,6 +533,20 @@ enum ZmxSessionManager {
         return cmd
     }
 
+    /// The tail of a session's scrollback, as the session last rendered it.
+    ///
+    /// This is what the pane would be showing if you were sitting in front of
+    /// it — the whole point of reading it from a phone. Capped rather than
+    /// returned whole: a session that has been running an agent all day holds
+    /// megabytes, and none of the part you want is at the top.
+    nonisolated static func history(session name: String, lines: Int = 400) -> String? {
+        guard !name.isEmpty else { return nil }
+        guard let text = runZmxCapturing(["history", name]) else { return nil }
+        let all = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard all.count > lines else { return text }
+        return all.suffix(lines).joined(separator: "\n")
+    }
+
     /// Type text into a session's pty, whether or not anything is attached.
     ///
     /// `zmx send` writes to the daemon, which is multi-client — the same

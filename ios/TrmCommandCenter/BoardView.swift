@@ -156,9 +156,26 @@ struct BoardView: View {
                 Circle()
                     .fill(entry.status.color)
                     .frame(width: 8, height: 8)
-                Text(entry.watermark)
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                // The watermark opens the terminal behind the row. A card
+                // summarises; sometimes the summary is the thing you doubt,
+                // and then the only answer is what actually scrolled past.
+                // On the watermark rather than the whole card, because the
+                // card's own job is the reply box and a tap that navigates
+                // away mid-sentence would be the wrong one.
+                NavigationLink {
+                    SessionScrollbackView(entry: entry)
+                        .environmentObject(client)
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(entry.watermark)
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(entry.status.color.opacity(0.6))
+                    }
                     .foregroundStyle(entry.status.color)
+                }
+                .buttonStyle(.plain)
                 Text(entry.status.rawValue.uppercased())
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(entry.status.color.opacity(0.9))

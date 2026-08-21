@@ -437,6 +437,18 @@ final class CommandCenterServer: ObservableObject {
             CommandCenterMonitor.shared.refresh()
             send(snapshotPayload(), to: client)
 
+        case "history":
+            // The scrollback behind a row, so the board can be opened into the
+            // thing it summarises. A briefing says what an agent concluded;
+            // sometimes the only way to judge it is to read what actually
+            // scrolled past.
+            guard client.authenticated, let rowId = object["id"] as? String else { return }
+            let requested = (object["lines"] as? Int) ?? 400
+            let scrollback = history(forRow: rowId, lines: min(max(requested, 20), 2000))
+            var reply: [String: Any] = ["type": "history", "id": rowId, "text": scrollback.text]
+            if let note = scrollback.note { reply["note"] = note }
+            send(reply, to: client)
+
         case "send":
             // `id` is protocol 2. A phone still on 1 addresses by pane number
             // and never learns otherwise — it doesn't check the version we
@@ -471,6 +483,43 @@ final class CommandCenterServer: ObservableObject {
         default:
             break
         }
+    }
+
+    /// The scrollback behind a row, or a reason there isn't any.
+    ///
+    /// Only sessions whose daemon runs on *this* machine can be read: the
+    /// scrollback lives in the daemon, and a pane here that shells into
+    /// another Mac is a viewer, not the owner. That is not a gap so much as
+    /// the reason to pair with more than one machine — the Mac hosting the
+    /// session publishes it, and reading it there is one hop instead of two.
+    private func history(forRow rowId: String, lines: Int) -> (text: String, note: String?) {
+        if rowId.hasPrefix("session:") {
+            let name = String(rowId.dropFirst("session:".count))
+            guard let text = ZmxSessionManager.history(session: name, lines: lines) else {
+                return ("", "That session's daemon didn't answer.")
+            }
+            return (text, nil)
+        }
+        guard rowId.hasPrefix("pane:"), let paneId = Int(rowId.dropFirst("pane:".count)) else {
+            return ("", "Unrecognised row.")
+        }
+        for controller in TerminalController.all {
+            for surface in controller.surfaceTree where surface.paneId == paneId {
+                if let host = surface.remoteHost {
+                    return ("", "This pane's shell runs on \(host); its scrollback lives there. "
+                            + "Pair with that machine to read it.")
+                }
+                guard let session = surface.zmxSessionName else {
+                    return ("", "This pane isn't backed by a session daemon, so it keeps no "
+                            + "scrollback that can be read from here.")
+                }
+                guard let text = ZmxSessionManager.history(session: session, lines: lines) else {
+                    return ("", "That session's daemon didn't answer.")
+                }
+                return (text, nil)
+            }
+        }
+        return ("", "That pane isn't open on this Mac any more.")
     }
 
     /// Route a reply to whatever the row actually is.

@@ -1,62 +1,45 @@
 import SwiftUI
 
-/// The idle fidget: an ASCII dog that has brought the frisbee back and keeps
+/// The idle fidget: a small ASCII dog that has brought the frisbee back and is
 /// nudging it toward you, waiting for the next throw.
 ///
-/// It fills the one state a status board cannot say with a colour — "this pane
+/// It marks the one state a status board cannot say with a colour — "this pane
 /// is finished and waiting on you". A spinner would be exactly wrong: nothing
 /// is in flight, so a progress shape would be a lie. What is wanted is the
 /// posture of expectancy, which is why the dog pushes the disc a little closer
 /// rather than just sitting there.
 ///
-/// Every frame is the same number of columns and rows, so a row never reflows
-/// as it plays; all the motion happens inside the fixed block.
+/// Drawn in block glyphs rather than slashes and underscores. Line art needs
+/// size to read, and this has none to spare — it lives *behind the reply box*,
+/// where the row's own words and the draft you are typing both come first.
+/// Solid shapes hold their form at eight points; `/\_|` turn to noise.
+///
+/// Every frame is the same number of rows and columns, so nothing shifts under
+/// the text as it plays.
 struct FetchIdleAnimation: View {
 
     /// Seconds per frame. Slow enough to read as a fidget rather than a
     /// spinner — the point being made is patience, not progress.
-    private static let frameDuration: TimeInterval = 0.16
+    private static let frameDuration: TimeInterval = 0.18
 
-    /// The dog, drawn once. `E` is an eye, `MM` the mouth and `T` the tail;
-    /// each is replaced by something of exactly its own width, so no frame can
-    /// be a different size from any other.
-    private static let base: [String] = [
-        "      ___          ___      ",
-        "     /   \\________/   \\     ",
-        "    |                  |    ",
-        "    |   E          E   |    ",
-        "    |        /\\        |    ",
-        "     \\      ( MM )    /     ",
-        "      \\______________/      ",
-        "         |        |         ",
-        "        (_)      (_)   T    ",
-    ]
+    /// Total columns in a frame; the dog occupies the last `dogWidth` of them
+    /// and the frisbee travels the rest.
+    private static let columns = 14
+    private static let dogWidth = 5
 
-    /// Columns in a frame, including the frisbee line appended below the dog.
-    private static let columns = 28
-    /// Rows in a frame: the dog, plus the ground the frisbee sits on.
-    private static var rows: Int { base.count + 1 }
+    /// Where the frisbee sits, frame by frame: nudged toward you, then drawn
+    /// back to start again. The run at each end is the beat where the dog
+    /// holds still and waits.
+    private static let gaps = [7, 7, 7, 6, 5, 4, 3, 2, 1, 0, 0, 0, 2, 4, 6, 7]
 
-    /// How far the frisbee sits from the left, frame by frame: three nudges
-    /// toward you, then drawn back to start again. The long run at the top of
-    /// the loop is the beat where the dog looks up and waits.
-    private static let gaps = [12, 12, 12, 12, 10, 8, 8, 8, 10, 12, 12, 12, 12, 12, 12, 12]
-
-    /// The frame where the eyes shut. One blink per loop, deliberately off the
-    /// beat of the nudge so the two never read as a single twitch.
-    private static let blinkFrames: Set<Int> = [7]
-
-    /// Frames with the tongue out. Panting, twice a loop, and never during the
-    /// blink — a dog that shuts its eyes and lolls at once reads as asleep,
-    /// which is the opposite of the point.
-    private static let pantFrames: Set<Int> = [4, 5, 12, 13]
-
-    /// The height the block should fill. The type is sized from it rather than
-    /// scaled down to fit, so the dog actually occupies the space it is given
-    /// instead of floating in the middle of it.
-    var height: CGFloat
+    /// The frame where the eyes shut. One blink per loop, off the beat of the
+    /// nudge so the two never read as a single twitch.
+    private static let blinkFrames: Set<Int> = [10]
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Point size of the glyphs. Small by default: this sits under live text.
+    var size: CGFloat = 9
 
     var body: some View {
         Group {
@@ -69,33 +52,30 @@ struct FetchIdleAnimation: View {
                 }
             }
         }
-        // 0.78 of the row height is about where a monospaced face stops
-        // overlapping its own neighbours; the rest is the leading.
-        .font(.system(size: height / CGFloat(Self.rows) * 0.78, design: .monospaced))
+        .font(.system(size: size, design: .monospaced))
         .lineSpacing(0)
-        .foregroundStyle(.tertiary)
-        .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
-        // Never let a narrow pane reflow the drawing into nonsense.
-        .fixedSize(horizontal: true, vertical: false)
-        .minimumScaleFactor(0.4)
+        // Faint enough that a draft reads over it without a fight — it is
+        // decoration behind an input, not a thing to look at.
+        .foregroundStyle(.quaternary)
+        .allowsHitTesting(false)
         .accessibilityHidden(true)
-        .help("Finished and waiting — throw it another one")
     }
 
-    /// One frame of the loop, always the same number of rows and columns.
+    /// One frame, always the same number of rows and columns.
+    ///
+    /// `▟▀▀▀▙ / ▌●▪●▐ / ▜▄▄▄▛` is the dog head-on — brow, two eyes either side
+    /// of the nose, jaw — and `●` is the frisbee it keeps pushing your way.
     static func frame(at index: Int) -> String {
         let step = index % gaps.count
-        let eye = blinkFrames.contains(step) ? "-" : "o"
-        let mouth = pantFrames.contains(step) ? "ww" : ".."
-        var lines = base.map {
-            $0.replacingOccurrences(of: "E", with: eye)
-                .replacingOccurrences(of: "MM", with: mouth)
-                .replacingOccurrences(of: "T", with: pantFrames.contains(step) ? "-" : "~")
-        }
+        let eye = blinkFrames.contains(step) ? "▬" : "●"
+        let rows = ["▟▀▀▀▙", "▌\(eye)▪\(eye)▐", "▜▄▄▄▛"]
         let gap = gaps[step]
-        let frisbee = String(repeating: " ", count: gap) + "(_)"
-        lines.append(frisbee.padding(toLength: columns, withPad: " ", startingAt: 0))
-        return lines.joined(separator: "\n")
+        return rows.enumerated().map { offset, row in
+            var lead = Array(repeating: Character(" "), count: columns - dogWidth)
+            // The frisbee rides the middle line, level with the dog's eyes.
+            if offset == 1, gap < lead.count { lead[gap] = "●" }
+            return String(lead) + row
+        }.joined(separator: "\n")
     }
 
     /// Frames run off the wall clock rather than a per-view start date, so

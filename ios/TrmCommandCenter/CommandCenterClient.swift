@@ -170,6 +170,12 @@ final class MachineLink: ObservableObject, Identifiable {
     @Published private(set) var entries: [BoardEntry] = []
     /// Rows whose reply is in flight, so one can show it was sent.
     @Published private(set) var sending: Set<String> = []
+    /// Scrollback per row, as the Mac last sent it.
+    @Published private(set) var scrollback: [String: String] = [:]
+    /// Why a row has no scrollback, when there is a reason worth saying.
+    @Published private(set) var scrollbackNote: [String: String] = [:]
+    /// Rows with a scrollback request in flight.
+    @Published private(set) var loadingScrollback: Set<String> = []
     @Published private(set) var pairing: Pairing
 
     /// Called when the link learns something worth persisting — which address
@@ -314,6 +320,13 @@ final class MachineLink: ObservableObject, Identifiable {
 
     func refresh() { send(["type": "refresh"]) }
 
+    /// Ask for the terminal behind a row — what the pane would be showing if
+    /// you were sitting in front of it.
+    func requestScrollback(for rowId: String, lines: Int = 400) {
+        loadingScrollback.insert(rowId)
+        send(["type": "history", "id": rowId, "lines": lines])
+    }
+
     /// Type a message into one of this machine's rows.
     ///
     /// Sends the pane number alongside the row id when the row has one, so a
@@ -380,6 +393,15 @@ final class MachineLink: ObservableObject, Identifiable {
                 return row
             }
             sending.removeAll()
+        case "history":
+            guard let id = object["id"] as? String else { return }
+            loadingScrollback.remove(id)
+            scrollback[id] = object["text"] as? String ?? ""
+            if let note = object["note"] as? String, !note.isEmpty {
+                scrollbackNote[id] = note
+            } else {
+                scrollbackNote.removeValue(forKey: id)
+            }
         case "ack":
             if let id = object["id"] as? String {
                 sending.remove(id)
@@ -496,6 +518,14 @@ final class CommandCenterClient: ObservableObject {
     func send(text: String, to entry: BoardEntry) {
         guard let link = links.first(where: { $0.name == entry.machine }) else { return }
         link.send(text: text, to: entry.id)
+    }
+
+    func link(for entry: BoardEntry) -> MachineLink? {
+        links.first { $0.name == entry.machine }
+    }
+
+    func requestScrollback(for entry: BoardEntry) {
+        link(for: entry)?.requestScrollback(for: entry.id)
     }
 
     func isSending(_ entry: BoardEntry) -> Bool {
