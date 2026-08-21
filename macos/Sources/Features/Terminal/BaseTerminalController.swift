@@ -3807,12 +3807,30 @@ class BaseTerminalController: NSWindowController,
         remotePanesAwaitingExitVerdict.insert(paneId)
 
         Task { [weak self, weak surfaceView] in
-            // The daemon unlinks its socket as it exits, which can land a
-            // beat after the client notices; don't race it.
-            try? await Task.sleep(for: .milliseconds(250))
-            let alive = await Task.detached(priority: .userInitiated) {
-                ZmxSessionManager.remoteSessionAlive(session, host: host)
-            }.value
+            // Wait out the daemon's own shutdown before asking.
+            //
+            // `remoteSessionAlive` tests for the session socket, and zmx does
+            // not unlink it promptly: it sends SIGHUP, sleeps 500ms, sends
+            // SIGKILL, and only then deletes the socket
+            // (vendor/zmx/src/main.zig). Asking at 250ms therefore asked while
+            // the socket was still on disk and heard "alive", so a pane whose
+            // shell had just been told `exit` stayed open offering a Reconnect
+            // it did not need. It closed only when ssh happened to be slow
+            // enough to push the probe past 500ms, which is why it worked some
+            // of the time and looked arbitrary.
+            //
+            // One probe clear of that window, and one retry for a daemon that
+            // took longer — bounded at two round trips, on an event that only
+            // happens when a shell exits.
+            var alive: Bool? = nil
+            for attempt in 0..<2 {
+                try? await Task.sleep(for: .milliseconds(attempt == 0 ? 700 : 600))
+                alive = await Task.detached(priority: .userInitiated) {
+                    ZmxSessionManager.remoteSessionAlive(session, host: host)
+                }.value
+                // "Gone" is final; anything else is worth one more look.
+                if alive == false { break }
+            }
 
             guard let self, let surfaceView,
                   self.remotePanesAwaitingExitVerdict.contains(paneId) else { return }
