@@ -681,6 +681,48 @@ struct AgentTranscriptTests {
         let missing = URL(fileURLWithPath: "/nonexistent/agent-transcript-\(UUID().uuidString).jsonl")
         #expect(AgentTranscriptReader.parse(url: missing) == nil)
     }
+
+    // MARK: - Working detection
+
+    /// The case that made a board of busy agents read IDLE: an agent thinking
+    /// or streaming has no unfinished tool call, because the result is written
+    /// with the call. A transcript still being appended to is working.
+    @Test func recentWritesCountAsWorkingWithNoUnfinishedCall() {
+        var transcript = AgentTranscript()
+        transcript.isWorking = false
+        transcript.updatedAt = Date()
+        transcript.markWorkingIfLive()
+        #expect(transcript.isWorking)
+    }
+
+    /// A transcript nobody has touched is an agent waiting on you.
+    @Test func aQuietTranscriptIsNotWorking() {
+        var transcript = AgentTranscript()
+        transcript.isWorking = false
+        transcript.updatedAt = Date(timeIntervalSinceNow: -600)
+        transcript.markWorkingIfLive()
+        #expect(!transcript.isWorking)
+    }
+
+    /// An unfinished tool call outlives the window: a build running for ten
+    /// minutes writes nothing while it runs, and is unambiguously working.
+    @Test func anUnfinishedCallKeepsWorkingTrueWhileTheFileIsQuiet() {
+        var transcript = AgentTranscript()
+        transcript.isWorking = true
+        transcript.updatedAt = Date(timeIntervalSinceNow: -600)
+        transcript.markWorkingIfLive()
+        #expect(transcript.isWorking)
+    }
+
+    /// A clock that disagrees between machines must not make every remote row
+    /// look busy forever.
+    @Test func aFutureTimestampIsNotTreatedAsLive() {
+        var transcript = AgentTranscript()
+        transcript.isWorking = false
+        transcript.updatedAt = Date(timeIntervalSinceNow: 600)
+        transcript.markWorkingIfLive()
+        #expect(!transcript.isWorking)
+    }
 }
 
 /// The agent overview must stay adjacent to the pane it describes — beside

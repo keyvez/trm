@@ -75,9 +75,46 @@ struct AgentTranscript: Equatable {
         }
     }
 
-    /// True when the agent appears to still be working: the newest transcript
-    /// entry is a tool call that never received a result.
+    /// True when the agent appears to still be working.
+    ///
+    /// Two signals, because either one alone is wrong half the time.
+    ///
+    /// An unfinished tool call catches the long ones — a build, a test run —
+    /// where the agent sits inside a single call for minutes. On its own it
+    /// almost never fires: Claude Code writes the `tool_result` in the same
+    /// breath as the `tool_use`, so the window in which a call looks unfinished
+    /// is the tool's actual runtime, which for most calls is milliseconds.
+    /// Measured on six live agents, two of them mid-turn with writes 3 and 7
+    /// seconds old: every one reported "all finished". A board built on that
+    /// signal alone reads IDLE for a machine full of working agents.
+    ///
+    /// So the second signal is that the transcript is *still being written*.
+    /// An agent that is thinking or streaming appends continuously; one that is
+    /// waiting on you goes silent. Together they cover both halves: a long tool
+    /// keeps the first true while the file is quiet, and everything else keeps
+    /// the second true.
     var isWorking: Bool = false
+
+    /// How long after its last write a transcript still counts as live.
+    ///
+    /// Long enough to bridge a slow thinking block that appends nothing, short
+    /// enough that a finished agent settles to idle while you are still looking
+    /// at it. The cost of being wrong is asymmetric — a row that says "working"
+    /// for a few seconds too long is a smaller lie than a working agent that
+    /// never looks busy at all.
+    static let activityWindow: TimeInterval = 15
+
+    /// Fold "the file is still being written" into `isWorking`.
+    ///
+    /// Called once `updatedAt` is known, which is after parsing: the mtime
+    /// comes from the file, not from anything inside it. For a remote pane
+    /// that is the local mirror's mtime, which advances as the stream lands,
+    /// so this reads the same on both sides.
+    mutating func markWorkingIfLive(now: Date = Date()) {
+        guard !isWorking, let updatedAt else { return }
+        let age = now.timeIntervalSince(updatedAt)
+        isWorking = age >= 0 && age < Self.activityWindow
+    }
 
     /// When the underlying transcript was last modified.
     var updatedAt: Date? = nil
@@ -605,6 +642,7 @@ enum AgentTranscriptReader {
         }
 
         transcript.updatedAt = mtime
+        transcript.markWorkingIfLive()
         return transcript
     }
 
@@ -1103,6 +1141,7 @@ enum CodexTranscriptReader {
             guard let lines = AgentTranscriptReader.readTailLines(url: url, bytes: tailBytes) else { return nil }
             var transcript = parse(lines: lines)
             transcript.updatedAt = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+            transcript.markWorkingIfLive()
             return transcript
         }
     }
