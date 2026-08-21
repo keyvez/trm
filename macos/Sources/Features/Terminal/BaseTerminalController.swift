@@ -1622,7 +1622,16 @@ class BaseTerminalController: NSWindowController,
     /// against its process tree — the same test the Command Center uses to
     /// decide whether a pane belongs on the board.
     func paneHasAgent(_ surface: Ghostty.SurfaceView) -> Bool {
-        if surface.remoteHost != nil { return surface.remoteZmxSession != nil }
+        if let host = surface.remoteHost {
+            // Positive evidence only. Taking a remote pane at its word because
+            // it has a session recorded was wrong: every remote pane has one,
+            // including the ones that are just a shell, so ⌘-tapping any of
+            // them opened an overview with nothing in it. A mirrored
+            // transcript means a probe actually found an agent there.
+            guard let session = surface.remoteZmxSession else { return false }
+            return RemoteAgentTranscriptMirror.hasMirroredTranscript(
+                host: host, remoteSession: session)
+        }
         var shellPid: pid_t = 0
         if let session = surface.zmxSessionName,
            let serverShell = ZmxSessionManager.cachedServerShellPid(session: session) {

@@ -106,6 +106,30 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
         }
     }
 
+    /// Where a given host+session would mirror to, without building one.
+    static func mirrorURL(host: String, remoteSession: String) -> URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return caches
+            .appendingPathComponent("trm/remote-overview", isDirectory: true)
+            .appendingPathComponent("\(host)-\(remoteSession).jsonl")
+    }
+
+    /// Whether a transcript was ever mirrored for this remote session.
+    ///
+    /// The cheap, local answer to "is there an agent over there". A mirror
+    /// only exists once a probe found an agent and started streaming its
+    /// transcript, so a non-empty file is positive evidence; a missing one is
+    /// merely no evidence, which is the honest state for a pane nothing has
+    /// looked at yet. Asking the far side properly costs an SSH round trip,
+    /// which is too much to spend answering a click.
+    static func hasMirroredTranscript(host: String, remoteSession: String) -> Bool {
+        let url = mirrorURL(host: host, remoteSession: remoteSession)
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size]
+                as? NSNumber else { return false }
+        return size.intValue > 0
+    }
+
     init(host: String, remoteSession: String) {
         self.host = host
         self.remoteSession = remoteSession
