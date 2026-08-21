@@ -259,6 +259,14 @@ struct TerminalCommandPaletteView: View {
         })
 
         options.append(CommandOption(
+            title: "New Worktree...",
+            description: "Check a branch out beside this repo and give it its own pane on the sidebar",
+            leadingIcon: "arrow.triangle.branch"
+        ) {
+            onAction("trm.new_worktree")
+        })
+
+        options.append(CommandOption(
             title: "Send Pane to Sidebar",
             description: "Park this pane in the sidebar — it keeps running, it just stops taking up the grid",
             leadingIcon: "rectangle.righthalf.inset.filled.arrow.right"

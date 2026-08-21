@@ -223,6 +223,20 @@ class AppDelegate: NSObject,
         // every time the app is killed rather than quit.
         RemoteAgentTranscriptMirror.reapOrphanedStreams()
 
+        // A worktree created by anyone — you in a shell, an agent running
+        // `git worktree add` — gets a pane on the sidebar. The agent case is
+        // the one that matters: it has no way to tell trm what it just made,
+        // and a checkout nobody can see is a checkout nobody uses.
+        GitWorktreeWatcher.shared.onWorktreeAppeared = { path in
+            // The key window is where the person is looking, so that is where
+            // the shelf should open. Any window will do when none is key —
+            // the pane still has to exist somewhere.
+            let controller = TerminalController.all.first { $0.window?.isKeyWindow == true }
+                ?? TerminalController.all.first
+            controller?.openWorktreePane(at: path)
+        }
+        GitWorktreeWatcher.shared.start()
+
         // A phone is paired with this Mac, not with one run of the app, so
         // serving resumes on its own if it was on when trm last quit.
         CommandCenterServer.startIfPreviouslyEnabled()

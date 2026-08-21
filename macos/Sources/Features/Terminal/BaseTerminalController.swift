@@ -4906,6 +4906,7 @@ class BaseTerminalController: NSWindowController,
         case switchPaneRemote(host: String?)
         case sendPaneToSidebar
         case toggleSidebar
+        case newWorktree
         case installAgentHook
     }
 
@@ -4958,6 +4959,9 @@ class BaseTerminalController: NSWindowController,
             return true
         case .toggleSidebar:
             toggleSidebar()
+            return true
+        case .newWorktree:
+            promptNewWorktree(from: surfaceView)
             return true
         }
     }
@@ -5363,6 +5367,113 @@ class BaseTerminalController: NSWindowController,
     }
 
     /// Prompt for an extension description and hand it to the LLM builder.
+    // MARK: - Worktrees
+
+    /// Open a pane rooted in a worktree and park it in the sidebar.
+    ///
+    /// The sidebar rather than the grid because a worktree is work you have
+    /// *started*, not work you are looking at this second — arriving as a new
+    /// grid cell would shove the pane you were reading aside to make room for
+    /// something you may not touch for an hour. Parking keeps it running and
+    /// one click away, and `parkPane` opens the shelf so the new pane is on
+    /// screen rather than hidden behind a rail you have to know about.
+    @discardableResult
+    func openWorktreePane(at path: String, revealSidebar: Bool = true) -> Ghostty.SurfaceView? {
+        guard !isLayoutEditingDisabled else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            TrmDiagnostics.log("[worktree] no directory at \(path); no pane opened")
+            return nil
+        }
+        guard let anchor = focusedSurface ?? Array(surfaceTree).first else { return nil }
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = path
+        guard let view = newGridPane(at: anchor, direction: .right, baseConfig: config) else {
+            return nil
+        }
+        // Name the pane after the worktree's own directory. A shelf of panes
+        // all called "pane 7" is a shelf you have to open one by one.
+        if let paneId = view.paneId {
+            Trm.shared.setWatermark(
+                forPaneId: UInt32(paneId), text: (path as NSString).lastPathComponent)
+        }
+        // Never let the watcher see this one as new; trm made it.
+        GitWorktreeWatcher.shared.markKnown(path)
+        parkPane(.terminal(view))
+        if revealSidebar { sidebarIsShowing = true }
+        return view
+    }
+
+    /// Create a git worktree and open a pane in it.
+    ///
+    /// The branch name is the only thing asked for. The path is derived beside
+    /// the repository (`../<repo>-<branch>`) because that is where a worktree
+    /// almost always wants to be, and making someone type a second path to
+    /// confirm the obvious one is how a two-second action becomes a chore.
+    private func promptNewWorktree(from surfaceView: Ghostty.SurfaceView) {
+        guard let cwd = AgentOverviewPane.workingDirectory(for: surfaceView),
+              let rootOutput = GitWorktreeWatcher.run(["-C", cwd, "rev-parse", "--show-toplevel"]),
+              case let root = rootOutput.trimmingCharacters(in: .whitespacesAndNewlines),
+              !root.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = "Not a git repository"
+            alert.informativeText =
+                "This pane isn't inside a git repository, so there's nothing to branch from."
+            alert.runModal()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "New Worktree"
+        alert.informativeText =
+            "A branch checked out beside \((root as NSString).lastPathComponent), "
+            + "in its own pane on the sidebar."
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
+        input.placeholderString = "branch name"
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = input
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let branch = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !branch.isEmpty else { return }
+        createWorktree(inRepo: root, branch: branch)
+    }
+
+    /// `git worktree add`, then a pane for what it made.
+    private func createWorktree(inRepo root: String, branch: String) {
+        let repoName = (root as NSString).lastPathComponent
+        // A branch name can contain slashes (`feat/minimap`); a directory name
+        // that contains them would be a nested path nobody asked for.
+        let safeBranch = branch.replacingOccurrences(of: "/", with: "-")
+        let path = (root as NSString).deletingLastPathComponent
+            + "/\(repoName)-\(safeBranch)"
+
+        // An existing branch is checked out; a new one is created. Trying the
+        // second first would fail on every branch that already exists, which
+        // is most of the ones worth opening a worktree for.
+        let exists = GitWorktreeWatcher.run(
+            ["-C", root, "rev-parse", "--verify", "--quiet", branch]) != nil
+        let arguments = exists
+            ? ["-C", root, "worktree", "add", path, branch]
+            : ["-C", root, "worktree", "add", "-b", branch, path]
+
+        guard GitWorktreeWatcher.run(arguments) != nil else {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't create the worktree"
+            alert.informativeText =
+                "git worktree add failed for \(branch). The path \(path) may already exist, "
+                + "or the branch may be checked out somewhere else."
+            alert.runModal()
+            return
+        }
+        TrmDiagnostics.log("[worktree] created \(path) for branch \(branch)")
+        openWorktreePane(at: path)
+    }
+
     private func promptCreateExtension() {
         let alert = NSAlert()
         alert.messageText = "Create Extension"
@@ -5559,6 +5670,10 @@ class BaseTerminalController: NSWindowController,
         }
         if trimmed == "trm.sidebar" {
             return .toggleSidebar
+        }
+
+        if trimmed == "trm.new_worktree" {
+            return .newWorktree
         }
 
         // trm.create_extension
