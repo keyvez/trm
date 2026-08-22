@@ -1621,13 +1621,37 @@ class BaseTerminalController: NSWindowController,
     /// call itself and shows whatever it finds. A local pane is checked
     /// against its process tree — the same test the Command Center uses to
     /// decide whether a pane belongs on the board.
+    /// What is known about whether a pane is running an agent.
+    ///
+    /// Three answers, not two. A remote pane nobody has probed yet is not the
+    /// same as one probed and found to be a plain shell, and collapsing those
+    /// into "no" is what left agent panes without an overview: the evidence a
+    /// mirrored transcript provides only exists *after* something has looked,
+    /// and peeking a pane for the first time is exactly the case where nothing
+    /// has.
+    enum AgentEvidence {
+        /// A probe found an agent here.
+        case present
+        /// Asked, and there is nothing to find.
+        case absent
+        /// Nobody has asked. Only reachable for remote panes — a local one is
+        /// answered outright by its process tree.
+        case unknown
+    }
+
+    func agentEvidence(_ surface: Ghostty.SurfaceView) -> AgentEvidence {
+        if let host = surface.remoteHost {
+            // No session recorded means there is nothing to ask the far side
+            // *about*, so this really is a settled no.
+            guard let session = surface.remoteZmxSession else { return .absent }
+            return RemoteAgentTranscriptMirror.hasMirroredTranscript(
+                host: host, remoteSession: session) ? .present : .unknown
+        }
+        return paneHasAgent(surface) ? .present : .absent
+    }
+
     func paneHasAgent(_ surface: Ghostty.SurfaceView) -> Bool {
         if let host = surface.remoteHost {
-            // Positive evidence only. Taking a remote pane at its word because
-            // it has a session recorded was wrong: every remote pane has one,
-            // including the ones that are just a shell, so ⌘-tapping any of
-            // them opened an overview with nothing in it. A mirrored
-            // transcript means a probe actually found an agent there.
             guard let session = surface.remoteZmxSession else { return false }
             return RemoteAgentTranscriptMirror.hasMirroredTranscript(
                 host: host, remoteSession: session)
@@ -1959,6 +1983,32 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
+    /// Take back an overview opened on spec, once the probe says there was no
+    /// agent to show.
+    ///
+    /// Waits for the probe to settle rather than guessing at a duration: while
+    /// it is still resolving the overview says "Connecting…", which is honest.
+    /// Only an overview peek itself opened is retracted, and only while it is
+    /// still the one peek is holding — dismissing the peek, peeking elsewhere
+    /// or closing it by hand all take it out of scope here.
+    private func retractOverviewIfNoAgentAppears(_ overview: AgentOverviewPane) {
+        Task { [weak self, weak overview] in
+            // Bounded so a host that never answers can't leave this running.
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .milliseconds(750))
+                guard let self, let overview,
+                      self.overviewOpenedForPeek === overview,
+                      self.agentOverviewPanes.contains(where: { $0 === overview })
+                else { return }
+                if overview.agentTranscriptLocated { return }
+                guard !overview.isResolvingRemoteAgent else { continue }
+                // Settled, and it found nothing.
+                self.closeOverviewOpenedForPeek()
+                return
+            }
+        }
+    }
+
     /// Close the overview a peek opened, if it is still there.
     ///
     /// Called before a new peek as well as on dismissal: peeking a second pane
@@ -1999,10 +2049,21 @@ class BaseTerminalController: NSWindowController,
         if opened == nil,
            case .terminal(let surface) = pane,
            !isLayoutEditingDisabled,
-           !hasAgentOverview(for: pane),
-           paneHasAgent(surface) {
-            showAgentOverview(for: pane)
-            opened = agentOverviewPanes.last { $0.surface === surface }
+           !hasAgentOverview(for: pane) {
+            let evidence = agentEvidence(surface)
+            if evidence != .absent {
+                showAgentOverview(for: pane)
+                opened = agentOverviewPanes.last { $0.surface === surface }
+                // Opening the overview is what *sends* the probe, so an
+                // unknown pane is answered by acting on it. If the answer
+                // comes back "no agent", take the overview away again — that
+                // is the only way to be right in both directions without
+                // making the person wait for a round trip before the pane they
+                // asked for appears.
+                if evidence == .unknown, let opened {
+                    retractOverviewIfNoAgentAppears(opened)
+                }
+            }
         }
         overviewOpenedForPeek = opened
 
