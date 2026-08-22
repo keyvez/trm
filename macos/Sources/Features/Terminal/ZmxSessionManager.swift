@@ -542,8 +542,16 @@ enum ZmxSessionManager {
     nonisolated static func history(session name: String, lines: Int = 400) -> String? {
         guard !name.isEmpty else { return nil }
         guard let text = runZmxCapturing(["history", name]) else { return nil }
-        let all = text.split(separator: "\n", omittingEmptySubsequences: false)
-        guard all.count > lines else { return text }
+        var all = text.split(separator: "\n", omittingEmptySubsequences: false)
+            // Terminal scrollback is padded to the pane's width, so most lines
+            // carry a tail of spaces. Harmless in a terminal, and the reason a
+            // wrapped line on a phone can run on for half a screen of nothing.
+            .map { $0.reversed().drop { $0 == " " || $0 == "\t" }.reversed() }
+            .map { String($0) }
+        // A pane that has been idle ends in a screenful of blank lines; opening
+        // its scrollback should not land you below the last thing it said.
+        while let last = all.last, last.isEmpty { all.removeLast() }
+        guard all.count > lines else { return all.joined(separator: "\n") }
         return all.suffix(lines).joined(separator: "\n")
     }
 
