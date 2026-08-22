@@ -24,6 +24,10 @@ struct BoardView: View {
     @State private var replyTargetID: String?
     @FocusState private var composerFocused: Bool
     @State private var photoPick: PhotosPickerItem?
+    /// Thumbnails of what has been attached to each row's draft, so you can
+    /// see *which* photo went — a bare path in the box proves something
+    /// happened but not that it was the right thing.
+    @State private var attachedPreviews: [String: [UIImage]] = [:]
 
     /// The live row the box is aimed at, or nil when it is closed. Resolving
     /// through `client` each time is what keeps the header's status dot and
@@ -344,13 +348,31 @@ struct BoardView: View {
                     .disabled(client.isAttaching(entry))
                     .padding(.bottom, 6)
 
+                    // Pasting is how a screenshot usually arrives: you copy it
+                    // somewhere else and want it here, without a trip through
+                    // the photo library. Only offered when the pasteboard
+                    // actually holds one.
+                    if UIPasteboard.general.hasImages {
+                        Button {
+                            pasteImage(into: entry)
+                        } label: {
+                            Image(systemName: "doc.on.clipboard")
+                                .font(.system(size: 18))
+                                .foregroundStyle(.secondary)
+                        }
+                        .disabled(client.isAttaching(entry))
+                        .padding(.bottom, 7)
+                    }
+
                     TextField("Reply to \(entry.watermark)…", text: draftBinding(entry), axis: .vertical)
                         .textFieldStyle(.plain)
                         .lineLimit(1...5)
                         .font(.system(size: 14, design: .monospaced))
                         .focused($composerFocused)
-                        .submitLabel(.send)
-                        .onSubmit { send(entry) }
+                        // The key inserts a newline on a vertical-axis
+                        // field rather than submitting, so labelling it "send"
+                        // was the control lying about itself.
+                        .submitLabel(.return)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
                         .background(
@@ -370,6 +392,37 @@ struct BoardView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+
+                if let shots = attachedPreviews[entry.id], !shots.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(Array(shots.enumerated()), id: \.offset) { index, image in
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 44, height: 44)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                    .overlay(alignment: .topTrailing) {
+                                        // Removing the thumbnail only forgets
+                                        // the picture, not the path already in
+                                        // the draft — the file is on the Mac
+                                        // and the text is yours to edit.
+                                        Button {
+                                            attachedPreviews[entry.id]?.remove(at: index)
+                                        } label: {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.system(size: 13))
+                                                .symbolRenderingMode(.palette)
+                                                .foregroundStyle(.white, .black.opacity(0.6))
+                                        }
+                                        .offset(x: 4, y: -4)
+                                    }
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                    }
+                }
 
                 if let problem = client.attachError(for: entry) {
                     Text(problem)
@@ -425,16 +478,27 @@ struct BoardView: View {
         (drafts[entry.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Downscale a picked photo and hand it to the Mac.
-    ///
-    /// Downscaled because the wire is one JSON line and a modern phone photo is
-    /// eight megabytes before base64; nothing about reading a screenshot needs
-    /// the full sensor. 2000px on the long edge stays legible for a terminal
-    /// grab or a diagram, at a tenth of the bytes.
+    /// Attach whatever image is on the pasteboard.
+    private func pasteImage(into entry: BoardEntry) {
+        guard let image = UIPasteboard.general.image else { return }
+        attach(image, named: "pasted.jpg", to: entry)
+    }
+
     private func sendPickedPhoto(_ item: PhotosPickerItem, to entry: BoardEntry) async {
         defer { photoPick = nil }
         guard let raw = try? await item.loadTransferable(type: Data.self),
               let image = UIImage(data: raw) else { return }
+        let name = (item.itemIdentifier?.prefix(8)).map { "photo-\($0).jpg" } ?? "photo.jpg"
+        attach(image, named: name, to: entry)
+    }
+
+    /// Downscale an image and hand it to the Mac, showing it beside the box.
+    ///
+    /// Downscaled because the wire is one JSON line and a modern phone photo is
+    /// eight megabytes before base64; nothing about reading a screenshot needs
+    /// the full sensor. 2000px on the long edge stays legible for a terminal
+    /// grab or a diagram, at a fraction of the bytes.
+    private func attach(_ image: UIImage, named name: String, to entry: BoardEntry) {
         let longEdge = max(image.size.width, image.size.height)
         let scale = longEdge > 2000 ? 2000 / longEdge : 1
         let target = CGSize(width: image.size.width * scale, height: image.size.height * scale)
@@ -442,7 +506,7 @@ struct BoardView: View {
             image.draw(in: CGRect(origin: .zero, size: target))
         }
         guard let jpeg = rendered.jpegData(compressionQuality: 0.8) else { return }
-        let name = (item.itemIdentifier?.prefix(8)).map { "photo-\($0).jpg" } ?? "photo.jpg"
+        attachedPreviews[entry.id, default: []].append(rendered)
         client.attach(data: jpeg, name: name, to: entry)
     }
 
@@ -451,6 +515,7 @@ struct BoardView: View {
         guard !text.isEmpty else { return }
         client.send(text: text, to: entry)
         drafts[entry.id] = ""
+        attachedPreviews[entry.id] = nil
         composerFocused = false
         replyTargetID = nil
     }
