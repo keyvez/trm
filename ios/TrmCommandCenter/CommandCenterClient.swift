@@ -176,6 +176,12 @@ final class MachineLink: ObservableObject, Identifiable {
     @Published private(set) var scrollbackNote: [String: String] = [:]
     /// Rows with a scrollback request in flight.
     @Published private(set) var loadingScrollback: Set<String> = []
+    /// Rows with an attachment upload in flight.
+    @Published private(set) var attaching: Set<String> = []
+    /// The path an attachment landed at, once the Mac has written it.
+    @Published private(set) var attachedPath: [String: String] = [:]
+    /// Why an attachment didn't land, when it didn't.
+    @Published private(set) var attachError: [String: String] = [:]
     @Published private(set) var pairing: Pairing
 
     /// Called when the link learns something worth persisting — which address
@@ -327,6 +333,16 @@ final class MachineLink: ObservableObject, Identifiable {
         send(["type": "history", "id": rowId, "lines": lines])
     }
 
+    /// Hand a file to the Mac, which writes it beside the agent and answers
+    /// with the path. Agents read from disk, so a path is the thing that
+    /// actually works — nothing is smuggled into the terminal as bytes.
+    func attach(data: Data, name: String, to rowId: String) {
+        attaching.insert(rowId)
+        attachError.removeValue(forKey: rowId)
+        send(["type": "attach", "id": rowId, "name": name,
+              "data": data.base64EncodedString()])
+    }
+
     /// Type a message into one of this machine's rows.
     ///
     /// Sends the pane number alongside the row id when the row has one, so a
@@ -379,6 +395,13 @@ final class MachineLink: ObservableObject, Identifiable {
         }
     }
 
+    /// Hand back a landed attachment's path exactly once.
+    func takeAttachedPath(for rowId: String) -> String? {
+        guard let path = attachedPath[rowId] else { return nil }
+        attachedPath.removeValue(forKey: rowId)
+        return path
+    }
+
     private func handle(_ line: Data) {
         guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               let type = object["type"] as? String else { return }
@@ -393,6 +416,14 @@ final class MachineLink: ObservableObject, Identifiable {
                 return row
             }
             sending.removeAll()
+        case "attached":
+            guard let id = object["id"] as? String else { return }
+            attaching.remove(id)
+            attachedPath[id] = object["path"] as? String
+        case "attach_failed":
+            guard let id = object["id"] as? String else { return }
+            attaching.remove(id)
+            attachError[id] = object["message"] as? String ?? "Couldn't attach that."
         case "history":
             guard let id = object["id"] as? String else { return }
             loadingScrollback.remove(id)
@@ -526,6 +557,25 @@ final class CommandCenterClient: ObservableObject {
 
     func requestScrollback(for entry: BoardEntry) {
         link(for: entry)?.requestScrollback(for: entry.id)
+    }
+
+    func attach(data: Data, name: String, to entry: BoardEntry) {
+        link(for: entry)?.attach(data: data, name: name, to: entry.id)
+    }
+
+    func isAttaching(_ entry: BoardEntry) -> Bool {
+        link(for: entry)?.attaching.contains(entry.id) ?? false
+    }
+
+    /// Take the path of a landed attachment, clearing it so it is consumed
+    /// once rather than appended on every redraw.
+    func takeAttachedPath(for entry: BoardEntry) -> String? {
+        guard let link = link(for: entry) else { return nil }
+        return link.takeAttachedPath(for: entry.id)
+    }
+
+    func attachError(for entry: BoardEntry) -> String? {
+        link(for: entry)?.attachError[entry.id]
     }
 
     func isSending(_ entry: BoardEntry) -> Bool {

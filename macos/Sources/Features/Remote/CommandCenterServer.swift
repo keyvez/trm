@@ -490,7 +490,11 @@ final class CommandCenterServer: ObservableObject {
             handle(line: Data(line), from: client)
         }
         // A client that never sends a newline must not grow the buffer forever.
-        if client.buffer.count > 256 * 1024 {
+        // An attached photo arrives base64'd on one line, so the cap has to
+        // clear a whole image rather than a command. The phone downscales
+        // before sending and `attach` refuses anything over its own limit —
+        // this is only the backstop against a client that streams forever.
+        if client.buffer.count > 16 * 1024 * 1024 {
             connection.cancel()
             drop(connection)
         }
@@ -530,6 +534,24 @@ final class CommandCenterServer: ObservableObject {
             guard client.authenticated else { return }
             CommandCenterMonitor.shared.refresh()
             send(snapshotPayload(), to: client)
+
+        case "attach":
+            // Agents read from disk, so an attachment is delivered as a *path*
+            // in the message, exactly as dragging a file onto the desktop
+            // reply box does. The bytes land in the same place, under the same
+            // stamped name, so two photos called IMG_0001 can't collide.
+            guard client.authenticated,
+                  let rowId = object["id"] as? String,
+                  let name = object["name"] as? String,
+                  let encoded = object["data"] as? String,
+                  let data = Data(base64Encoded: encoded) else { return }
+            let outcome = saveAttachment(data: data, name: name, forRow: rowId)
+            switch outcome {
+            case .success(let path):
+                send(["type": "attached", "id": rowId, "path": path], to: client)
+            case .failure(let reason):
+                send(["type": "attach_failed", "id": rowId, "message": reason], to: client)
+            }
 
         case "history":
             // The scrollback behind a row, so the board can be opened into the
@@ -576,6 +598,50 @@ final class CommandCenterServer: ObservableObject {
 
         default:
             break
+        }
+    }
+
+    enum AttachOutcome {
+        case success(String)
+        case failure(String)
+    }
+
+    /// Write an attachment next to the agent that will read it.
+    ///
+    /// Only ever this machine's disk. A row backed by a pane that shells into
+    /// another Mac has its agent over there, and a path written here would
+    /// name a file that agent cannot open — so that is refused with the reason
+    /// rather than silently producing a broken path. Pairing with the machine
+    /// hosting the session is the fix, and the board is built for that.
+    private func saveAttachment(data: Data, name: String, forRow rowId: String) -> AttachOutcome {
+        guard !data.isEmpty else { return .failure("That file was empty.") }
+        guard data.count <= CommandCenterAttachments.sizeLimit else {
+            let mb = data.count / (1024 * 1024)
+            return .failure("That's \(mb) MB — too large to send to a reply box.")
+        }
+        if rowId.hasPrefix("pane:"), let paneId = Int(rowId.dropFirst("pane:".count)) {
+            for controller in TerminalController.all {
+                for surface in controller.surfaceTree
+                where surface.paneId == paneId && surface.remoteHost != nil {
+                    return .failure(
+                        "This pane's agent runs on \(surface.remoteHost ?? "another Mac"), so a "
+                        + "file saved here wouldn't be one it can open. Pair with that machine.")
+                }
+            }
+        }
+
+        let directory = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(CommandCenterAttachments.directoryName, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+            let filename = CommandCenterAttachments.uniqueName(for: name, now: Date())
+            let url = directory.appendingPathComponent(filename)
+            try data.write(to: url)
+            Self.logger.info("Saved attachment \(filename, privacy: .public)")
+            return .success(url.path)
+        } catch {
+            return .failure("Couldn't save it: \(error.localizedDescription)")
         }
     }
 

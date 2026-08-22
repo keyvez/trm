@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 
 /// The board: one section per paired Mac, one card per agent inside it.
@@ -22,6 +23,7 @@ struct BoardView: View {
     /// holding the struct would aim the box at a stale copy.
     @State private var replyTargetID: String?
     @FocusState private var composerFocused: Bool
+    @State private var photoPick: PhotosPickerItem?
 
     /// The live row the box is aimed at, or nil when it is closed. Resolving
     /// through `client` each time is what keeps the header's status dot and
@@ -212,14 +214,20 @@ struct BoardView: View {
                     SessionScrollbackView(entry: entry)
                         .environmentObject(client)
                 } label: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 4) {
                         Text(entry.watermark)
                             .font(.system(size: 14, weight: .bold, design: .rounded))
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(entry.status.color.opacity(0.6))
+                        // A terminal glyph rather than a bare chevron: the
+                        // chevron read as decoration on a card that is already
+                        // tappable, so nobody could tell the one thing that
+                        // opens the scrollback from the rest of the header.
+                        Image(systemName: "terminal.fill")
+                            .font(.system(size: 11, weight: .semibold))
                     }
                     .foregroundStyle(entry.status.color)
+                    .padding(.vertical, 4)
+                    .padding(.trailing, 4)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 Text(entry.status.rawValue.uppercased())
@@ -290,10 +298,15 @@ struct BoardView: View {
         )
         // The whole card, not just a strip of it: the padding, the status dot
         // and the empty space beside a short headline are all places a thumb
-        // aims at when it means "this one". The watermark link takes its own
-        // taps, so reading the terminal still works.
+        // aims at when it means "this one".
+        //
+        // `simultaneousGesture` rather than `onTapGesture`, because the latter
+        // is a *parent* gesture over a NavigationLink and won the race for the
+        // watermark's taps — so the one control that opens the terminal did
+        // nothing, and every tap anywhere aimed the reply box instead. Sharing
+        // the gesture lets the link fire and still aims the box.
         .contentShape(Rectangle())
-        .onTapGesture { aim(at: entry) }
+        .simultaneousGesture(TapGesture().onEnded { aim(at: entry) })
     }
 
     // MARK: - Docked composer
@@ -322,6 +335,15 @@ struct BoardView: View {
                     }
                     .padding(.bottom, 6)
 
+                    PhotosPicker(selection: $photoPick, matching: .images) {
+                        Image(systemName: client.isAttaching(entry)
+                              ? "photo.badge.arrow.down" : "photo.on.rectangle")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.secondary)
+                    }
+                    .disabled(client.isAttaching(entry))
+                    .padding(.bottom, 6)
+
                     TextField("Reply to \(entry.watermark)…", text: draftBinding(entry), axis: .vertical)
                         .textFieldStyle(.plain)
                         .lineLimit(1...5)
@@ -348,9 +370,32 @@ struct BoardView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+
+                if let problem = client.attachError(for: entry) {
+                    Text(problem)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 6)
+                }
             }
             .background(.bar)
             .transition(.move(edge: .bottom))
+            // A picked photo is downscaled and sent as soon as it is chosen;
+            // the Mac writes it and answers with a path, which goes into the
+            // draft for you to write a sentence around.
+            .onChange(of: photoPick) { item in
+                guard let item else { return }
+                Task { await sendPickedPhoto(item, to: entry) }
+            }
+            .onReceive(client.objectWillChange) { _ in
+                // The path lands asynchronously; consume it once.
+                if let path = client.takeAttachedPath(for: entry) {
+                    let current = drafts[entry.id] ?? ""
+                    let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                    drafts[entry.id] = trimmed.isEmpty ? path + " " : trimmed + " " + path + " "
+                }
+            }
         }
     }
 
@@ -378,6 +423,27 @@ struct BoardView: View {
 
     private func trimmedDraft(_ entry: BoardEntry) -> String {
         (drafts[entry.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Downscale a picked photo and hand it to the Mac.
+    ///
+    /// Downscaled because the wire is one JSON line and a modern phone photo is
+    /// eight megabytes before base64; nothing about reading a screenshot needs
+    /// the full sensor. 2000px on the long edge stays legible for a terminal
+    /// grab or a diagram, at a tenth of the bytes.
+    private func sendPickedPhoto(_ item: PhotosPickerItem, to entry: BoardEntry) async {
+        defer { photoPick = nil }
+        guard let raw = try? await item.loadTransferable(type: Data.self),
+              let image = UIImage(data: raw) else { return }
+        let longEdge = max(image.size.width, image.size.height)
+        let scale = longEdge > 2000 ? 2000 / longEdge : 1
+        let target = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let rendered = UIGraphicsImageRenderer(size: target).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: target))
+        }
+        guard let jpeg = rendered.jpegData(compressionQuality: 0.8) else { return }
+        let name = (item.itemIdentifier?.prefix(8)).map { "photo-\($0).jpg" } ?? "photo.jpg"
+        client.attach(data: jpeg, name: name, to: entry)
     }
 
     private func send(_ entry: BoardEntry) {
