@@ -65,6 +65,13 @@ final class CommandCenterServer: ObservableObject {
         let reason: String
     }
 
+    /// How many times to keep asking for the remembered port before taking
+    /// whatever is free. Six seconds is comfortably longer than the reload
+    /// handoff, and a phone that reconnects on a backoff will not notice.
+    private static let preferredPortRetries = 6
+    /// Attempts made at the preferred port during this start.
+    private var preferredPortAttempts = 0
+
     private var listener: NWListener?
     /// A second listener bound to IPv6, on the same port.
     ///
@@ -263,7 +270,7 @@ final class CommandCenterServer: ObservableObject {
                     Self.logger.info("Command Center IPv6 listener ready on port \(port)")
                 case .failed(let error):
                     Self.logger.error(
-                        "Command Center IPv6 listener failed: \(error.localizedDescription)")
+                        "Command Center IPv6 listener failed: \(error, privacy: .public)")
                 default:
                     break
                 }
@@ -322,20 +329,45 @@ final class CommandCenterServer: ObservableObject {
                         // and the next start would ask for the wrong number
                         // rather than the one paired phones know.
                         if let port, preferred != nil { Self.rememberedPort = port }
+                        self?.preferredPortAttempts = 0
                         if let port { self?.startIPv6Companion(on: port) }
                         Self.logger.info("Command Center server ready on port \(port ?? 0)")
                         self?.settle(port.map { .success($0) }
                             ?? .failure(StartupFailure(reason: "The server came up without a port.")))
                     case .failed(let error):
-                        Self.logger.error("Command Center server failed: \(error.localizedDescription)")
+                        Self.logger.error(
+                            "Command Center server failed: \(error, privacy: .public)")
                         // Most likely the remembered port is in use. Let go of
                         // it and take whatever is free rather than refusing to
                         // serve at all.
-                        if preferred != nil {
-                            Self.logger.info("Retrying the Command Center server on a free port")
+                        if let preferred {
+                            // Almost always the outgoing app during a Reload
+                            // Latest UI handoff, which deliberately overlaps
+                            // the two processes. Keep asking for a few seconds
+                            // before giving up on the number every paired phone
+                            // knows: an ephemeral port is not a smaller
+                            // failure than being briefly unavailable, it is a
+                            // silent one that lasts until the next launch.
+                            //
+                            // Endpoint reuse alone used to carry this, and
+                            // stopped when the listener became IPv4 — the
+                            // outgoing process still holds the port on an IPv6
+                            // dual-stack socket, which reuse will not share
+                            // across families.
                             self?.listener?.cancel()
                             self?.listener = nil
-                            self?.startListener(on: nil)
+                            let attempt = (self?.preferredPortAttempts ?? 0) + 1
+                            self?.preferredPortAttempts = attempt
+                            if attempt <= Self.preferredPortRetries {
+                                Self.logger.info(
+                                    "Port \(preferred) busy; retrying (\(attempt)/\(Self.preferredPortRetries))")
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                                    Task { @MainActor in self?.startListener(on: preferred) }
+                                }
+                            } else {
+                                Self.logger.info("Retrying the Command Center server on a free port")
+                                self?.startListener(on: nil)
+                            }
                             return
                         }
                         self?.settle(.failure(StartupFailure(reason: error.localizedDescription)))
