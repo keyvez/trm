@@ -18,6 +18,7 @@ struct SessionDetailView: View {
     /// went — a path in the box proves something happened, not that it was the
     /// right thing.
     @State private var attachedPreviews: [UIImage] = []
+    @State private var showingHistory = false
 
     /// Wrapped by default.
     ///
@@ -198,6 +199,17 @@ struct SessionDetailView: View {
                     .padding(.bottom, 7)
                 }
 
+                if !entry.promptHistory.isEmpty {
+                    Button {
+                        showingHistory = true
+                    } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 18))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.bottom, 7)
+                }
+
                 TextField("Reply to \(entry.watermark)…", text: draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...5)
@@ -213,6 +225,13 @@ struct SessionDetailView: View {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(Color.primary.opacity(0.08))
                     )
+                    // Double-tap the box for what you've said before. A
+                    // gesture rather than only the button because the box is
+                    // where your thumb already is, and reaching past it for a
+                    // control is the friction this removes.
+                    .onTapGesture(count: 2) {
+                        if !entry.promptHistory.isEmpty { showingHistory = true }
+                    }
 
                 Button { send() } label: {
                     Image(systemName: client.isSending(entry)
@@ -226,6 +245,7 @@ struct SessionDetailView: View {
             .padding(.vertical, 8)
         }
         .background(.bar)
+        .sheet(isPresented: $showingHistory) { historySheet }
         .onChange(of: photoPick) { item in
             guard let item else { return }
             Task { await sendPickedPhoto(item) }
@@ -238,6 +258,41 @@ struct SessionDetailView: View {
                 client.drafts[entry.id] = trimmed.isEmpty ? path + " " : trimmed + " " + path + " "
             }
         }
+    }
+
+    /// What has already been asked of this agent, newest first.
+    ///
+    /// Tapping one puts it in the box rather than sending it outright. A
+    /// message worth repeating is usually worth a word changed first, and a
+    /// list where one wrong tap fires something at an agent is a list you use
+    /// carefully instead of quickly.
+    private var historySheet: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(entry.promptHistory.reversed().enumerated()), id: \.offset) { _, past in
+                    Button {
+                        client.drafts[entry.id] = past
+                        showingHistory = false
+                        composerFocused = true
+                    } label: {
+                        Text(past)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundStyle(.primary)
+                            .lineLimit(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .navigationTitle("Sent to \(entry.watermark)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { showingHistory = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 
     private var draft: Binding<String> {

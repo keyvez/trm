@@ -345,6 +345,9 @@ enum ZmxSessionManager {
         var agentKind: AgentKind?
         /// The last thing the person asked this agent.
         var lastPrompt: String?
+        /// Everything asked of this agent, oldest first. The phone offers it
+        /// back so a message can be sent again without retyping it.
+        var promptHistory: [String] = []
         /// A sentence of what the agent said back.
         ///
         /// A browser full of tiles reading `claude --dangerously-skip-permissions`
@@ -456,6 +459,7 @@ enum ZmxSessionManager {
                 if let transcript {
                     info.agentKind = located.kind
                     info.lastPrompt = transcript.lastUserPrompt
+                    info.promptHistory = CommandCenterMonitor.promptHistory(transcript)
                     info.summary = summarize(transcript)
                     info.isWorking = transcript.isWorking
                     info.needsAttention = !transcript.questions.isEmpty
@@ -866,6 +870,47 @@ enum ZmxSessionManager {
     /// a child exiting 3 or 255 both surface as 0). What *does* differ is the
     /// far side: a zmx daemon unlinks its socket the moment its shell exits,
     /// and keeps it when only the client went away.
+    /// The tail of a remote session's scrollback, fetched over SSH.
+    ///
+    /// A pane here that shells into another Mac is a viewer; the scrollback
+    /// lives in the daemon over there. Refusing to fetch it and telling the
+    /// person to go and pair with that machine was the wrong answer — trm
+    /// already asks that host whether the session is alive, and this is the
+    /// same round trip for something far more useful.
+    ///
+    /// Trimmed on the far side so the padding a terminal writes to fill its
+    /// width never crosses the network.
+    nonisolated static func remoteHistory(
+        _ name: String, host: String, lines: Int = 400
+    ) -> String? {
+        let script = [
+            "S=\"\(name)\";",
+            "Z=\"\(remoteZmxPath)\";",
+            "[ -x \"$Z\" ] || exit 1;",
+            "D=\"$HOME/.trm/zmx\";",
+            "T=\"${TMPDIR:-/tmp}\"; T=\"${T%/}/zmx-$(id -u)\";",
+            "for DIR in \"$D\" \"$T\"; do",
+            "  [ -S \"$DIR/$S\" ] || continue;",
+            "  ZMX_DIR=\"$DIR\" \"$Z\" history \"$S\" 2>/dev/null",
+            "    | sed -e 's/[[:space:]]*$//'",
+            "    | tail -n \(lines);",
+            "  exit 0;",
+            "done;",
+            "exit 1",
+        ].joined(separator: " ")
+
+        let run = runCapturing(
+            "/usr/bin/ssh",
+            ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, shWrapped(script)],
+            timeout: 20)
+        guard run.status == 0, let out = run.output, !out.isEmpty else { return nil }
+        // An idle pane ends in a screenful of blanks; opening its scrollback
+        // should not land you below the last thing it said.
+        var all = out.components(separatedBy: "\n")
+        while let last = all.last, last.isEmpty { all.removeLast() }
+        return all.joined(separator: "\n")
+    }
+
     nonisolated static func remoteSessionAlive(_ name: String, host: String) -> Bool? {
         let script = [
             "S=\"\(name)\";",

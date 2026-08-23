@@ -441,7 +441,7 @@ final class CommandCenterMonitor: ObservableObject {
     /// Prompts from the parse window, oldest first, deduplicated against
     /// consecutive repeats and capped — this is a reply box's history, not an
     /// archive.
-    private static func promptHistory(_ transcript: AgentTranscript, limit: Int = 50) -> [String] {
+    nonisolated static func promptHistory(_ transcript: AgentTranscript, limit: Int = 50) -> [String] {
         var result: [String] = []
         for turn in transcript.turns {
             guard let prompt = turn.prompt?.trimmingCharacters(in: .whitespacesAndNewlines),

@@ -16,6 +16,8 @@ struct BoardEntry: Identifiable, Equatable {
     let location: String?
     let host: String?
     let prompt: String?
+    /// Everything asked of this agent, oldest first.
+    let promptHistory: [String]
     let errorText: String?
     let errors: Int
     let working: Bool
@@ -81,6 +83,7 @@ struct BoardEntry: Identifiable, Equatable {
         location = json["location"] as? String
         host = json["host"] as? String
         prompt = json["prompt"] as? String
+        promptHistory = json["promptHistory"] as? [String] ?? []
         errorText = json["errorText"] as? String
         errors = json["errors"] as? Int ?? 0
         working = json["working"] as? Bool ?? false

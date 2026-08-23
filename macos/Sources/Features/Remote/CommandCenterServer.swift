@@ -559,11 +559,17 @@ final class CommandCenterServer: ObservableObject {
             // sometimes the only way to judge it is to read what actually
             // scrolled past.
             guard client.authenticated, let rowId = object["id"] as? String else { return }
-            let requested = (object["lines"] as? Int) ?? 400
-            let scrollback = history(forRow: rowId, lines: min(max(requested, 20), 2000))
-            var reply: [String: Any] = ["type": "history", "id": rowId, "text": scrollback.text]
-            if let note = scrollback.note { reply["note"] = note }
-            send(reply, to: client)
+            let requested = min(max((object["lines"] as? Int) ?? 400, 20), 2000)
+            // A remote pane's scrollback is an SSH round trip away, so the
+            // whole path is async: blocking the main actor for a second or two
+            // would freeze every window while a phone reads a terminal.
+            Task { [weak self, weak client] in
+                guard let self, let client else { return }
+                let scrollback = await self.history(forRow: rowId, lines: requested)
+                var reply: [String: Any] = ["type": "history", "id": rowId, "text": scrollback.text]
+                if let note = scrollback.note { reply["note"] = note }
+                self.send(reply, to: client)
+            }
 
         case "send":
             // `id` is protocol 2. A phone still on 1 addresses by pane number
@@ -647,17 +653,17 @@ final class CommandCenterServer: ObservableObject {
 
     /// The scrollback behind a row, or a reason there isn't any.
     ///
-    /// Only sessions whose daemon runs on *this* machine can be read: the
-    /// scrollback lives in the daemon, and a pane here that shells into
-    /// another Mac is a viewer, not the owner. That is not a gap so much as
-    /// the reason to pair with more than one machine — the Mac hosting the
-    /// session publishes it, and reading it there is one hop instead of two.
-    private func history(forRow rowId: String, lines: Int) -> (text: String, note: String?) {
+    /// A session hosted here is read locally. A pane that shells into another
+    /// Mac is fetched from that machine over SSH — refusing and telling the
+    /// person to go and pair with that host was the wrong answer, since trm
+    /// already spends that round trip on smaller questions.
+    private func history(forRow rowId: String, lines: Int) async -> (text: String, note: String?) {
         if rowId.hasPrefix("session:") {
             let name = String(rowId.dropFirst("session:".count))
-            guard let text = ZmxSessionManager.history(session: name, lines: lines) else {
-                return ("", "That session's daemon didn't answer.")
-            }
+            let text = await Task.detached(priority: .userInitiated) {
+                ZmxSessionManager.history(session: name, lines: lines)
+            }.value
+            guard let text else { return ("", "That session's daemon didn't answer.") }
             return (text, nil)
         }
         guard rowId.hasPrefix("pane:"), let paneId = Int(rowId.dropFirst("pane:".count)) else {
@@ -665,17 +671,31 @@ final class CommandCenterServer: ObservableObject {
         }
         for controller in TerminalController.all {
             for surface in controller.surfaceTree where surface.paneId == paneId {
+                // A remote pane is a viewer; the scrollback lives in the daemon
+                // on the other machine. Ask it — the same round trip trm
+                // already spends deciding whether that session is alive.
                 if let host = surface.remoteHost {
-                    return ("", "This pane's shell runs on \(host); its scrollback lives there. "
-                            + "Pair with that machine to read it.")
+                    guard let session = surface.remoteZmxSession else {
+                        return ("", "trm has no session recorded for this pane on \(host), "
+                                + "so there is nothing to ask it for. Reconnect the pane.")
+                    }
+                    let text = await Task.detached(priority: .userInitiated) {
+                        ZmxSessionManager.remoteHistory(session, host: host, lines: lines)
+                    }.value
+                    guard let text else {
+                        return ("", "Couldn't read \(session) on \(host). The machine may be "
+                                + "asleep, or the session may have ended.")
+                    }
+                    return (text, nil)
                 }
                 guard let session = surface.zmxSessionName else {
                     return ("", "This pane isn't backed by a session daemon, so it keeps no "
                             + "scrollback that can be read from here.")
                 }
-                guard let text = ZmxSessionManager.history(session: session, lines: lines) else {
-                    return ("", "That session's daemon didn't answer.")
-                }
+                let text = await Task.detached(priority: .userInitiated) {
+                    ZmxSessionManager.history(session: session, lines: lines)
+                }.value
+                guard let text else { return ("", "That session's daemon didn't answer.") }
                 return (text, nil)
             }
         }
@@ -746,6 +766,9 @@ final class CommandCenterServer: ObservableObject {
             row["location"] = entry.location
             row["host"] = entry.host
             row["prompt"] = entry.prompt
+            // What has been asked before, so the phone can offer it back
+            // instead of making someone retype a message they already sent.
+            row["promptHistory"] = entry.promptHistory
             row["errorText"] = entry.errorText
             row["updatedAt"] = entry.updatedAt?.timeIntervalSince1970
             return row
@@ -778,6 +801,7 @@ final class CommandCenterServer: ObservableObject {
             row["bullets"] = [String]()
             row["location"] = info.shortCwd
             row["prompt"] = info.lastPrompt
+            row["promptHistory"] = info.promptHistory
             return row
         }
 
