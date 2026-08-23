@@ -208,6 +208,9 @@ class AppDelegate: NSObject,
         ])
     }
 
+    /// Kept so the watermark sweep can be torn down with the app.
+    private var watermarkObserver: NSObjectProtocol?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // System settings overrides
         UserDefaults.standard.register(defaults: [
@@ -236,6 +239,31 @@ class AppDelegate: NSObject,
             controller?.openWorktreePane(at: path)
         }
         GitWorktreeWatcher.shared.start()
+
+        // Remember what each session is called, so the name survives the
+        // window that was showing it. Watermarks lived only in window TOMLs,
+        // which a crash takes with it while leaving the sessions running — and
+        // every pane then comes back nameless, identifiable only by reading it.
+        // The notification carries no payload, so this sweeps; a handful of
+        // panes makes that cheaper than tracking which one changed.
+        watermarkObserver = NotificationCenter.default.addObserver(
+            forName: Trm.watermarkDidChange, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                for controller in TerminalController.all {
+                    for surface in controller.surfaceTree {
+                        guard let paneId = surface.paneId,
+                              let mark = Trm.shared.watermark(forPaneId: UInt32(paneId))
+                        else { continue }
+                        // A remote pane's identity is the session on the other
+                        // machine; a local one's is its own.
+                        guard let session = surface.remoteZmxSession ?? surface.zmxSessionName
+                        else { continue }
+                        ZmxSessionManager.rememberWatermark(mark, forSession: session)
+                    }
+                }
+            }
+        }
 
         // A phone is paired with this Mac, not with one run of the app, so
         // serving resumes on its own if it was on when trm last quit.

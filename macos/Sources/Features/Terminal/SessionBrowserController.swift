@@ -107,7 +107,12 @@ final class SessionBrowserModel: ObservableObject {
                 // per-session scan.
                 let sessions = group.sessionNames.compactMap { name -> ZmxSessionManager.SessionInfo? in
                     guard var info = byName[name] else { return nil }
+                    // The window's TOML first, then what the session itself
+                    // was last called. A crash takes the TOML with it and
+                    // leaves the session running, and a pane that comes back
+                    // nameless is one you have to identify by reading it.
                     info.watermark = group.watermarks[name]
+                        ?? ZmxSessionManager.rememberedWatermark(forSession: name)
                     return info
                 }
                 guard !sessions.isEmpty else { return nil }

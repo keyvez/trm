@@ -559,6 +559,68 @@ enum ZmxSessionManager {
         return all.suffix(lines).joined(separator: "\n")
     }
 
+    // MARK: - Watermarks that outlive their window
+
+    /// Watermarks remembered per session name.
+    ///
+    /// A watermark used to live only in the window TOML that described the
+    /// pane showing it. That is fine until the window goes away and the
+    /// session does not — a crash, or opening a group the browser had no
+    /// saved arrangement for — and then every pane comes back called
+    /// something else. The session is the thing with an identity worth
+    /// keeping a name for; the window is just where it was being shown.
+    private static let watermarkStoreURL = URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent(".trm/watermarks.json")
+
+    /// Guarded rather than actor-isolated: the store is read from the session
+    /// scan, which runs off the main actor, and written from the main one.
+    private static let watermarkLock = NSLock()
+    nonisolated(unsafe) private static var watermarkCache: [String: String]?
+
+    nonisolated static func rememberedWatermarks() -> [String: String] {
+        watermarkLock.lock()
+        defer { watermarkLock.unlock() }
+        return loadLocked()
+    }
+
+    nonisolated private static func loadLocked() -> [String: String] {
+        if let cached = watermarkCache { return cached }
+        guard let data = try? Data(contentsOf: watermarkStoreURL),
+              let map = try? JSONDecoder().decode([String: String].self, from: data)
+        else {
+            watermarkCache = [:]
+            return [:]
+        }
+        watermarkCache = map
+        return map
+    }
+
+    /// Record what a session is called, so restoring it anywhere restores
+    /// its name too. Keyed by session name because that is what survives.
+    nonisolated static func rememberWatermark(_ watermark: String, forSession name: String) {
+        let trimmed = watermark.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        watermarkLock.lock()
+        defer { watermarkLock.unlock() }
+        var map = loadLocked()
+        if trimmed.isEmpty {
+            guard map.removeValue(forKey: name) != nil else { return }
+        } else {
+            guard map[name] != trimmed else { return }
+            map[name] = trimmed
+        }
+        watermarkCache = map
+        let directory = watermarkStoreURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(map) else { return }
+        try? data.write(to: watermarkStoreURL, options: .atomic)
+    }
+
+    nonisolated static func rememberedWatermark(forSession name: String) -> String? {
+        rememberedWatermarks()[name]
+    }
+
     /// Type text into a session's pty, whether or not anything is attached.
     ///
     /// `zmx send` writes to the daemon, which is multi-client — the same
