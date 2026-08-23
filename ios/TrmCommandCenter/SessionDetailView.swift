@@ -199,15 +199,19 @@ struct SessionDetailView: View {
                     .padding(.bottom, 7)
                 }
 
+                // A button rather than a double-tap on the box. A hidden
+                // gesture on a text field competes with placing the cursor and
+                // selecting a word, and nothing about it announces that the
+                // history is there at all.
                 if !entry.promptHistory.isEmpty {
                     Button {
                         showingHistory = true
                     } label: {
                         Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 18))
+                            .font(.system(size: 20))
                             .foregroundStyle(.secondary)
                     }
-                    .padding(.bottom, 7)
+                    .padding(.bottom, 6)
                 }
 
                 TextField("Reply to \(entry.watermark)…", text: draft, axis: .vertical)
@@ -225,13 +229,6 @@ struct SessionDetailView: View {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(Color.primary.opacity(0.08))
                     )
-                    // Double-tap the box for what you've said before. A
-                    // gesture rather than only the button because the box is
-                    // where your thumb already is, and reaching past it for a
-                    // control is the friction this removes.
-                    .onTapGesture(count: 2) {
-                        if !entry.promptHistory.isEmpty { showingHistory = true }
-                    }
 
                 Button { send() } label: {
                     Image(systemName: client.isSending(entry)
