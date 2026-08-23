@@ -27,6 +27,13 @@ struct SessionDetailView: View {
     /// lines rather than ask someone to pan a page-wide canvas with a thumb.
     /// Off is still worth having: a table or a diff only means anything with
     /// its columns intact.
+    /// Formatted by default.
+    ///
+    /// The raw view is the terminal exactly as it was drawn, which is the right
+    /// answer when you doubt the formatting and the wrong one the rest of the
+    /// time: it arrives hard-wrapped to a pane forty columns wide, so a phone
+    /// re-wraps text that was wrapped once already.
+    @AppStorage("ScrollbackFormatted") private var formatted = true
     @AppStorage("ScrollbackWrap") private var wrap = true
     @AppStorage("ScrollbackFontSize") private var fontSize = 12.0
 
@@ -65,6 +72,8 @@ struct SessionDetailView: View {
                     Text("This session hasn't printed anything.")
                 }
             }
+        } else if formatted {
+            formattedScrollback
         } else {
             terminal
         }
@@ -73,10 +82,19 @@ struct SessionDetailView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
-            Button { wrap.toggle() } label: {
-                Image(systemName: wrap ? "text.alignleft" : "arrow.left.and.right.text.vertical")
+            Button { formatted.toggle() } label: {
+                Image(systemName: formatted ? "text.alignleft" : "terminal")
             }
-            .accessibilityLabel(wrap ? "Wrapping on" : "Wrapping off")
+            .accessibilityLabel(formatted ? "Formatted" : "Raw terminal")
+
+            // Wrapping only means anything in the raw view; the formatted one
+            // always wraps, because rejoining the lines is the point of it.
+            if !formatted {
+                Button { wrap.toggle() } label: {
+                    Image(systemName: wrap ? "arrow.turn.down.left" : "arrow.left.and.right")
+                }
+                .accessibilityLabel(wrap ? "Wrapping on" : "Wrapping off")
+            }
 
             Menu {
                 // A stepper rather than pinch-to-zoom: the text is selectable,
@@ -103,6 +121,44 @@ struct SessionDetailView: View {
 
     private func bump(_ delta: Double) {
         fontSize = min(Self.sizeRange.upperBound, max(Self.sizeRange.lowerBound, fontSize + delta))
+    }
+
+    /// The scrollback rejoined into paragraphs, with the pane's furniture
+    /// removed. Prose is set proportionally — it is prose — while code keeps
+    /// the monospace and the line breaks that carry its meaning.
+    private var formattedScrollback: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(ScrollbackFormatter.format(text)) { block in
+                        switch block {
+                        case .prose(let body):
+                            Text(body)
+                                .font(.system(size: fontSize + 2))
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        case .code(let body):
+                            Text(body)
+                                .font(.system(size: fontSize, design: .monospaced))
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .fill(Color.primary.opacity(0.06))
+                                )
+                        }
+                    }
+                    Color.clear.frame(height: 1).id(Self.bottomAnchor)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            }
+            .onAppear { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
+            .onChange(of: text) { _ in proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
+        }
     }
 
     private var terminal: some View {
