@@ -128,6 +128,19 @@ final class CommandCenterMonitor: ObservableObject {
     /// surface identity so they're reused across polls and dropped with the
     /// pane.
     private var headless: [ObjectIdentifier: AgentOverviewPane] = [:]
+
+    /// The overview object describing a pane, on screen or headless.
+    ///
+    /// The phone's summary view reads the same turns the Mac's overview draws,
+    /// rather than re-deriving them from a text dump — two parsers over one
+    /// transcript is two things to keep agreeing.
+    func overviewPane(forPaneId paneId: Int) -> AgentOverviewPane? {
+        for controller in TerminalController.all {
+            for pane in controller.agentOverviewPanes
+            where pane.surface?.paneId == paneId { return pane }
+        }
+        return headless.values.first { $0.surface?.paneId == paneId }
+    }
     private var timer: Timer?
     /// How many activity panes are on screen. Polling costs real work, so it
     /// only runs while something is displaying the result.

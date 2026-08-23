@@ -553,6 +553,20 @@ final class CommandCenterServer: ObservableObject {
                 send(["type": "attach_failed", "id": rowId, "message": reason], to: client)
             }
 
+        case "overview":
+            // The same turns the Mac's own overview draws, rather than the
+            // phone re-deriving them from a text dump: two parsers over one
+            // transcript is two things to keep agreeing.
+            guard client.authenticated, let rowId = object["id"] as? String else { return }
+            let requestedTurn = object["turn"] as? Int
+            Task { [weak self, weak client] in
+                guard let self, let client else { return }
+                var reply = await self.overviewPayload(forRow: rowId, turn: requestedTurn)
+                reply["type"] = "overview"
+                reply["id"] = rowId
+                self.send(reply, to: client)
+            }
+
         case "history":
             // The scrollback behind a row, so the board can be opened into the
             // thing it summarises. A briefing says what an agent concluded;
@@ -649,6 +663,83 @@ final class CommandCenterServer: ObservableObject {
         } catch {
             return .failure("Couldn't save it: \(error.localizedDescription)")
         }
+    }
+
+    /// One turn of a row's conversation, as structured content.
+    ///
+    /// `turn` counts back from the newest: 0 is the latest, 1 the one before.
+    /// Out of range clamps rather than failing — a phone paging back while a
+    /// new turn lands should not get an error for asking.
+    private func overviewPayload(forRow rowId: String, turn: Int?) async -> [String: Any] {
+        guard let transcript = await transcript(forRow: rowId) else {
+            return ["note": "No agent transcript for this row."]
+        }
+        let turns = transcript.turns
+        guard !turns.isEmpty else { return ["note": "This agent hasn't said anything yet."] }
+
+        let offset = max(0, min(turn ?? 0, turns.count - 1))
+        let selected = turns[turns.count - 1 - offset]
+
+        func encode(_ blocks: [AgentTranscript.Block]) -> [[String: Any]] {
+            blocks.compactMap { block in
+                switch block {
+                case .paragraph(let text):
+                    return ["kind": "paragraph", "text": text]
+                case .code(let language, let text):
+                    return ["kind": "code", "language": language ?? "", "text": text]
+                case .image:
+                    // Thumbnails are already re-encoded small, but a board
+                    // refresh carrying images would dwarf everything else on
+                    // the wire. The phone is told one was here.
+                    return ["kind": "image"]
+                }
+            }
+        }
+
+        return [
+            "turn": offset,
+            "turnCount": turns.count,
+            "prompt": selected.prompt as Any,
+            "promptBlocks": encode(selected.promptBlocks),
+            "blocks": encode(selected.blocks),
+            "activity": selected.activity.map { call in
+                [
+                    "name": call.name,
+                    "detail": call.detail as Any,
+                    "finished": call.finished,
+                    "isError": call.isError,
+                ] as [String: Any]
+            },
+            "questions": selected.questions.map { question in
+                [
+                    "header": question.header as Any,
+                    "text": question.text,
+                    "options": question.options.map(\.label),
+                    "allowsMultiple": question.allowsMultiple,
+                    "finished": question.finished,
+                ] as [String: Any]
+            },
+        ]
+    }
+
+    /// The transcript behind a row, whichever kind of row it is.
+    private func transcript(forRow rowId: String) async -> AgentTranscript? {
+        if rowId.hasPrefix("pane:"), let paneId = Int(rowId.dropFirst("pane:".count)) {
+            // An on-screen or headless overview already holds it, parsed and
+            // current — including a remote pane's, via its mirror.
+            return CommandCenterMonitor.shared.overviewPane(forPaneId: paneId)?.transcript
+        }
+        guard rowId.hasPrefix("session:") else { return nil }
+        let name = String(rowId.dropFirst("session:".count))
+        guard let info = HostSessionBoard.shared.sessions.first(where: { $0.name == name }),
+              let path = info.transcriptPath else { return nil }
+        let isCodex = info.agentKind == .codex
+        return await Task.detached(priority: .userInitiated) {
+            let url = URL(fileURLWithPath: path)
+            return isCodex
+                ? CodexTranscriptReader.parse(url: url)
+                : AgentTranscriptReader.parse(url: url)
+        }.value
     }
 
     /// The scrollback behind a row, or a reason there isn't any.

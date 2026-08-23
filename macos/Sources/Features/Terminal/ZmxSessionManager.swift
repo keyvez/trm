@@ -343,6 +343,9 @@ enum ZmxSessionManager {
         var watermark: String?
         /// Which agent is running here, when one is.
         var agentKind: AgentKind?
+        /// Where the agent's transcript lives, so a later request can read the
+        /// whole conversation without locating it again.
+        var transcriptPath: String?
         /// The last thing the person asked this agent.
         var lastPrompt: String?
         /// Everything asked of this agent, oldest first. The phone offers it
@@ -458,6 +461,7 @@ enum ZmxSessionManager {
                     : AgentTranscriptReader.parse(url: located.url)
                 if let transcript {
                     info.agentKind = located.kind
+                    info.transcriptPath = located.url.path
                     info.lastPrompt = transcript.lastUserPrompt
                     info.promptHistory = CommandCenterMonitor.promptHistory(transcript)
                     info.summary = summarize(transcript)

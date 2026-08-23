@@ -39,6 +39,12 @@ struct BoardView: View {
                                         }
                                         .listRowInsets(EdgeInsets(
                                             top: 10, leading: 14, bottom: 10, trailing: 14))
+                                        // The card already has an edge — its
+                                        // fill and corner radius. A separator
+                                        // under it draws a second one that
+                                        // belongs to the list rather than to
+                                        // anything on screen.
+                                        .listRowSeparator(.hidden)
                                     }
                                 }
                             } header: {

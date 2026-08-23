@@ -179,6 +179,11 @@ final class MachineLink: ObservableObject, Identifiable {
     @Published private(set) var scrollbackNote: [String: String] = [:]
     /// Rows with a scrollback request in flight.
     @Published private(set) var loadingScrollback: Set<String> = []
+    /// The turn each row is currently showing, keyed by row.
+    @Published private(set) var overviews: [String: AgentOverview] = [:]
+    /// Rows with an overview request in flight.
+    @Published private(set) var loadingOverview: Set<String> = []
+
     /// Rows with an attachment upload in flight.
     @Published private(set) var attaching: Set<String> = []
     /// The path an attachment landed at, once the Mac has written it.
@@ -329,6 +334,15 @@ final class MachineLink: ObservableObject, Identifiable {
 
     func refresh() { send(["type": "refresh"]) }
 
+    /// Ask for one turn of a row's conversation. `turn` counts back from the
+    /// newest, so 0 is the latest and nil means "whatever is newest now".
+    func requestOverview(for rowId: String, turn: Int? = nil) {
+        loadingOverview.insert(rowId)
+        var message: [String: Any] = ["type": "overview", "id": rowId]
+        if let turn { message["turn"] = turn }
+        send(message)
+    }
+
     /// Ask for the terminal behind a row — what the pane would be showing if
     /// you were sitting in front of it.
     func requestScrollback(for rowId: String, lines: Int = 400) {
@@ -419,6 +433,10 @@ final class MachineLink: ObservableObject, Identifiable {
                 return row
             }
             sending.removeAll()
+        case "overview":
+            guard let id = object["id"] as? String else { return }
+            loadingOverview.remove(id)
+            if let overview = AgentOverview(json: object) { overviews[id] = overview }
         case "attached":
             guard let id = object["id"] as? String else { return }
             attaching.remove(id)
@@ -583,6 +601,18 @@ final class CommandCenterClient: ObservableObject {
     func takeAttachedPath(for entry: BoardEntry) -> String? {
         guard let link = link(for: entry) else { return nil }
         return link.takeAttachedPath(for: entry.id)
+    }
+
+    func requestOverview(for entry: BoardEntry, turn: Int? = nil) {
+        link(for: entry)?.requestOverview(for: entry.id, turn: turn)
+    }
+
+    func overview(for entry: BoardEntry) -> AgentOverview? {
+        link(for: entry)?.overviews[entry.id]
+    }
+
+    func isLoadingOverview(_ entry: BoardEntry) -> Bool {
+        link(for: entry)?.loadingOverview.contains(entry.id) ?? false
     }
 
     func attachError(for entry: BoardEntry) -> String? {

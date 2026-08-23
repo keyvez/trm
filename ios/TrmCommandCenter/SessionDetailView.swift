@@ -33,6 +33,17 @@ struct SessionDetailView: View {
     /// answer when you doubt the formatting and the wrong one the rest of the
     /// time: it arrives hard-wrapped to a pane forty columns wide, so a phone
     /// re-wraps text that was wrapped once already.
+    /// Summary is the default view.
+    ///
+    /// It is the same thing the Mac's overview pane shows — what you asked,
+    /// what it said, what it is waiting on — which is what you came to find
+    /// out. The terminal is underneath it for the times the summary is the
+    /// thing you doubt.
+    @AppStorage("DetailMode") private var mode = DetailMode.summary
+    @AppStorage("OverviewSectionsRaw") private var sectionsRaw = OverviewSections.default.rawValue
+    @AppStorage("OverviewBionic") private var bionic = false
+    @State private var viewedTurn: Int?
+
     @AppStorage("ScrollbackFormatted") private var formatted = true
     @AppStorage("ScrollbackWrap") private var wrap = true
     @AppStorage("ScrollbackFontSize") private var fontSize = 12.0
@@ -40,18 +51,36 @@ struct SessionDetailView: View {
     private static let sizeRange = 8.0...20.0
     private static let bottomAnchor = "trm.scrollback.bottom"
 
+    enum DetailMode: String { case summary, terminal }
+
+    private var sections: OverviewSections {
+        get { OverviewSections(rawValue: sectionsRaw) }
+        nonmutating set { sectionsRaw = newValue.rawValue }
+    }
+
+    private var overview: AgentOverview? { client.overview(for: entry) }
+
     private var link: MachineLink? { client.link(for: entry) }
     private var text: String { link?.scrollback[entry.id] ?? "" }
     private var note: String? { link?.scrollbackNote[entry.id] }
     private var isLoading: Bool { link?.loadingScrollback.contains(entry.id) ?? false }
 
     var body: some View {
-        content
-            .navigationTitle(entry.watermark)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { toolbar }
-            .safeAreaInset(edge: .bottom, spacing: 0) { composer }
-            .onAppear { client.requestScrollback(for: entry) }
+        Group {
+            if mode == .summary {
+                summary
+            } else {
+                content
+            }
+        }
+        .navigationTitle(entry.watermark)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { toolbar }
+        .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+        .onAppear {
+            client.requestOverview(for: entry)
+            client.requestScrollback(for: entry)
+        }
     }
 
     @ViewBuilder
@@ -82,14 +111,18 @@ struct SessionDetailView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
-            Button { formatted.toggle() } label: {
-                Image(systemName: formatted ? "text.alignleft" : "terminal")
+            // Summary or terminal — the two things you might have come for.
+            Button {
+                mode = mode == .summary ? .terminal : .summary
+                if mode == .summary { client.requestOverview(for: entry, turn: viewedTurn) }
+            } label: {
+                Image(systemName: mode == .summary ? "text.append" : "terminal")
             }
-            .accessibilityLabel(formatted ? "Formatted" : "Raw terminal")
+            .accessibilityLabel(mode == .summary ? "Summary" : "Terminal")
 
-            // Wrapping only means anything in the raw view; the formatted one
-            // always wraps, because rejoining the lines is the point of it.
-            if !formatted {
+            // Wrapping only means anything in the raw terminal; the formatted
+            // view always wraps, because rejoining the lines is the point.
+            if mode == .terminal, !formatted {
                 Button { wrap.toggle() } label: {
                     Image(systemName: wrap ? "arrow.turn.down.left" : "arrow.left.and.right")
                 }
@@ -97,6 +130,34 @@ struct SessionDetailView: View {
             }
 
             Menu {
+                if mode == .summary {
+                    Section("Show") {
+                        ForEach(OverviewSections.allCases, id: \.section.rawValue) { item in
+                            Toggle(isOn: Binding(
+                                get: { sections.contains(item.section) },
+                                set: { isOn in
+                                    var next = sections
+                                    if isOn { next.insert(item.section) }
+                                    else { next.remove(item.section) }
+                                    sections = next
+                                }
+                            )) {
+                                Text(item.title)
+                            }
+                        }
+                        Button("Show Everything") { sections = .all }
+                    }
+                    Section("Reading") {
+                        Toggle("Bionic", isOn: Binding(
+                            get: { bionic }, set: { bionic = $0 }))
+                    }
+                } else {
+                    Section("Terminal") {
+                        Toggle("Formatted", isOn: Binding(
+                            get: { formatted }, set: { formatted = $0 }))
+                    }
+                }
+
                 // A stepper rather than pinch-to-zoom: the text is selectable,
                 // and a pinch that sometimes zooms and sometimes starts a
                 // selection is worse than a control you can find.
@@ -112,10 +173,16 @@ struct SessionDetailView: View {
                 Image(systemName: "textformat.size")
             }
 
-            Button { client.requestScrollback(for: entry) } label: {
+            Button {
+                if mode == .summary {
+                    client.requestOverview(for: entry, turn: viewedTurn)
+                } else {
+                    client.requestScrollback(for: entry)
+                }
+            } label: {
                 Image(systemName: "arrow.clockwise")
             }
-            .disabled(isLoading)
+            .disabled(mode == .summary ? client.isLoadingOverview(entry) : isLoading)
         }
     }
 
@@ -159,6 +226,193 @@ struct SessionDetailView: View {
             .onAppear { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
             .onChange(of: text) { _ in proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
         }
+    }
+
+    // MARK: - Summary
+
+    /// The turn, laid out the way the Mac's overview pane lays it out.
+    @ViewBuilder
+    private var summary: some View {
+        if let overview {
+            if let note = overview.note {
+                ContentUnavailableView {
+                    Label("No summary", systemImage: "text.append")
+                } description: {
+                    Text(note)
+                }
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if sections.contains(.prompt), let prompt = overview.prompt,
+                           !prompt.isEmpty {
+                            section("What I Asked") {
+                                prose(prompt)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        if sections.contains(.questions), !overview.questions.isEmpty {
+                            section("Questions") {
+                                ForEach(overview.questions) { question in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        if let header = question.header, !header.isEmpty {
+                                            Text(header)
+                                                .font(.system(size: fontSize, weight: .semibold))
+                                        }
+                                        prose(question.text)
+                                        ForEach(Array(question.options.enumerated()), id: \.offset) {
+                                            _, option in
+                                            Text("• " + option)
+                                                .font(.system(size: fontSize))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if sections.contains(.reply), !overview.blocks.isEmpty {
+                            section("What Claude Said") {
+                                ForEach(overview.blocks) { block in
+                                    switch block.kind {
+                                    case .code:
+                                        codeBlock(block.text)
+                                    case .image:
+                                        Label("image", systemImage: "photo")
+                                            .font(.system(size: fontSize))
+                                            .foregroundStyle(.tertiary)
+                                    case .paragraph:
+                                        prose(block.text)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Last, and off by default: it is a list you can get
+                        // from the terminal, and putting it above the reply
+                        // pushes what was said off the screen.
+                        if sections.contains(.activity), !overview.activity.isEmpty {
+                            section("Recent Activity") {
+                                ForEach(overview.activity) { call in
+                                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                        Image(systemName: call.isError
+                                              ? "exclamationmark.triangle.fill"
+                                              : (call.finished ? "checkmark" : "circle.dotted"))
+                                            .font(.system(size: 9))
+                                            .foregroundStyle(
+                                                call.isError ? AnyShapeStyle(Color.red)
+                                                             : AnyShapeStyle(.tertiary))
+                                        Text(call.name)
+                                            .font(.system(size: fontSize - 1, weight: .medium,
+                                                          design: .monospaced))
+                                        Text(call.detail ?? "")
+                                            .font(.system(size: fontSize - 1, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+                }
+                .safeAreaInset(edge: .top, spacing: 0) { turnBar(overview) }
+            }
+        } else if client.isLoadingOverview(entry) {
+            ProgressView("Reading the conversation…")
+        } else {
+            ContentUnavailableView {
+                Label("No summary yet", systemImage: "text.append")
+            } description: {
+                Text("Nothing has been said in this session yet.")
+            }
+        }
+    }
+
+    /// Where you are in the conversation, and how to move.
+    private func turnBar(_ overview: AgentOverview) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                step(to: overview.turn + 1)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .disabled(!overview.hasOlder)
+
+            Text("turn \(overview.turnCount - overview.turn) of \(overview.turnCount)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+            Button {
+                step(to: overview.turn - 1)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .disabled(overview.isLatest)
+
+            Spacer()
+
+            // Only offered when it would do something: on the newest turn it
+            // is a button that cannot change anything.
+            if !overview.isLatest {
+                Button("Latest") { step(to: 0) }
+                    .font(.system(size: 11, weight: .medium))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(.bar)
+    }
+
+    private func step(to turn: Int) {
+        let target = max(0, turn)
+        viewedTurn = target
+        client.requestOverview(for: entry, turn: target)
+    }
+
+    @ViewBuilder
+    private func section<Content: View>(
+        _ title: String, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(.tertiary)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Prose, optionally bionic.
+    @ViewBuilder
+    private func prose(_ text: String) -> some View {
+        if bionic {
+            Text(BionicText.attributed(text, size: fontSize + 2))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Text(text)
+                .font(.system(size: fontSize + 2))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func codeBlock(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: fontSize, design: .monospaced))
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+            )
     }
 
     private var terminal: some View {
@@ -297,7 +551,12 @@ struct SessionDetailView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        .background(.bar)
+        // The bar has to run to the bottom of the screen, under the home
+        // indicator and behind the keyboard. Left inside the safe area it stops
+        // short, and the gap shows as a strip of page beneath the composer's
+        // corners — worse with the keyboard up, because the strip then sits
+        // between the box and the keys.
+        .background(.bar, ignoresSafeAreaEdges: .bottom)
         .sheet(isPresented: $showingHistory) { historySheet }
         .onChange(of: photoPick) { item in
             guard let item else { return }
