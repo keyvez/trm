@@ -478,6 +478,17 @@ struct SessionDetailView: View {
                 }
             }
 
+            // The box stays usable when the Mac is unreachable — what you typed
+            // is still yours, and it says why it can't go rather than sitting
+            // disabled with nothing to explain it.
+            if let problem = client.requestError(for: entry) {
+                Text(problem)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+            }
+
             if let problem = client.attachError(for: entry) {
                 Text(problem)
                     .font(.system(size: 11))

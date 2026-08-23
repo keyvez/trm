@@ -183,6 +183,19 @@ final class MachineLink: ObservableObject, Identifiable {
     @Published private(set) var overviews: [String: AgentOverview] = [:]
     /// Rows with an overview request in flight.
     @Published private(set) var loadingOverview: Set<String> = []
+    /// Why the last request for a row didn't come back.
+    @Published private(set) var requestError: [String: String] = [:]
+    /// Timers that give up on a request the Mac never answered.
+    private var pendingDeadlines: [String: DispatchWorkItem] = [:]
+
+    /// How long to wait before saying a request isn't coming.
+    ///
+    /// A sleeping Mac accepts nothing and answers nothing — but a TCP
+    /// connection to one that went to sleep mid-session can sit open for
+    /// minutes before the stack gives up, so waiting on the socket is waiting
+    /// forever. Without this, asking a sleeping Mac for a conversation left
+    /// the spinner turning and the reply box disabled with nothing to say.
+    private static let requestTimeout: TimeInterval = 12
 
     /// Rows with an attachment upload in flight.
     @Published private(set) var attaching: Set<String> = []
@@ -281,6 +294,8 @@ final class MachineLink: ObservableObject, Identifiable {
                     self.receive()
                 case .failed:
                     self.candidateTimeout?.cancel()
+                    self.failEverythingInFlight(
+                        "Lost the connection to \(self.name) before it answered.")
                     self.candidateIndex += 1
                     self.connectToCandidate()
                 case .cancelled:
@@ -334,10 +349,51 @@ final class MachineLink: ObservableObject, Identifiable {
 
     func refresh() { send(["type": "refresh"]) }
 
+    /// Start the clock on a request, so it fails visibly rather than hanging.
+    private func expect(_ rowId: String, kind: String) {
+        pendingDeadlines[rowId]?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.loadingOverview.contains(rowId)
+                || self.loadingScrollback.contains(rowId)
+                || self.attaching.contains(rowId)
+                || self.sending.contains(rowId) else { return }
+            self.loadingOverview.remove(rowId)
+            self.loadingScrollback.remove(rowId)
+            self.attaching.remove(rowId)
+            self.sending.remove(rowId)
+            self.requestError[rowId] =
+                "\(self.name) didn't answer — it may be asleep. Pull to retry."
+        }
+        pendingDeadlines[rowId] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.requestTimeout, execute: work)
+    }
+
+    /// A reply arrived: stop waiting on it and clear any stale complaint.
+    private func settle(_ rowId: String) {
+        pendingDeadlines[rowId]?.cancel()
+        pendingDeadlines.removeValue(forKey: rowId)
+        requestError.removeValue(forKey: rowId)
+    }
+
+    /// The link went away. Nothing in flight is coming back, so let go of it
+    /// all rather than leaving controls disabled against a dead connection.
+    private func failEverythingInFlight(_ reason: String) {
+        let waiting = loadingOverview.union(loadingScrollback).union(attaching).union(sending)
+        for rowId in waiting { requestError[rowId] = reason }
+        loadingOverview.removeAll()
+        loadingScrollback.removeAll()
+        attaching.removeAll()
+        sending.removeAll()
+        pendingDeadlines.values.forEach { $0.cancel() }
+        pendingDeadlines.removeAll()
+    }
+
     /// Ask for one turn of a row's conversation. `turn` counts back from the
     /// newest, so 0 is the latest and nil means "whatever is newest now".
     func requestOverview(for rowId: String, turn: Int? = nil) {
         loadingOverview.insert(rowId)
+        expect(rowId, kind: "overview")
         var message: [String: Any] = ["type": "overview", "id": rowId]
         if let turn { message["turn"] = turn }
         send(message)
@@ -347,6 +403,7 @@ final class MachineLink: ObservableObject, Identifiable {
     /// you were sitting in front of it.
     func requestScrollback(for rowId: String, lines: Int = 400) {
         loadingScrollback.insert(rowId)
+        expect(rowId, kind: "history")
         send(["type": "history", "id": rowId, "lines": lines])
     }
 
@@ -355,6 +412,7 @@ final class MachineLink: ObservableObject, Identifiable {
     /// actually works — nothing is smuggled into the terminal as bytes.
     func attach(data: Data, name: String, to rowId: String) {
         attaching.insert(rowId)
+        expect(rowId, kind: "attach")
         attachError.removeValue(forKey: rowId)
         send(["type": "attach", "id": rowId, "name": name,
               "data": data.base64EncodedString()])
@@ -371,6 +429,7 @@ final class MachineLink: ObservableObject, Identifiable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         sending.insert(rowId)
+        expect(rowId, kind: "send")
         var payload: [String: Any] = ["type": "send", "id": rowId, "text": trimmed]
         if rowId.hasPrefix("pane:"), let pane = Int(rowId.dropFirst("pane:".count)) {
             payload["pane"] = pane
@@ -436,10 +495,12 @@ final class MachineLink: ObservableObject, Identifiable {
         case "overview":
             guard let id = object["id"] as? String else { return }
             loadingOverview.remove(id)
+            settle(id)
             if let overview = AgentOverview(json: object) { overviews[id] = overview }
         case "attached":
             guard let id = object["id"] as? String else { return }
             attaching.remove(id)
+            settle(id)
             attachedPath[id] = object["path"] as? String
         case "attach_failed":
             guard let id = object["id"] as? String else { return }
@@ -448,6 +509,7 @@ final class MachineLink: ObservableObject, Identifiable {
         case "history":
             guard let id = object["id"] as? String else { return }
             loadingScrollback.remove(id)
+            settle(id)
             scrollback[id] = object["text"] as? String ?? ""
             if let note = object["note"] as? String, !note.isEmpty {
                 scrollbackNote[id] = note
@@ -613,6 +675,11 @@ final class CommandCenterClient: ObservableObject {
 
     func isLoadingOverview(_ entry: BoardEntry) -> Bool {
         link(for: entry)?.loadingOverview.contains(entry.id) ?? false
+    }
+
+    /// Why the last request for this row failed, if it did.
+    func requestError(for entry: BoardEntry) -> String? {
+        link(for: entry)?.requestError[entry.id]
     }
 
     func attachError(for entry: BoardEntry) -> String? {
