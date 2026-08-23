@@ -272,6 +272,62 @@ final class SessionBrowserModel: ObservableObject {
     }
 
     /// Write a single-pane TOML that reattaches to `session`.
+    /// One window holding every session in a group, laid out as a grid.
+    ///
+    /// Used when the group has no saved arrangement to restore. The shape is
+    /// chosen the way the browser's own tiles are — roughly square, never
+    /// more columns than panes — because there is nothing better to go on,
+    /// and a long single row would push most of the panes off screen.
+    private func writeGroupConfig(for group: Group) -> String? {
+        let sessions = group.sessions
+        guard !sessions.isEmpty else { return nil }
+
+        let cols = max(1, Int(ceil(Double(sessions.count).squareRoot())))
+        let rows = max(1, Int(ceil(Double(sessions.count) / Double(cols))))
+
+        // Named for the group so reopening overwrites rather than litters,
+        // and `_browser_` keeps it out of the named-session picker.
+        let safeName = group.name.unicodeScalars.map { scalar -> String in
+            CharacterSet.alphanumerics.contains(scalar) ? String(scalar) : "-"
+        }.joined()
+        let url = SessionManager.sessionsDirectory
+            .appendingPathComponent("_browser_group_\(safeName).toml")
+
+        var toml = "# Opened from the session browser: every session in this group.\n\n"
+        toml += "[grid]\n"
+        toml += "rows = \(rows)\n"
+        toml += "cols = \(cols)\n"
+        toml += "gap = 4\n"
+        toml += "outer_padding = 4\n\n"
+        for session in sessions {
+            toml += "[[panes]]\n"
+            toml += "pane_type = \"terminal\"\n"
+            if let host = session.remoteHost {
+                // A remote pane is described by where it runs, not by a local
+                // socket — the restore path rebuilds the `ssh … zmx attach`.
+                toml += "remote_host = \(Self.tomlQuote(host))\n"
+                toml += "remote_session = \(Self.tomlQuote(session.name))\n"
+            } else {
+                toml += "zmx_session = \(Self.tomlQuote(session.name))\n"
+                if let cwd = session.cwd, !cwd.isEmpty, cwd != "/" {
+                    toml += "cwd = \(Self.tomlQuote(cwd))\n"
+                }
+            }
+            if let watermark = session.watermark, !watermark.isEmpty {
+                toml += "watermark = \(Self.tomlQuote(watermark))\n"
+            }
+            toml += "\n"
+        }
+
+        do {
+            try toml.write(to: url, atomically: true, encoding: .utf8)
+            return url.path
+        } catch {
+            Self.logger.error(
+                "Session browser: could not write group config: \(error.localizedDescription)")
+            return nil
+        }
+    }
     private func writeSinglePaneConfig(for session: ZmxSessionManager.SessionInfo) -> String? {
         let dir = SessionManager.sessionsDirectory
         // A stable per-session filename keeps repeated opens from littering the
@@ -369,9 +425,33 @@ final class SessionBrowserModel: ObservableObject {
             return
         }
 
-        // The orphan bucket has no TOML to restore; open each session instead.
+        // No saved arrangement — but that is a reason to invent one, not a
+        // reason to hand back N one-pane windows. After a crash the group with
+        // every pane in it is usually exactly the one with no TOML, and
+        // opening eleven sessions one at a time is the worst possible moment to
+        // ask someone to do clerical work. A grid is not the layout that was
+        // lost; it is enormously closer to it than eleven windows.
         guard let path = group.path else {
-            for session in group.sessions { open(session) }
+            guard let generated = writeGroupConfig(for: group) else {
+                presentError(
+                    title: "Could Not Open Window",
+                    message: "Failed to write a session config for \(group.name)."
+                )
+                return
+            }
+            guard let generatedConfig = Trm.gridConfig(fromConfigPath: generated) else {
+                presentError(
+                    title: "Could Not Open Window",
+                    message: "The session file generated for \(group.name) could not be parsed."
+                )
+                return
+            }
+            _ = TerminalController.newWindow(
+                ghostty,
+                withGridConfig: generatedConfig,
+                withConfigPath: generated
+            )
+            dismissAfterOpening()
             return
         }
 

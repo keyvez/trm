@@ -154,10 +154,15 @@ private struct GroupSection: View {
 
                 Spacer()
 
-                // Only a saved TOML describes an arrangement, so only those
-                // groups can come back as a window; the rest open pane by pane.
-                if group.canOpenAsWindow {
-                    Button("Open Window", action: onOpenGroup)
+                // Every non-empty group can come back as one window. Only a
+                // saved TOML restores the arrangement you had; without one the
+                // panes are laid out in a grid — which is not the layout that
+                // was lost, and is enormously closer to it than opening eleven
+                // sessions by hand. The label says which you are getting, so
+                // "Open Window" never quietly means something else.
+                if !group.sessions.isEmpty {
+                    Button(group.canOpenAsWindow ? "Open Window" : "Open All in One Window",
+                           action: onOpenGroup)
                 }
                 // A host that couldn't be reached has nothing to act on.
                 if !group.sessions.isEmpty {
