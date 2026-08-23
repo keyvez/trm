@@ -138,6 +138,15 @@ protocol TerminalViewModel: ObservableObject {
 struct TerminalView<ViewModel: TerminalViewModel>: View {
     @ObservedObject var ghostty: Ghostty.App
 
+    /// Drives the sidebar's per-pane messages.
+    ///
+    /// The monitor already polls every agent in the window and computes the
+    /// paragraph an overview would show, so the sidebar reads that rather than
+    /// growing a second, differently-wrong copy of the same logic. It is only
+    /// subscribed while the shelf is expanded — an index nobody is looking at
+    /// is not worth polling for.
+    @ObservedObject private var agentMonitor = CommandCenterMonitor.shared
+
     // The required view model
     @ObservedObject var viewModel: ViewModel
 
@@ -160,6 +169,32 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
     private var pwdURL: URL? {
         guard let surfacePwd, surfacePwd != "" else { return nil }
         return URL(fileURLWithPath: surfacePwd)
+    }
+
+
+    /// The agent's latest message per pane id.
+    /// Poll agents only while the shelf is expanded — an index nobody is
+    /// looking at is not worth a scan every 2.5 seconds.
+    private func sidebarSubscription<V: View>(_ view: V) -> some View {
+        view
+            .onAppear { CommandCenterMonitor.shared.subscribe() }
+            .onDisappear { CommandCenterMonitor.shared.unsubscribe() }
+    }
+
+    private var sidebarMessages: [Int: String] {
+        Dictionary(agentMonitor.entries.map { ($0.paneId, $0.message) },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
+    private var sidebarAgentNames: [Int: String] {
+        Dictionary(agentMonitor.entries.map { ($0.paneId, $0.kind.displayName) },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
+    private var sidebarLocations: [Int: String] {
+        Dictionary(agentMonitor.entries.compactMap { entry in
+            entry.location.map { (entry.paneId, $0) }
+        }, uniquingKeysWith: { first, _ in first })
     }
 
     var body: some View {
@@ -452,16 +487,28 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
     /// is drawn at all when nothing is parked.
     @ViewBuilder
     private var sidebar: some View {
-        if !viewModel.sidebarTiles.isEmpty {
+        // The rail still appears on its own only when something is parked — a
+        // running pane out of sight must never be invisible. But asking for the
+        // sidebar now shows every pane in the window, so an explicit open is
+        // reason enough to draw it even with nothing parked.
+        if !viewModel.sidebarTiles.isEmpty || viewModel.sidebarIsShowing {
             if viewModel.sidebarIsShowing {
                 SidebarResizeHandle { delta in
                     guard let controller = delegate as? BaseTerminalController else { return }
                     controller.sidebarWidth = min(max(controller.sidebarWidth - delta, 180), 520)
                 }
 
-                SidebarPanesView(
+                sidebarSubscription(SidebarPanesView(
                     panes: viewModel.sidebarTiles,
+                    gridPanes: viewModel.gridPanes,
+                    messages: sidebarMessages,
+                    agentNames: sidebarAgentNames,
+                    locations: sidebarLocations,
                     attentionPaneIds: viewModel.attentionPaneIds,
+                    onFocus: { pane in
+                        guard let surface = pane.firstTerminalSurface else { return }
+                        (delegate as? BaseTerminalController)?.focusSurface(surface)
+                    },
                     onRestore: { pane in
                         (delegate as? BaseTerminalController)?.restorePaneFromSidebar(pane.id)
                     },
@@ -474,7 +521,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                     onCollapse: {
                         (delegate as? BaseTerminalController)?.sidebarIsShowing = false
                     }
-                )
+                ))
                 .frame(width: viewModel.sidebarWidth)
                 .transition(.move(edge: .trailing))
             } else {

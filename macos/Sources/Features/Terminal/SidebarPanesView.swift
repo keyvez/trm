@@ -1,10 +1,14 @@
 import SwiftUI
 
-/// The shelf of panes parked out of the grid.
+/// Every pane in the window, parked or not.
 ///
-/// A parked pane is still running — same PTY, same zmx session, same agent
-/// mid-task — it just isn't taking up a cell. The shelf is how you see what is
-/// still going and pull one back when you want it.
+/// It used to list only parked panes, which made it a shelf for things you had
+/// put away. Listing all of them makes it the window's index: one column that
+/// says what every pane is and what its agent last said, so "which pane was
+/// doing the migration" is answered by reading rather than by clicking through
+/// panes until you find it. A parked pane is still running — same PTY, same
+/// zmx session, same agent mid-task — it just isn't taking up a cell, and the
+/// shelf is still how you pull one back.
 ///
 /// Tiles are watermark cards rather than live miniatures, matching the session
 /// browser. That isn't only for consistency: an `NSView` has exactly one
@@ -15,8 +19,24 @@ struct SidebarPanesView: View {
     /// Parked panes, in shelf order.
     let panes: [GridPane]
 
+    /// Panes currently laid out in the grid, in visual order. Listed above the
+    /// parked ones and acted on differently: a grid pane is focused, not
+    /// restored, because it is already on screen.
+    var gridPanes: [GridPane] = []
+
+    /// The agent's latest message per pane id, so a tile can say what the pane
+    /// is *doing* rather than only what it is called.
+    var messages: [Int: String] = [:]
+    /// The agent running in each pane, when one is.
+    var agentNames: [Int: String] = [:]
+    /// Where each pane's work is — a worktree or project directory.
+    var locations: [Int: String] = [:]
+
     /// Stable pane IDs whose agent is waiting on the user.
     var attentionPaneIds: Set<Int> = []
+
+    /// Bring a pane already in the grid to the front.
+    var onFocus: ((GridPane) -> Void)? = nil
 
     /// Bring a pane back into the grid.
     var onRestore: ((GridPane) -> Void)? = nil
@@ -83,14 +103,15 @@ struct SidebarPanesView: View {
     }
 
     private var paneCount: String {
-        "\(panes.count) pane\(panes.count == 1 ? "" : "s")"
+        let total = gridPanes.count + panes.count
+        return "\(total) pane\(total == 1 ? "" : "s")"
     }
 
     // MARK: - Content
 
     @ViewBuilder
     private var content: some View {
-        if panes.isEmpty {
+        if panes.isEmpty && gridPanes.isEmpty {
             emptyState
         } else {
             ScrollView {
@@ -98,15 +119,24 @@ struct SidebarPanesView: View {
                 // of tiles, and a lazy container inside a ScrollView has to
                 // estimate the height of tiles it has not built yet — the same
                 // measurement loop that pinned a core in the session browser.
-                VStack(spacing: 8) {
-                    ForEach(panes) { pane in
-                        SidebarPaneTile(
-                            pane: pane,
-                            needsAttention: needsAttention(pane),
-                            watermarkVersion: watermarkVersion,
-                            onRestore: { onRestore?(pane) },
-                            onClose: { onClose?(pane) }
-                        )
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(gridPanes) { pane in
+                        tile(for: pane, parked: false)
+                    }
+
+                    // Parked panes are separated rather than mixed in: "on
+                    // screen" and "running out of sight" are different states,
+                    // and the actions differ with them.
+                    if !panes.isEmpty {
+                        if !gridPanes.isEmpty {
+                            Text("PARKED")
+                                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 4)
+                        }
+                        ForEach(panes) { pane in
+                            tile(for: pane, parked: true)
+                        }
                     }
                 }
                 .padding(10)
@@ -114,14 +144,29 @@ struct SidebarPanesView: View {
         }
     }
 
+    private func tile(for pane: GridPane, parked: Bool) -> some View {
+        let paneId = pane.firstTerminalSurface?.paneId
+        return SidebarPaneTile(
+            pane: pane,
+            parked: parked,
+            needsAttention: needsAttention(pane),
+            watermarkVersion: watermarkVersion,
+            message: paneId.flatMap { messages[$0] },
+            agentName: paneId.flatMap { agentNames[$0] },
+            location: paneId.flatMap { locations[$0] },
+            onPrimary: { parked ? onRestore?(pane) : onFocus?(pane) },
+            onClose: { onClose?(pane) }
+        )
+    }
+
     private var emptyState: some View {
         VStack(spacing: 6) {
             Image(systemName: "tray")
                 .font(.system(size: 22))
                 .foregroundStyle(.tertiary)
-            Text("Nothing parked")
+            Text("No panes")
                 .font(.system(size: 12, weight: .medium))
-            Text("Send a pane here to keep it running out of sight.")
+            Text("Panes in this window appear here, with what their agent last said.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -143,10 +188,16 @@ struct SidebarPanesView: View {
 /// action the shelf exists for.
 private struct SidebarPaneTile: View {
     let pane: GridPane
+    /// Parked panes are restored; grid panes are focused.
+    let parked: Bool
     let needsAttention: Bool
     /// Re-reads the watermark when the Zig side changes it; unused directly.
     let watermarkVersion: Int
-    let onRestore: () -> Void
+    /// The agent's latest message, when this pane has an agent.
+    let message: String?
+    let agentName: String?
+    let location: String?
+    let onPrimary: () -> Void
     let onClose: () -> Void
 
     @State private var hovering = false
@@ -172,9 +223,22 @@ private struct SidebarPaneTile: View {
                 Spacer(minLength: 0)
             }
 
+            // What the agent last said. The point of listing every pane is to
+            // answer "which one was doing the migration" by reading rather
+            // than by clicking through panes until you find it — and the
+            // message is what actually answers that, not the label.
+            if let message, !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             // Buttons stay mounted so the tile height doesn't jump on hover.
             HStack(spacing: 6) {
-                Button("Restore", action: onRestore)
+                Button(parked ? "Restore" : "Focus", action: onPrimary)
                 Button("Close", role: .destructive, action: onClose)
                 Spacer(minLength: 0)
             }
@@ -197,23 +261,56 @@ private struct SidebarPaneTile: View {
         )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture(perform: onRestore)
+        .onTapGesture(perform: onPrimary)
         .contextMenu {
-            Button("Restore to Grid", action: onRestore)
+            Button(parked ? "Restore to Grid" : "Focus Pane", action: onPrimary)
             Divider()
             Button("Close Pane", role: .destructive, action: onClose)
         }
-        .help("Still running — click to bring it back")
+        .help(parked ? "Still running — click to bring it back" : "Click to focus this pane")
     }
 
-    /// The pane's watermark, which is the label the user already navigates by.
+    /// What to call this pane.
+    ///
+    /// The watermark first, because that is the name someone chose and already
+    /// navigates by. Then the worktree, which is the most specific true thing
+    /// about a pane working in one — `trm-hello-world` says more than `trm`
+    /// does when three panes share a repository. Then the agent, then the
+    /// folder. A command line is the last resort it always was: it identifies
+    /// the pane only to whoever typed it.
     private var label: String {
         if let paneId = pane.firstTerminalSurface?.paneId,
            let watermark = Trm.shared.watermark(forPaneId: UInt32(paneId)),
            !watermark.isEmpty {
             return watermark
         }
+        if let worktree = worktreeName { return worktree }
+        if let agentName, !agentName.isEmpty, agentName != "shell" { return agentName }
+        if let folder = folderName { return folder }
         return fallbackLabel
+    }
+
+    /// The worktree directory's own name, when this pane is working in one.
+    ///
+    /// A worktree is the branch made visible, and its directory is named for
+    /// the branch — so this is the label that distinguishes two panes on the
+    /// same project that are doing entirely different things.
+    private var worktreeName: String? {
+        guard let location, !location.isEmpty else { return nil }
+        let parts = location.split(separator: "/").map(String.init)
+        // `…/.worktrees/<branch>` and `…/<repo>-<branch>` are the two shapes
+        // trm and git produce; both put the distinguishing name last.
+        if let index = parts.firstIndex(where: { $0 == ".worktrees" || $0 == "worktrees" }),
+           index + 1 < parts.count {
+            return parts[(index + 1)...].joined(separator: "/")
+        }
+        return nil
+    }
+
+    /// The project directory's name — the last component of where the work is.
+    private var folderName: String? {
+        guard let location, !location.isEmpty else { return nil }
+        return location.split(separator: "/").last.map(String.init)
     }
 
     private var fallbackLabel: String {
