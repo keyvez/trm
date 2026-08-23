@@ -459,6 +459,14 @@ final class CommandCenterClient: ObservableObject {
 
     @Published private(set) var links: [MachineLink] = []
 
+    /// Half-written replies, per row.
+    ///
+    /// Held here rather than in a view so a draft survives leaving the pane
+    /// you were writing to and coming back — which, now that replying happens
+    /// a screen away from the board, is an ordinary thing to do rather than a
+    /// mistake.
+    @Published var drafts: [String: String] = [:]
+
     private var cancellables: Set<AnyCancellable> = []
 
     private static let pairingsKey = "pairings"
