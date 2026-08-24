@@ -283,9 +283,12 @@ final class CommandCenterMonitor: ObservableObject {
         return Entry(
             id: ObjectIdentifier(surface),
             paneId: paneId,
-            watermark: (watermark?.isEmpty == false ? watermark! : "pane \(paneId)"),
+            watermark: Self.rowLabel(watermark: watermark, cwd: cwd, paneId: paneId),
             kind: pane.agentKind,
-            location: cwd.map { ($0 as NSString).lastPathComponent },
+            // A worktree's name is the branch, which is the informative half.
+            // `genui-a2ui` beats `fasmac` when three panes share the repo.
+            location: WorktreeMark.name(forPath: cwd)
+                ?? cwd.map { ($0 as NSString).lastPathComponent },
             host: surface.remoteHost,
             message: message,
             prompt: transcript.lastUserPrompt,
@@ -454,6 +457,22 @@ final class CommandCenterMonitor: ObservableObject {
     /// Prompts from the parse window, oldest first, deduplicated against
     /// consecutive repeats and capped — this is a reply box's history, not an
     /// archive.
+    /// What to call a pane on the board, marked when it is a worktree.
+    ///
+    /// The mark is added to a watermark rather than replacing it: someone who
+    /// named a pane meant that name, and the insignia is extra information
+    /// about where it sits, not a correction.
+    nonisolated static func rowLabel(watermark: String?, cwd: String?, paneId: Int) -> String {
+        let isWorktree = WorktreeMark.name(forPath: cwd) != nil
+        if let watermark, !watermark.isEmpty {
+            return isWorktree ? WorktreeMark.marked(watermark) : watermark
+        }
+        if let worktree = WorktreeMark.name(forPath: cwd) {
+            return WorktreeMark.marked(worktree)
+        }
+        return "pane \(paneId)"
+    }
+
     nonisolated static func promptHistory(_ transcript: AgentTranscript, limit: Int = 50) -> [String] {
         var result: [String] = []
         for turn in transcript.turns {

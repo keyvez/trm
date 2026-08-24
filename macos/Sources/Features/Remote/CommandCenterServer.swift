@@ -621,6 +621,19 @@ final class CommandCenterServer: ObservableObject {
         }
     }
 
+    /// What to call a hosted session on the board.
+    private static func rowLabel(for info: ZmxSessionManager.SessionInfo) -> String {
+        if let watermark = info.watermark, !watermark.isEmpty {
+            return WorktreeMark.name(forPath: info.cwd) == nil
+                ? watermark
+                : WorktreeMark.marked(watermark)
+        }
+        if let worktree = WorktreeMark.name(forPath: info.cwd) {
+            return WorktreeMark.marked(worktree)
+        }
+        return info.shortCwd ?? info.name
+    }
+
     enum AttachOutcome {
         case success(String)
         case failure(String)
@@ -878,7 +891,10 @@ final class CommandCenterServer: ObservableObject {
                 // TOMLs to take one from — which is exactly the machine this
                 // row comes from. The working directory is the next best name
                 // and usually the one you'd have chosen: `dev/trm`, `dev/pe`.
-                "watermark": info.watermark ?? info.shortCwd ?? info.name,
+                // A worktree row says so. Two sessions in one project are
+                // otherwise labelled identically, and which branch is checked
+                // out is the difference you wanted.
+                "watermark": Self.rowLabel(for: info),
                 "agent": info.agentKind?.displayName ?? "shell",
                 "message": info.summary ?? info.command ?? "",
                 "working": info.isWorking,

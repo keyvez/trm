@@ -707,6 +707,45 @@ struct AgentTranscriptTests {
                 == "-Users-g-dev-fasmac--worktrees-feature-genui-a2ui")
     }
 
+    // MARK: - Worktree insignia
+
+    @Test func aWorktreePathYieldsItsBranchName() {
+        #expect(WorktreeMark.name(forPath: "/Users/g/dev/fasmac/.worktrees/feature/genui-a2ui")
+                == "feature/genui-a2ui")
+    }
+
+    /// An ordinary project directory is not a worktree, and must not be
+    /// decorated as one.
+    @Test func anOrdinaryPathIsNotAWorktree() {
+        #expect(WorktreeMark.name(forPath: "/Users/g/dev/trm") == nil)
+        #expect(WorktreeMark.name(forPath: nil) == nil)
+    }
+
+    /// The trap this exists for: a label is marked every time it is drawn, so
+    /// a watermark that already carries the insignia must not collect another.
+    @Test func markingIsIdempotent() {
+        let once = WorktreeMark.marked("genui-a2ui")
+        #expect(once == "⑂ genui-a2ui")
+        #expect(WorktreeMark.marked(once) == once)
+        #expect(WorktreeMark.marked(WorktreeMark.marked(once)) == once)
+    }
+
+    /// A name someone chose is kept and marked, not replaced: the insignia is
+    /// extra information about where the pane sits, not a correction.
+    @Test func aChosenWatermarkSurvivesTheMark() {
+        let label = CommandCenterMonitor.rowLabel(
+            watermark: "migration",
+            cwd: "/Users/g/dev/fasmac/.worktrees/feature/genui-a2ui",
+            paneId: 3)
+        #expect(label == "⑂ migration")
+    }
+
+    @Test func aPaneOutsideAWorktreeKeepsItsPlainLabel() {
+        let label = CommandCenterMonitor.rowLabel(
+            watermark: "migration", cwd: "/Users/g/dev/trm", paneId: 3)
+        #expect(label == "migration")
+    }
+
     // MARK: - Worktree occupancy
 
     /// A pane sitting in the repository means the repository is attended.

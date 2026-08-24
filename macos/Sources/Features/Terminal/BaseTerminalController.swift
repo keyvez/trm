@@ -5568,8 +5568,13 @@ class BaseTerminalController: NSWindowController,
         // Name the pane after the worktree's own directory. A shelf of panes
         // all called "pane 7" is a shelf you have to open one by one.
         if let paneId = view.paneId {
+            // The mark goes on at creation, which is the one moment trm knows
+            // for certain this is a worktree — a `<repo>-<branch>` directory
+            // beside its repo is indistinguishable from any other sibling
+            // afterwards.
+            let name = WorktreeMark.name(forPath: path) ?? (path as NSString).lastPathComponent
             Trm.shared.setWatermark(
-                forPaneId: UInt32(paneId), text: (path as NSString).lastPathComponent)
+                forPaneId: UInt32(paneId), text: WorktreeMark.marked(name))
         }
         // Never let the watcher see this one as new; trm made it.
         GitWorktreeWatcher.shared.markKnown(path)

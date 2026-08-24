@@ -282,9 +282,12 @@ private struct SidebarPaneTile: View {
         if let paneId = pane.firstTerminalSurface?.paneId,
            let watermark = Trm.shared.watermark(forPaneId: UInt32(paneId)),
            !watermark.isEmpty {
-            return watermark
+            // A watermark stamped at creation already carries the mark; one
+            // typed by hand for a pane that happens to sit in a worktree does
+            // not, and wants it.
+            return worktreeName == nil ? watermark : WorktreeMark.marked(watermark)
         }
-        if let worktree = worktreeName { return worktree }
+        if let worktree = worktreeName { return WorktreeMark.marked(worktree) }
         if let agentName, !agentName.isEmpty, agentName != "shell" { return agentName }
         if let folder = folderName { return folder }
         return fallbackLabel
@@ -295,17 +298,7 @@ private struct SidebarPaneTile: View {
     /// A worktree is the branch made visible, and its directory is named for
     /// the branch — so this is the label that distinguishes two panes on the
     /// same project that are doing entirely different things.
-    private var worktreeName: String? {
-        guard let location, !location.isEmpty else { return nil }
-        let parts = location.split(separator: "/").map(String.init)
-        // `…/.worktrees/<branch>` and `…/<repo>-<branch>` are the two shapes
-        // trm and git produce; both put the distinguishing name last.
-        if let index = parts.firstIndex(where: { $0 == ".worktrees" || $0 == "worktrees" }),
-           index + 1 < parts.count {
-            return parts[(index + 1)...].joined(separator: "/")
-        }
-        return nil
-    }
+    private var worktreeName: String? { WorktreeMark.name(forPath: location) }
 
     /// The project directory's name — the last component of where the work is.
     private var folderName: String? {
