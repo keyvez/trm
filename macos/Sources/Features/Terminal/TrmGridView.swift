@@ -190,6 +190,8 @@ struct TrmGridView: View {
 
     /// Reconnect a disconnected remote pane (same session, same slot).
     var onReconnectPane: ((GridPane) -> Void)? = nil
+    /// Reattach every dropped pane at once.
+    var onReconnectAll: (() -> Void)? = nil
 
     /// Selected pane that has no surface (overview/webview/plugin). Terminals
     /// carry selection through `focusedSurface`; these panes can't.
@@ -765,6 +767,21 @@ struct TrmGridView: View {
                             .background(.regularMaterial, in: Capsule())
                     }
                     .buttonStyle(.plain)
+
+                    // A network drops for every remote pane at once, so the
+                    // useful action is almost never "this one". Offered only
+                    // when there is more than one, since otherwise it is the
+                    // same button twice.
+                    if disconnectedRemotePaneIds.count > 1, let onReconnectAll {
+                        Button {
+                            onReconnectAll()
+                        } label: {
+                            Text("Reconnect all \(disconnectedRemotePaneIds.count)")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.85))
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
             .contentShape(Rectangle())

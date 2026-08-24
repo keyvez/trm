@@ -3,6 +3,7 @@ import CoreImage
 import SwiftUI
 import Combine
 import GhosttyKit
+import Network
 import UniformTypeIdentifiers
 import os
 
@@ -196,6 +197,15 @@ class BaseTerminalController: NSWindowController,
     /// centered Reconnect button over these; reconnecting reattaches the
     /// SAME remote session, so nothing is lost.
     @Published var disconnectedRemotePaneIds: Set<Int> = []
+
+    /// Watches for the network coming back, so dropped panes reattach without
+    /// being asked once per pane.
+    private var networkMonitor: NWPathMonitor?
+    /// Whether the last path update was usable, so only the transition back
+    /// triggers a reconnect. Starts nil: the first update describes how things
+    /// already are rather than a change, and reconnecting on launch would
+    /// fight the restore that is still running.
+    private var networkWasUsable: Bool?
 
     /// Remote panes whose `ssh` has exited and whose host hasn't yet said
     /// whether the session is still there. Held open meanwhile: the answer
@@ -760,6 +770,14 @@ class BaseTerminalController: NSWindowController,
             selector: #selector(workspaceDidWake(_:)),
             name: NSWorkspace.didWakeNotification,
             object: nil)
+
+        // Waking is not the only way a link dies. Closing a laptop lid is one
+        // signal; walking out of Wi-Fi range, switching networks, or a VPN
+        // coming up are others, and none of them post a wake notification. A
+        // pane that dropped for one of those sat there offering a Reconnect
+        // button, once per pane, and coming back to eleven of them meant
+        // eleven clicks to get where you already were.
+        startNetworkWatch()
 
         // Listen for local events that we need to know of outside of
         // single surface handlers. (Cmd+Shift+Arrow for a selected
@@ -3950,6 +3968,62 @@ class BaseTerminalController: NSWindowController,
                 guard let self else { return }
                 self.reconnectDisconnectedRemotePanes()
             }
+        }
+    }
+
+    /// Reconnect dropped panes when the network comes back.
+    ///
+    /// `reconnectDisconnectedRemotePanes` was already written to be safe on
+    /// any signal that the network returned; it just had one caller, on wake.
+    /// This is the other signal.
+    ///
+    /// Only a transition into a usable path counts. The monitor reports every
+    /// route change — a new DNS server, an interface going away — and acting
+    /// on each one would reconnect panes that were never broken.
+    private func startNetworkWatch() {
+        guard networkMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in
+                guard let self else { return }
+                let usable = path.status == .satisfied
+                defer { self.networkWasUsable = usable }
+                // Only the moment it comes back, not every update while it is
+                // up, and not the moment it goes away.
+                guard usable, self.networkWasUsable == false else { return }
+                TrmDiagnostics.log("[remote] network back; reconnecting dropped panes")
+                // A path that has just become satisfied is not yet a path that
+                // routes: DHCP, DNS and the VPN all settle after the flag
+                // flips, and reattaching into that gap fails and drops the
+                // pane straight back to a button.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    self?.reconnectAfterNetworkReturn()
+                }
+            }
+        }
+        monitor.start(queue: .global(qos: .utility))
+        networkMonitor = monitor
+    }
+
+    /// Reattach dropped panes, and try twice more if any are still down.
+    ///
+    /// A network does not come back all at once: the interface is up before
+    /// DHCP finishes, before DNS answers, and well before a VPN has a route.
+    /// A single attempt into that gap fails and drops the pane straight back
+    /// to a button — the thing this exists to avoid.
+    ///
+    /// Bounded rather than a loop. Three attempts over half a minute covers a
+    /// network settling; a host that is genuinely gone ends up offering the
+    /// button rather than retrying at it forever.
+    private func reconnectAfterNetworkReturn(attempt: Int = 0) {
+        reconnectDisconnectedRemotePanes()
+        guard attempt < 2 else { return }
+        let delay: TimeInterval = attempt == 0 ? 8 : 20
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, !self.disconnectedRemotePaneIds.isEmpty else { return }
+            TrmDiagnostics.log(
+                "[remote] \(self.disconnectedRemotePaneIds.count) pane(s) still down; retrying")
+            self.reconnectAfterNetworkReturn(attempt: attempt + 1)
         }
     }
 

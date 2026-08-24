@@ -295,6 +295,10 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         onReconnectPane: { pane in
                             (self.delegate as? BaseTerminalController)?.reconnectRemotePane(pane)
                         },
+                        onReconnectAll: {
+                            (delegate as? BaseTerminalController)?
+                                .reconnectDisconnectedRemotePanes()
+                        },
                         selectedNonSurfacePane: viewModel.selectedNonSurfacePane,
                         onSelectNonSurfacePane: { id in
                             (self.delegate as? BaseTerminalController)?.selectNonSurfacePane(id)
