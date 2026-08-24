@@ -35,3 +35,6 @@ ios/build/
 # Local xcodebuild derived data (macos/build is a machine-specific symlink)
 macos/build-release/
 ios/build-ios/
+
+# Artifacts the zig sprite test writes relative to its working directory
+sprite_face_test-*.png

@@ -4600,12 +4600,31 @@ class BaseTerminalController: NSWindowController,
         // whatever is running in a peeked *terminal* — vim, an agent's prompt —
         // and stealing it there would be worse than not having the shortcut.
         // An overview, a webview or a plugin pane has no such claim.
+        //
+        // Decided by asking whether the peeked thing is a live surface rather
+        // than by finding it in `gridPanes`. That lookup only sees top-level
+        // panes, and an overview is very often a stack child — so peeking one
+        // and pressing Escape found nothing, matched no rule, and left the
+        // overview sitting at full size with the shortcut apparently dead.
         if window?.isKeyWindow == true, event.keyCode == 53,
-           let peeked = peekedPane,
-           let pane = gridPanes.first(where: { $0.id == peeked }),
-           !pane.isTerminalLike {
-            dismissPeek()
-            return nil
+           let peeked = peekedPane {
+            // A live surface is a terminal and keeps its Escape. A top-level
+            // pane is asked directly, which keeps a peeked *stack* holding a
+            // terminal behaving as it did. Anything else — an overview, most
+            // often a stack child and so invisible to that lookup — is a pane
+            // with no claim on the key.
+            let wantsTheKey: Bool
+            if surfaceTree.contains(where: { ObjectIdentifier($0) == peeked }) {
+                wantsTheKey = true
+            } else if let pane = gridPanes.first(where: { $0.id == peeked }) {
+                wantsTheKey = pane.isTerminalLike
+            } else {
+                wantsTheKey = false
+            }
+            if !wantsTheKey {
+                dismissPeek()
+                return nil
+            }
         }
 
         guard window?.isKeyWindow == true, peekedPane != nil else { return event }
