@@ -225,6 +225,10 @@ class AppDelegate: NSObject,
         // `ps`), and skipping it leaks an SSH session per remote overview
         // every time the app is killed rather than quit.
         RemoteAgentTranscriptMirror.reapOrphanedStreams()
+        // Mirrors grow for the life of a session and are never shortened, so
+        // the ones nobody is streaming into are pure sediment. Launch is when
+        // nothing is streaming and age is a safe test.
+        RemoteAgentTranscriptMirror.pruneStaleMirrors()
 
         // A worktree created by anyone — you in a shell, an agent running
         // `git worktree add` — gets a pane on the sidebar. The agent case is

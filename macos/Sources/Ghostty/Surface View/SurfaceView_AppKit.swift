@@ -288,6 +288,14 @@ extension Ghostty {
         // We need to support being a first responder so that we can get input events
         override var acceptsFirstResponder: Bool { return true }
 
+        /// The config to build the surface from, kept while a retry is pending.
+        private var pendingSurfaceConfig: SurfaceConfiguration?
+        private var surfaceRetryAttempts = 0
+        /// Five tries over about half a minute. Enough for a restore storm or
+        /// a memory spike to pass; bounded, because a surface that cannot be
+        /// made after that is failing for a reason waiting won't fix.
+        private static let maxSurfaceRetries = 5
+
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
             self.markedText = NSMutableAttributedString()
             self.id = uuid ?? .init()
@@ -433,7 +441,16 @@ extension Ghostty {
                 ghostty_surface_new(app, &surface_cfg_c)
             }
             guard let surface = surface else {
+                // Usually transient. The reason this fails in practice is
+                // memory pressure — a window restoring eleven panes at once
+                // asks for eleven terminals in the same instant, and the ones
+                // that lose show "the terminal failed to initialize" forever
+                // while the pressure that caused it passes seconds later.
+                // A pane that can retry recovers; one that can't is dead for
+                // the life of the window.
                 self.error = Ghostty.Error.apiFailed
+                self.pendingSurfaceConfig = surface_cfg
+                self.scheduleSurfaceRetry(app: app)
                 return
             }
             self.surfaceModel = Ghostty.Surface(cSurface: surface)
@@ -447,6 +464,50 @@ extension Ghostty {
 
         required init?(coder: NSCoder) {
             fatalError("init(coder:) is not supported for this view")
+        }
+
+        /// Try again to build the surface this view failed to create.
+        ///
+        /// Only the creation is retried. Everything else the initialiser set up
+        /// — observers, tracking areas, the event monitor — is still in place,
+        /// because the failure happens after all of it.
+        private func scheduleSurfaceRetry(app: ghostty_app_t) {
+            guard surfaceRetryAttempts < Self.maxSurfaceRetries else {
+                Ghostty.logger.warning(
+                    "surface creation failed \(Self.maxSurfaceRetries) times; giving up")
+                return
+            }
+            let attempt = surfaceRetryAttempts
+            surfaceRetryAttempts += 1
+            // 1, 2, 4, 8, 16 seconds: quick enough that a transient spike is
+            // invisible, spaced enough that retrying is not itself the load.
+            let delay = pow(2.0, Double(attempt))
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.retrySurfaceCreation(app: app)
+            }
+        }
+
+        private func retrySurfaceCreation(app: ghostty_app_t) {
+            // Something else may have finished the job, or the view may be on
+            // its way out.
+            guard surfaceModel == nil, let config = pendingSurfaceConfig else { return }
+            let created = config.withCValue(view: self) { cfg in
+                ghostty_surface_new(app, &cfg)
+            }
+            guard let created else {
+                scheduleSurfaceRetry(app: app)
+                return
+            }
+            Ghostty.logger.info(
+                "surface created on retry \(self.surfaceRetryAttempts)")
+            surfaceModel = Ghostty.Surface(cSurface: created)
+            pendingSurfaceConfig = nil
+            surfaceRetryAttempts = 0
+            // Clearing the error is what swaps the "Oh, no" view back for a
+            // terminal; the surface is live from this moment.
+            error = nil
+            updateTrackingAreas()
+            setNeedsDisplay(bounds)
         }
 
         deinit {

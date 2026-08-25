@@ -77,6 +77,44 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     /// had outlived its trm by hours. Matching is deliberately narrow: our own
     /// processes, orphaned (ppid 1), and carrying the exact command shape this
     /// class builds.
+    /// Delete mirror files nothing is streaming into any more.
+    ///
+    /// A mirror replays a remote transcript from the top and follows it, so it
+    /// grows for as long as the session runs and is never shortened. That is
+    /// correct while the session is live. What is not correct is what happens
+    /// afterwards: the file stays, and the directory accumulates one per
+    /// session per host — including hosts addressed by a name that has since
+    /// changed, which can never be reused. It was 183 MB on the machine this
+    /// was found on, a third of it dead.
+    ///
+    /// Run at launch, beside the stream reaping, since that is the moment
+    /// nothing is streaming and every file is safely judged by its age.
+    static func pruneStaleMirrors(olderThan age: TimeInterval = 24 * 60 * 60) {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let dir = caches.appendingPathComponent("trm/remote-overview", isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+
+        let cutoff = Date().addingTimeInterval(-age)
+        var removed = 0
+        var bytes: Int64 = 0
+        for file in files where file.pathExtension == "jsonl" {
+            guard let values = try? file.resourceValues(
+                forKeys: [.contentModificationDateKey, .fileSizeKey]),
+                  let modified = values.contentModificationDate,
+                  modified < cutoff else { continue }
+            bytes += Int64(values.fileSize ?? 0)
+            try? FileManager.default.removeItem(at: file)
+            removed += 1
+        }
+        if removed > 0 {
+            let megabytes = bytes / (1024 * 1024)
+            logger.info(
+                "Pruned \(removed, privacy: .public) stale mirror(s), \(megabytes, privacy: .public) MB")
+        }
+    }
+
     static func reapOrphanedStreams() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
