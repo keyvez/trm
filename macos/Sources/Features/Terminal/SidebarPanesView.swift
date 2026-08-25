@@ -10,13 +10,12 @@ import SwiftUI
 /// zmx session, same agent mid-task — it just isn't taking up a cell, and the
 /// shelf is still how you pull one back.
 ///
-/// Tiles show the pane's last few lines as text, not a live miniature. An
-/// `NSView` has exactly one superview, so rendering a parked surface here would
-/// move it out of its grid cell, and rendering it small would reflow the
-/// terminal to a few columns wide — the pane would change shape because
-/// something was looking at it. Reading the viewport's text costs neither:
-/// the surface already keeps a half-second cache of it for summaries, so the
-/// tile shows what the pane actually says without touching the pane.
+/// Tiles draw the pane as it looks — its whole viewport, its own characters and
+/// colours, very small. Not a live view of the surface, which is impossible: an
+/// `NSView` has exactly one superview, so putting a parked pane's surface here
+/// would take it out of its grid cell, and drawing it small would reflow the
+/// terminal to a few columns wide. Reading the cells and redrawing them costs
+/// neither.
 struct SidebarPanesView: View {
     /// Parked panes, in shelf order.
     let panes: [GridPane]
@@ -52,25 +51,15 @@ struct SidebarPanesView: View {
     /// Collapse the shelf.
     var onCollapse: (() -> Void)? = nil
 
-    /// The last lines a pane printed.
+    /// A pane's viewport, cells and colours.
     ///
-    /// Read straight from the surface's cached viewport text, which the
-    /// surface already refreshes at most twice a second for its own summaries
-    /// — so a shelf of tiles costs one cache hit each rather than a read per
-    /// tile per redraw.
-    ///
-    /// Trailing blank lines go: a terminal's viewport is padded to its full
-    /// height, and showing that means showing mostly nothing.
-    private static func preview(for pane: GridPane, refresh: Int, lines: Int = 6) -> [String] {
+    /// `refresh` exists only to make SwiftUI re-read this: the value is a
+    /// snapshot of live terminal state, which the view system has no way to
+    /// observe on its own.
+    private static func screen(for pane: GridPane, refresh: Int) -> Trm.PaneScreen? {
         _ = refresh
-        guard let surface = pane.firstTerminalSurface else { return [] }
-        let text = surface.cachedVisibleContents.get()
-        guard !text.isEmpty else { return [] }
-        var rows = text.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-        while let last = rows.last, last.isEmpty { rows.removeLast() }
-        guard !rows.isEmpty else { return [] }
-        return Array(rows.suffix(lines))
+        guard let paneId = pane.firstTerminalSurface?.paneId else { return nil }
+        return Trm.shared.paneScreen(paneId: UInt32(paneId))
     }
 
     /// Bumped on a timer so the previews follow the panes they describe.
@@ -89,9 +78,10 @@ struct SidebarPanesView: View {
         .onReceive(NotificationCenter.default.publisher(for: Trm.watermarkDidChange)) { _ in
             watermarkVersion += 1
         }
-        // Twice a second matches the surface's own cache, so this reads
-        // something new each time rather than redrawing the same string.
-        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
+        // Once a second: reading a viewport is cheap, but redrawing a shelf of
+        // full-grid miniatures is not, and a sidebar is glanced at rather than
+        // watched.
+        .onReceive(Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()) { _ in
             previewVersion &+= 1
         }
     }
@@ -183,7 +173,7 @@ struct SidebarPanesView: View {
             needsAttention: needsAttention(pane),
             watermarkVersion: watermarkVersion,
             message: paneId.flatMap { messages[$0] },
-            preview: Self.preview(for: pane, refresh: previewVersion),
+            screen: Self.screen(for: pane, refresh: previewVersion),
             agentName: paneId.flatMap { agentNames[$0] },
             location: paneId.flatMap { locations[$0] },
             onPrimary: { parked ? onRestore?(pane) : onFocus?(pane) },
@@ -227,8 +217,8 @@ private struct SidebarPaneTile: View {
     let watermarkVersion: Int
     /// The agent's latest message, when this pane has an agent.
     let message: String?
-    /// The last lines the terminal actually printed.
-    let preview: [String]
+    /// The pane's viewport, cells and colours, to draw small.
+    let screen: Trm.PaneScreen?
     let agentName: String?
     let location: String?
     let onPrimary: () -> Void
@@ -237,9 +227,11 @@ private struct SidebarPaneTile: View {
     @State private var hovering = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            SidebarWatermark(text: label)
-
+        VStack(alignment: .leading, spacing: 4) {
+            // One line, not a 62pt block of faint monospace. The watermark was
+            // drawn large because the tile had nothing else in it; now that the
+            // tile shows the pane itself, a name that tall is the biggest thing
+            // on a card whose subject is underneath it.
             HStack(spacing: 5) {
                 if needsAttention {
                     Circle()
@@ -248,9 +240,14 @@ private struct SidebarPaneTile: View {
                         .help("Waiting for input")
                 }
 
+                Text(label)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
                 Text(subtitle)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
@@ -270,28 +267,19 @@ private struct SidebarPaneTile: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            // The terminal itself, in miniature: its last lines, monospaced
-            // and truncated rather than reflowed, so the shape of the output
-            // survives at this size. A pane with no agent has nothing else to
-            // show, and this is the only thing that tells one shell from
-            // another.
-            if !preview.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(preview.enumerated()), id: \.offset) { _, line in
-                        Text(line.isEmpty ? " " : line)
-                            .font(.system(size: 7, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                .foregroundStyle(.secondary)
-                .padding(5)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color(nsColor: .textBackgroundColor).opacity(0.5))
-                )
+            // The pane itself, drawn small: the whole viewport, its own
+            // characters and its own colours. A pane with no agent has nothing
+            // else to show, and this is the only thing that tells one shell
+            // from another.
+            if let screen {
+                PaneMiniature(screen: screen)
+                    .padding(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Color(nsColor: .textBackgroundColor).opacity(0.6))
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
             }
 
             // Buttons stay mounted so the tile height doesn't jump on hover.
@@ -304,7 +292,7 @@ private struct SidebarPaneTile: View {
             .font(.system(size: 10))
             .opacity(hovering ? 1 : 0.35)
         }
-        .padding(7)
+        .padding(6)
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color(nsColor: .controlBackgroundColor).opacity(hovering ? 1 : 0.6))
@@ -405,40 +393,6 @@ private struct SidebarPaneTile: View {
 
 // MARK: - Watermark
 
-/// The pane's label, drawn the way the pane itself draws it: large, low
-/// contrast, on the terminal background.
-///
-/// The point size comes from the character count rather than
-/// `minimumScaleFactor`, for the reason spelled out in the session browser:
-/// scaling makes the text size depend on the offered width while the layout
-/// makes the width depend on the text, and SwiftUI re-runs text metrics
-/// searching for a fixed point that a stack of tiles never settles on.
-private struct SidebarWatermark: View {
-    let text: String
-
-    private var fontSize: CGFloat {
-        switch text.count {
-        case 0...4: return 24
-        case 5...7: return 19
-        case 8...11: return 15
-        case 12...16: return 12
-        default: return 10
-        }
-    }
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: fontSize, weight: .bold, design: .monospaced))
-            .foregroundStyle(.primary.opacity(0.22))
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .padding(.horizontal, 8)
-            .frame(maxWidth: .infinity)
-            .frame(height: 62)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-}
 
 // MARK: - Collapsed rail
 

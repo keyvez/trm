@@ -652,6 +652,40 @@ final class Trm {
         return pid_t(termania_pane_child_pid(h, paneId))
     }
 
+    /// A pane's visible cells, with their colours.
+    ///
+    /// The whole viewport, in row-major order, so a caller can draw the pane as
+    /// it actually looks rather than describing it. `termania_pane_cells` has
+    /// existed all along; nothing on the Swift side had asked for it.
+    struct PaneScreen {
+        let rows: Int
+        let cols: Int
+        let cells: [termania_cell_s]
+
+        func cell(row: Int, col: Int) -> termania_cell_s? {
+            let index = row * cols + col
+            guard index >= 0, index < cells.count else { return nil }
+            return cells[index]
+        }
+    }
+
+    func paneScreen(paneId: UInt32) -> PaneScreen? {
+        guard let h = handle else { return nil }
+        var info = termania_pane_info_s()
+        guard termania_pane_info(h, paneId, &info) != 0 else { return nil }
+        let rows = Int(info.rows), cols = Int(info.cols)
+        guard rows > 0, cols > 0 else { return nil }
+
+        let capacity = rows * cols
+        var buffer = [termania_cell_s](repeating: termania_cell_s(), count: capacity)
+        let written = buffer.withUnsafeMutableBufferPointer { raw -> UInt32 in
+            guard let base = raw.baseAddress else { return 0 }
+            return termania_pane_cells(h, paneId, base, UInt32(capacity))
+        }
+        guard written > 0 else { return nil }
+        return PaneScreen(rows: rows, cols: cols, cells: Array(buffer.prefix(Int(written))))
+    }
+
     // MARK: - Text Tap
 
     /// Returns a bitset of panes that have been targeted by Text Tap send commands.
