@@ -68,9 +68,19 @@ struct SidebarPanesView: View {
     /// Bumped when a watermark changes so the tiles re-read their labels.
     @State private var watermarkVersion: Int = 0
 
+    /// Filter text for the shelf.
+    ///
+    /// The sidebar exists so "which pane was doing the migration" is answered
+    /// by reading rather than by clicking through panes. Past a dozen panes
+    /// reading stops being quick, and the answer is to type the word you
+    /// remember — which is why this matches the agent's *message* as well as
+    /// the pane's name: the word you remember is usually something it said.
+    @State private var query: String = ""
+
     var body: some View {
         VStack(spacing: 0) {
             header
+            searchField
             Divider()
             content
         }
@@ -125,7 +135,61 @@ struct SidebarPanesView: View {
 
     private var paneCount: String {
         let total = gridPanes.count + panes.count
-        return "\(total) pane\(total == 1 ? "" : "s")"
+        guard isFiltering else { return "\(total) pane\(total == 1 ? "" : "s")" }
+        // While filtering, the count that matters is how much was hidden —
+        // "2 of 14" says the shelf is not broken, it is answering a question.
+        return "\(matchingGrid.count + matchingParked.count) of \(total)"
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            TextField("Filter panes", text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+            if isFiltering {
+                Button { query = "" } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.tertiary)
+                .help("Clear the filter")
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+        )
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+    }
+
+    private var isFiltering: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var matchingGrid: [GridPane] { gridPanes.filter(matches) }
+    private var matchingParked: [GridPane] { panes.filter(matches) }
+
+    /// Everything a tile shows is searchable, because everything a tile shows
+    /// is something you might remember it by: the name you gave it, the agent
+    /// in it, the directory it works in, and the last thing it said.
+    private func matches(_ pane: GridPane) -> Bool {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return true }
+        guard let paneId = pane.firstTerminalSurface?.paneId else { return false }
+        var haystack = ["pane \(paneId)"]
+        if let watermark = Trm.shared.watermark(forPaneId: UInt32(paneId)) {
+            haystack.append(watermark)
+        }
+        if let agent = agentNames[paneId] { haystack.append(agent) }
+        if let location = locations[paneId] { haystack.append(location) }
+        if let message = messages[paneId] { haystack.append(message) }
+        return haystack.contains { $0.lowercased().contains(needle) }
     }
 
     // MARK: - Content
@@ -134,6 +198,25 @@ struct SidebarPanesView: View {
     private var content: some View {
         if panes.isEmpty && gridPanes.isEmpty {
             emptyState
+        } else if isFiltering && matchingGrid.isEmpty && matchingParked.isEmpty {
+            // Said in words rather than left blank: an empty shelf and a shelf
+            // with nothing matching look identical, and only one of them means
+            // you should clear the box.
+            VStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.tertiary)
+                Text("No pane matches “\(query)”.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("Clear") { query = "" }
+                    .controlSize(.small)
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(12)
         } else {
             ScrollView {
                 // A plain VStack, not a LazyVStack: the shelf holds a handful
@@ -141,21 +224,21 @@ struct SidebarPanesView: View {
                 // estimate the height of tiles it has not built yet — the same
                 // measurement loop that pinned a core in the session browser.
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(gridPanes) { pane in
+                    ForEach(matchingGrid) { pane in
                         tile(for: pane, parked: false)
                     }
 
                     // Parked panes are separated rather than mixed in: "on
                     // screen" and "running out of sight" are different states,
                     // and the actions differ with them.
-                    if !panes.isEmpty {
-                        if !gridPanes.isEmpty {
+                    if !matchingParked.isEmpty {
+                        if !matchingGrid.isEmpty {
                             Text("PARKED")
                                 .font(.system(size: 9, weight: .semibold, design: .rounded))
                                 .foregroundStyle(.tertiary)
                                 .padding(.top, 4)
                         }
-                        ForEach(panes) { pane in
+                        ForEach(matchingParked) { pane in
                             tile(for: pane, parked: true)
                         }
                     }
