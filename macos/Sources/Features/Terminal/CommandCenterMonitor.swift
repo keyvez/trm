@@ -309,7 +309,12 @@ final class CommandCenterMonitor: ObservableObject {
     /// something. A turn in progress has no reply text yet, and a row that
     /// goes blank in that window is a row that looks broken.
     private static func currentMessage(_ transcript: AgentTranscript) -> String {
-        let reply = summarize(transcript.blocks)
+        // The newest message, not the whole turn. A turn's blocks accumulate
+        // now so the overview can grow with it; a board row is one line, and
+        // the useful line is what the agent is saying at this moment rather
+        // than how it opened.
+        let reply = summarize(
+            transcript.latestBlocks.isEmpty ? transcript.blocks : transcript.latestBlocks)
         if !reply.isEmpty { return reply }
         if let question = transcript.questions.first?.text, !question.isEmpty {
             return question

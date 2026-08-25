@@ -81,7 +81,11 @@ struct AgentTranscriptTests {
             assistantLine([["type": "text", "text": "Second answer."]]),
         ]
         let t = AgentTranscriptReader.parse(lines: lines)
-        #expect(t.blocks == [.paragraph("Second answer.")])
+        // `latestBlocks` is where "the newest message" lives now; `blocks`
+        // keeps the whole turn so the overview can grow with it rather than
+        // flickering through fragments.
+        #expect(t.latestBlocks == [.paragraph("Second answer.")])
+        #expect(t.blocks == [.paragraph("First answer."), .paragraph("Second answer.")])
     }
 
     @Test func toolOnlyAssistantMessageKeepsPreviousProse() {
@@ -674,7 +678,12 @@ struct AgentTranscriptTests {
 
         let t = try #require(AgentTranscriptReader.parse(url: url))
         #expect(t.lastUserPrompt == "the original question")
-        #expect(t.blocks == [.paragraph("Final answer.")])
+        // The subject of this test is the prompt, recovered from beyond the
+        // tail window. The newest message is checked as a sanity anchor —
+        // `blocks` now holds the whole turn, which for this fixture is
+        // however many of its 221 filler messages fell inside the window.
+        #expect(t.latestBlocks == [.paragraph("Final answer.")])
+        #expect(t.blocks.last == .paragraph("Final answer."))
     }
 
     @Test func parsingAMissingFileReturnsNil() {
@@ -705,6 +714,60 @@ struct AgentTranscriptTests {
         #expect(AgentTranscript.claudeProjectDirName(
             forCwd: "/Users/g/dev/fasmac/.worktrees/feature/genui-a2ui")
                 == "-Users-g-dev-fasmac--worktrees-feature-genui-a2ui")
+    }
+
+    // MARK: - A turn accumulates what was said
+
+    /// The bug this fixes: several messages in one turn used to replace each
+    /// other, so the overview showed a fragment at a time and only looked
+    /// whole when the turn ended.
+    @Test func aTurnKeepsEveryMessageInOrder() {
+        let lines = [
+            userLine("do the thing"),
+            assistantLine([["type": "text", "text": "Let me look."]]),
+            assistantLine([["type": "text", "text": "Found it."]]),
+            assistantLine([["type": "text", "text": "Done, and here is why."]]),
+        ]
+        let transcript = AgentTranscriptReader.parse(lines: lines)
+        let prose = transcript.blocks.compactMap { block -> String? in
+            if case .paragraph(let text) = block { return text }
+            return nil
+        }
+        #expect(prose == ["Let me look.", "Found it.", "Done, and here is why."])
+    }
+
+    /// A board row wants what is being said now, not how the turn opened, so
+    /// the newest message stays available separately.
+    @Test func theNewestMessageIsKeptOnItsOwn() {
+        let lines = [
+            userLine("do the thing"),
+            assistantLine([["type": "text", "text": "Let me look."]]),
+            assistantLine([["type": "text", "text": "Done."]]),
+        ]
+        let transcript = AgentTranscriptReader.parse(lines: lines)
+        let latest = transcript.latestBlocks.compactMap { block -> String? in
+            if case .paragraph(let text) = block { return text }
+            return nil
+        }
+        #expect(latest == ["Done."])
+    }
+
+    /// An assistant entry that only makes tool calls must not wipe the prose
+    /// written just before it — the reason the old code replaced rather than
+    /// cleared, and a property appending has to keep.
+    @Test func aToolOnlyMessageDoesNotEraseTheProse() {
+        let lines = [
+            userLine("do the thing"),
+            assistantLine([["type": "text", "text": "Let me look."]]),
+            assistantLine([["type": "tool_use", "id": "t1", "name": "Bash",
+                            "input": ["command": "ls"]]]),
+        ]
+        let transcript = AgentTranscriptReader.parse(lines: lines)
+        let prose = transcript.blocks.compactMap { block -> String? in
+            if case .paragraph(let text) = block { return text }
+            return nil
+        }
+        #expect(prose == ["Let me look."])
     }
 
     // MARK: - Worktree insignia

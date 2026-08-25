@@ -479,7 +479,11 @@ enum ZmxSessionManager {
 
     /// One line of what the agent last said, for a browser tile.
     nonisolated static func summarize(_ transcript: AgentTranscript) -> String? {
-        for block in transcript.blocks {
+        // Newest message first, for the same reason the Command Center uses
+        // it: a one-line summary should say what is being said now.
+        let source = transcript.latestBlocks.isEmpty
+            ? transcript.blocks : transcript.latestBlocks
+        for block in source {
             guard case .paragraph(let text) = block else { continue }
             let sentence = CommandCenterMonitor.firstSentence(of: text, limit: 200)
             if !sentence.isEmpty { return sentence }

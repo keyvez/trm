@@ -61,7 +61,19 @@ struct AgentTranscript: Equatable {
     struct Turn: Equatable, Identifiable {
         var prompt: String? = nil
         var promptBlocks: [Block] = []
+        /// Everything the agent has said this turn, oldest first.
+        ///
+        /// Accumulated rather than replaced. An agent writes a turn as several
+        /// messages — "let me look at X", then findings, then a summary — and
+        /// showing only the newest meant each wiped out the one before it, so
+        /// the overview flickered through fragments and only looked whole once
+        /// the turn ended. Appending makes it grow into the same thing it used
+        /// to jump to.
         var blocks: [Block] = []
+        /// Just the newest message, for callers that want what is being said
+        /// *now* rather than everything said so far — a board row has one line
+        /// and the useful line is the current one.
+        var latestBlocks: [Block] = []
         var activity: [ToolActivity] = []
         var questions: [Question] = []
 
@@ -91,6 +103,9 @@ struct AgentTranscript: Equatable {
     nonisolated static func claudeProjectDirName(forCwd cwd: String) -> String {
         String(cwd.map { "/._".contains($0) ? "-" : $0 })
     }
+
+    /// The newest message of the current turn, when there is one.
+    var latestBlocks: [Block] = []
 
     /// True when the agent appears to still be working.
     ///
@@ -856,7 +871,16 @@ enum AgentTranscriptReader {
                         break
                     }
                 }
-                if !blocks.isEmpty { current.blocks = blocks }
+                if !blocks.isEmpty {
+                    // Append: an assistant entry is a distinct message, never a
+                    // restatement of an earlier one — verified across turns of
+                    // five, nine and seventeen messages, none of which repeated
+                    // any part of another. Replacing meant the overview showed
+                    // one fragment at a time and threw the rest of the turn
+                    // away as it went.
+                    current.blocks.append(contentsOf: blocks)
+                    current.latestBlocks = blocks
+                }
 
             default:
                 continue
@@ -867,6 +891,7 @@ enum AgentTranscriptReader {
         result.turns = turns
         if let last = turns.last {
             result.blocks = last.blocks
+            result.latestBlocks = last.latestBlocks
             result.activity = last.activity
             result.lastUserPrompt = last.prompt
             result.promptBlocks = last.promptBlocks
@@ -1266,7 +1291,10 @@ enum CodexTranscriptReader {
                             blocks.append(contentsOf: AgentTranscriptReader.splitProseAndCode(text))
                         }
                     }
-                    if !blocks.isEmpty { current.blocks = blocks }
+                    if !blocks.isEmpty {
+                        current.blocks.append(contentsOf: blocks)
+                        current.latestBlocks = blocks
+                    }
                 }
                 // Developer messages are harness plumbing — ignored.
 
@@ -1301,6 +1329,7 @@ enum CodexTranscriptReader {
         result.turns = turns
         if let last = turns.last {
             result.blocks = last.blocks
+            result.latestBlocks = last.latestBlocks
             result.activity = last.activity
             result.lastUserPrompt = last.prompt
             result.promptBlocks = last.promptBlocks
