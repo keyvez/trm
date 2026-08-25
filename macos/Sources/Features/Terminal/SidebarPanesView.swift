@@ -10,11 +10,13 @@ import SwiftUI
 /// zmx session, same agent mid-task — it just isn't taking up a cell, and the
 /// shelf is still how you pull one back.
 ///
-/// Tiles are watermark cards rather than live miniatures, matching the session
-/// browser. That isn't only for consistency: an `NSView` has exactly one
-/// superview, so rendering a parked surface here would move it out of its grid
-/// cell, and rendering it small would reflow the terminal to a few columns
-/// wide. A card shows what the pane is without touching it.
+/// Tiles show the pane's last few lines as text, not a live miniature. An
+/// `NSView` has exactly one superview, so rendering a parked surface here would
+/// move it out of its grid cell, and rendering it small would reflow the
+/// terminal to a few columns wide — the pane would change shape because
+/// something was looking at it. Reading the viewport's text costs neither:
+/// the surface already keeps a half-second cache of it for summaries, so the
+/// tile shows what the pane actually says without touching the pane.
 struct SidebarPanesView: View {
     /// Parked panes, in shelf order.
     let panes: [GridPane]
@@ -50,6 +52,30 @@ struct SidebarPanesView: View {
     /// Collapse the shelf.
     var onCollapse: (() -> Void)? = nil
 
+    /// The last lines a pane printed.
+    ///
+    /// Read straight from the surface's cached viewport text, which the
+    /// surface already refreshes at most twice a second for its own summaries
+    /// — so a shelf of tiles costs one cache hit each rather than a read per
+    /// tile per redraw.
+    ///
+    /// Trailing blank lines go: a terminal's viewport is padded to its full
+    /// height, and showing that means showing mostly nothing.
+    private static func preview(for pane: GridPane, refresh: Int, lines: Int = 6) -> [String] {
+        _ = refresh
+        guard let surface = pane.firstTerminalSurface else { return [] }
+        let text = surface.cachedVisibleContents.get()
+        guard !text.isEmpty else { return [] }
+        var rows = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        while let last = rows.last, last.isEmpty { rows.removeLast() }
+        guard !rows.isEmpty else { return [] }
+        return Array(rows.suffix(lines))
+    }
+
+    /// Bumped on a timer so the previews follow the panes they describe.
+    @State private var previewVersion: Int = 0
+
     /// Bumped when a watermark changes so the tiles re-read their labels.
     @State private var watermarkVersion: Int = 0
 
@@ -62,6 +88,11 @@ struct SidebarPanesView: View {
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.7))
         .onReceive(NotificationCenter.default.publisher(for: Trm.watermarkDidChange)) { _ in
             watermarkVersion += 1
+        }
+        // Twice a second matches the surface's own cache, so this reads
+        // something new each time rather than redrawing the same string.
+        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
+            previewVersion &+= 1
         }
     }
 
@@ -152,6 +183,7 @@ struct SidebarPanesView: View {
             needsAttention: needsAttention(pane),
             watermarkVersion: watermarkVersion,
             message: paneId.flatMap { messages[$0] },
+            preview: Self.preview(for: pane, refresh: previewVersion),
             agentName: paneId.flatMap { agentNames[$0] },
             location: paneId.flatMap { locations[$0] },
             onPrimary: { parked ? onRestore?(pane) : onFocus?(pane) },
@@ -195,6 +227,8 @@ private struct SidebarPaneTile: View {
     let watermarkVersion: Int
     /// The agent's latest message, when this pane has an agent.
     let message: String?
+    /// The last lines the terminal actually printed.
+    let preview: [String]
     let agentName: String?
     let location: String?
     let onPrimary: () -> Void
@@ -234,6 +268,30 @@ private struct SidebarPaneTile: View {
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            // The terminal itself, in miniature: its last lines, monospaced
+            // and truncated rather than reflowed, so the shape of the output
+            // survives at this size. A pane with no agent has nothing else to
+            // show, and this is the only thing that tells one shell from
+            // another.
+            if !preview.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(preview.enumerated()), id: \.offset) { _, line in
+                        Text(line.isEmpty ? " " : line)
+                            .font(.system(size: 7, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .padding(5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color(nsColor: .textBackgroundColor).opacity(0.5))
+                )
             }
 
             // Buttons stay mounted so the tile height doesn't jump on hover.
