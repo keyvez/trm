@@ -130,7 +130,57 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
         return size.intValue > 0
     }
 
-    init(host: String, remoteSession: String) {
+    /// Live mirrors by host and session, so one remote transcript is streamed
+    /// once no matter how many things are reading it.
+    ///
+    /// A mirror is an SSH connection holding `tail -F` open on the far side.
+    /// One was built per `AgentOverviewPane`, and a single remote session
+    /// routinely has several: the Command Center keeps a headless overview for
+    /// every pane, a visible overview is another, and peeking opens a third.
+    /// Measured on one machine that meant six streams following one file, 52
+    /// SSH connections from a single laptop, and 26 logins a minute — enough
+    /// for sshd to start resetting handshakes, which surfaced as remote panes
+    /// failing to launch with `kex_exchange_identification: Connection reset`.
+    private static var shared: [String: RemoteAgentTranscriptMirror] = [:]
+    private static var refCounts: [String: Int] = [:]
+    private static let sharedLock = NSLock()
+
+    private var shareKey: String { "\(host)|\(remoteSession)" }
+
+    /// Take a reference to the mirror for this session, building one only if
+    /// nothing else is already streaming it.
+    static func acquire(host: String, remoteSession: String) -> RemoteAgentTranscriptMirror {
+        let key = "\(host)|\(remoteSession)"
+        sharedLock.lock()
+        defer { sharedLock.unlock() }
+        if let existing = shared[key] {
+            refCounts[key, default: 0] += 1
+            return existing
+        }
+        let mirror = RemoteAgentTranscriptMirror(host: host, remoteSession: remoteSession)
+        shared[key] = mirror
+        refCounts[key] = 1
+        return mirror
+    }
+
+    /// Give up a reference. The stream is torn down when the last one goes,
+    /// not before — stopping on the first release would kill the feed under
+    /// everything else still reading it.
+    static func release(_ mirror: RemoteAgentTranscriptMirror) {
+        let key = mirror.shareKey
+        sharedLock.lock()
+        let remaining = (refCounts[key] ?? 1) - 1
+        if remaining <= 0 {
+            refCounts.removeValue(forKey: key)
+            shared.removeValue(forKey: key)
+        } else {
+            refCounts[key] = remaining
+        }
+        sharedLock.unlock()
+        if remaining <= 0 { mirror.stop() }
+    }
+
+    private init(host: String, remoteSession: String) {
         self.host = host
         self.remoteSession = remoteSession
 

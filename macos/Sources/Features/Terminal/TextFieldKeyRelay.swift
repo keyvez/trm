@@ -27,7 +27,28 @@ enum TextFieldKeyRelay {
     /// Send `event` to whatever text has focus. Returns true when it was
     /// handled, in which case the caller should swallow the event.
     static func handle(_ event: NSEvent) -> Bool {
-        editingCommand(event) || navigation(event)
+        newline(event) || editingCommand(event) || navigation(event)
+    }
+
+    /// ⇧⏎ and ⌥⏎ put a line break in the message rather than sending it.
+    ///
+    /// A plain Return sends, which is right — the box exists to answer an
+    /// agent and most answers are one line. But some are not, and a box you
+    /// cannot get a second line into forces the paragraph to be written
+    /// somewhere else and pasted. Both modifiers because both are muscle
+    /// memory: ⇧⏎ from chat apps, ⌥⏎ from editors.
+    ///
+    /// Inserted through the field editor rather than appended to the string,
+    /// so the break lands where the cursor is instead of at the end of
+    /// whatever was already typed.
+    private static func newline(_ event: NSEvent) -> Bool {
+        // 36 is Return, 76 the numeric keypad's Enter.
+        guard event.keyCode == 36 || event.keyCode == 76 else { return false }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags == .shift || flags == .option else { return false }
+        guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return false }
+        editor.insertText("\n", replacementRange: editor.selectedRange())
+        return true
     }
 
     /// ⌘C, ⌘V, ⌘X, ⌘A, ⌘Z.

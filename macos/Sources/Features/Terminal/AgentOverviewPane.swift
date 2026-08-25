@@ -371,7 +371,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
 
     deinit {
         timer?.invalidate()
-        remoteMirror?.stop()
+        if let mirror = remoteMirror { RemoteAgentTranscriptMirror.release(mirror) }
     }
 
     func toggleBionic() {
@@ -504,11 +504,14 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     private func refreshRemote(host: String, remoteSession: String) {
         if let mirror = remoteMirror,
            mirror.host != host || mirror.remoteSession != remoteSession {
-            mirror.stop()
+            RemoteAgentTranscriptMirror.release(mirror)
             remoteMirror = nil
         }
         if remoteMirror == nil {
-            remoteMirror = RemoteAgentTranscriptMirror(host: host, remoteSession: remoteSession)
+            // Shared: several overviews routinely describe one remote session,
+            // and each building its own stream is an SSH connection per copy.
+            remoteMirror = RemoteAgentTranscriptMirror.acquire(
+                host: host, remoteSession: remoteSession)
         }
         guard let mirror = remoteMirror else { return }
         mirror.poll()
