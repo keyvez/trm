@@ -2001,28 +2001,45 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
-    /// Take back an overview opened on spec, once the probe says there was no
-    /// agent to show.
+    /// Find out whether a peeked pane has an agent, and open its overview if
+    /// it does.
     ///
-    /// Waits for the probe to settle rather than guessing at a duration: while
-    /// it is still resolving the overview says "Connecting…", which is honest.
-    /// Only an overview peek itself opened is retracted, and only while it is
-    /// still the one peek is holding — dismissing the peek, peeking elsewhere
-    /// or closing it by hand all take it out of scope here.
-    private func retractOverviewIfNoAgentAppears(_ overview: AgentOverviewPane) {
-        Task { [weak self, weak overview] in
-            // Bounded so a host that never answers can't leave this running.
+    /// Nothing is shown while asking. A pane with no agent therefore never
+    /// gets an overview at all, and one with an agent gets it a beat late —
+    /// which is the right way round: a panel that appears slightly late is a
+    /// smaller cost than one that appears when it shouldn't.
+    ///
+    /// The monitor already keeps a headless overview for every pane and drives
+    /// its probe, so this subscribes to that rather than opening something
+    /// visible to make the question get asked.
+    private func confirmAgentThenOpenOverview(
+        for pane: GridPane, surface: Ghostty.SurfaceView
+    ) {
+        guard let paneId = surface.paneId else { return }
+        let peekAtStart = peekedPane
+        CommandCenterMonitor.shared.subscribe()
+        Task { @MainActor [weak self, weak surface] in
+            defer { CommandCenterMonitor.shared.unsubscribe() }
+            // Bounded: a host that never answers must not keep this alive.
             for _ in 0..<20 {
                 try? await Task.sleep(for: .milliseconds(750))
-                guard let self, let overview,
-                      self.overviewOpenedForPeek === overview,
-                      self.agentOverviewPanes.contains(where: { $0 === overview })
+                guard let self, let surface,
+                      // The peek moved on, or was dismissed: no longer ours.
+                      self.peekedPane == peekAtStart, self.peekedPane != nil
                 else { return }
-                if overview.agentTranscriptLocated { return }
-                guard !overview.isResolvingRemoteAgent else { continue }
-                // Settled, and it found nothing.
-                self.closeOverviewOpenedForPeek()
-                return
+                guard let overview = CommandCenterMonitor.shared.overviewPane(forPaneId: paneId)
+                else { continue }
+
+                if overview.agentTranscriptLocated {
+                    guard !self.hasAgentOverview(for: pane) else { return }
+                    self.showAgentOverview(for: pane)
+                    self.overviewOpenedForPeek =
+                        self.agentOverviewPanes.last { $0.surface === surface }
+                    return
+                }
+                // Settled with nothing found: this pane is a shell, and the
+                // answer is no rather than not-yet.
+                if overview.remoteProbeConcluded { return }
             }
         }
     }
@@ -2068,19 +2085,23 @@ class BaseTerminalController: NSWindowController,
            case .terminal(let surface) = pane,
            !isLayoutEditingDisabled,
            !hasAgentOverview(for: pane) {
-            let evidence = agentEvidence(surface)
-            if evidence != .absent {
+            switch agentEvidence(surface) {
+            case .present:
                 showAgentOverview(for: pane)
                 opened = agentOverviewPanes.last { $0.surface === surface }
-                // Opening the overview is what *sends* the probe, so an
-                // unknown pane is answered by acting on it. If the answer
-                // comes back "no agent", take the overview away again — that
-                // is the only way to be right in both directions without
-                // making the person wait for a round trip before the pane they
-                // asked for appears.
-                if evidence == .unknown, let opened {
-                    retractOverviewIfNoAgentAppears(opened)
-                }
+            case .unknown:
+                // Ask, and open only if the answer is yes.
+                //
+                // This used to open on spec and take the overview back if the
+                // probe found nothing. Two things were wrong with that. A pane
+                // that is plainly a shell got an overview it never should have
+                // had, which is jarring on every peek. And the retraction
+                // often never ran: a pane whose probe never starts has no
+                // mirror, "still resolving" is indistinguishable from that,
+                // and the overview stayed for good.
+                confirmAgentThenOpenOverview(for: pane, surface: surface)
+            case .absent:
+                break
             }
         }
         overviewOpenedForPeek = opened

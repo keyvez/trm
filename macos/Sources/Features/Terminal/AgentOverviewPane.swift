@@ -290,6 +290,19 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         return mirror.isAwaitingFirstLocate
     }
 
+    /// Whether the remote probe has actually run and reached an answer.
+    ///
+    /// Distinct from `isResolvingRemoteAgent`, which reports "still asking"
+    /// for a pane that has never asked — a pane with no mirror looks
+    /// indistinguishable from one mid-probe. A caller waiting for a verdict
+    /// needs to tell "no agent" from "no question asked yet", and this is that
+    /// difference.
+    var remoteProbeConcluded: Bool {
+        guard surface?.remoteHost != nil else { return true }
+        guard let mirror = remoteMirror else { return false }
+        return !mirror.isAwaitingFirstLocate
+    }
+
     /// What the remote probe last said, when it has said anything. The board
     /// shows this instead of a hopeful placeholder, so a pane whose agent
     /// can't be found says why.
