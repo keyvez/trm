@@ -290,11 +290,6 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         return mirror.isAwaitingFirstLocate
     }
 
-    /// When a file was last written, or nil if it isn't there.
-    nonisolated static func modified(_ url: URL) -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
-    }
-
     /// Whether the remote probe has actually run and reached an answer.
     ///
     /// Distinct from `isResolvingRemoteAgent`, which reports "still asking"
@@ -466,30 +461,18 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                 session = AgentSessionLocator.located(atRecorded: recorded)
             }
 
-            // The hook is not always installed, and there is no second
-            // authoritative signal to fall back on: Claude Code appends to its
-            // transcript and closes it, so a running agent holds no descriptor
-            // to inspect — measured, not assumed. Zero open transcripts on a
-            // live agent.
+            // There is deliberately no "guess from the directory" fallback
+            // here. It was tried: if the bound file goes quiet while another
+            // in the same project is being written, treat that as a clear.
+            // In a directory with two agents — which is ordinary — an idle
+            // pane rebinds to a busy neighbour's transcript, and the two can
+            // trade files back and forth, resetting the reader on every swap
+            // so the overview never settles at all. Being occasionally stale
+            // is a far smaller fault than being confidently wrong about whose
+            // conversation you are reading.
             //
-            // What is left is the shape of a clear on disk. The old file stops
-            // being written and a new one in the same project starts. Guarded
-            // tightly, because several agents can share one project directory
-            // and the newest file there may well belong to a different pane:
-            // the bound file must have gone properly quiet, the candidate must
-            // be newer than it, and the candidate must be live *now* rather
-            // than merely newer.
-            if !cwdChanged, let bound = session?.url,
-               let boundWritten = Self.modified(bound),
-               Date().timeIntervalSince(boundWritten) > 20,
-               let newest = AgentTranscriptReader.latestJSONL(
-                in: AgentTranscriptReader.projectDir(forCwd: cwd)),
-               newest != bound,
-               let newestWritten = Self.modified(newest),
-               newestWritten > boundWritten,
-               Date().timeIntervalSince(newestWritten) < 10 {
-                session = AgentSessionLocator.located(atRecorded: newest)
-            }
+            // The hook above is the answer, because the agent names its own
+            // transcript instead of anyone inferring it.
 
             if session == nil || !cachedPidAlive || cwdChanged {
                 if let agent = AgentSessionLocator.agentProcess(underShell: shellPid) {
