@@ -201,9 +201,20 @@ final class SessionBrowserModel: ObservableObject {
     private func revealExisting(_ name: String) -> Bool {
         guard let controller = existingController(for: name),
               let window = controller.window else { return false }
-        Self.logger.info("Session browser: \(name) is already attached; revealing its window")
+        Self.logger.info("Session browser: \(name, privacy: .public) is already attached; revealing its window")
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+        // A pane parked in the sidebar is attached but not on screen, so
+        // raising its window alone looks like nothing happened. Bring it back
+        // to the grid, which is what "open this" means for a pane you cannot
+        // see.
+        if let surface = controller.surfaceTree.first(where: {
+            $0.zmxSessionName == name || $0.remoteZmxSession == name
+        }), let parked = controller.sidebarTiles.first(where: {
+            $0.containsSurface(ObjectIdentifier(surface))
+        }) {
+            controller.restorePaneFromSidebar(parked.id)
+        }
         return true
     }
 
@@ -211,15 +222,25 @@ final class SessionBrowserModel: ObservableObject {
     /// names it, then restoring that config. Reattaching by name is what makes
     /// the pane resume the *existing* process instead of spawning a new shell.
     func open(_ session: ZmxSessionManager.SessionInfo) {
-        Self.logger.info("Session browser: open \(session.name) requested")
+        Self.logger.info("Session browser: open \(session.name, privacy: .public) requested")
 
         // Already on screen: focus it rather than attaching a second client.
-        if revealExisting(session.name) { return }
+        //
+        // Gated on what the daemon says rather than on finding a surface that
+        // carries the name. A surface outlives its connection — an exited
+        // pane, or a remote one sitting behind a Reconnect button, still
+        // reports the session it used to hold — so a *detached* session was
+        // being called "already attached", and Open just brought a window
+        // forward while nothing attached at all.
+        //
+        // `attached` comes from the session's own client count, which is the
+        // only thing that actually answers the question.
+        if session.attached, revealExisting(session.name) { return }
 
         guard let ghostty else {
             // Never fail silently: a nil app reference here means the browser
             // was shown without one, and the button would otherwise look dead.
-            Self.logger.error("Session browser: no Ghostty.App; cannot open \(session.name)")
+            Self.logger.error("Session browser: no Ghostty.App; cannot open \(session.name, privacy: .public)")
             presentError(
                 title: "Could Not Open Session",
                 message: "trm is not ready to open a window yet. Try again in a moment."
@@ -419,10 +440,10 @@ final class SessionBrowserModel: ObservableObject {
     /// the point of grouping: the panes were arranged together, so bringing
     /// them back individually would lose that arrangement.
     func openGroup(_ group: Group) {
-        Self.logger.info("Session browser: open window \(group.name) requested")
+        Self.logger.info("Session browser: open window \(group.name, privacy: .public) requested")
 
         guard let ghostty else {
-            Self.logger.error("Session browser: no Ghostty.App; cannot open \(group.name)")
+            Self.logger.error("Session browser: no Ghostty.App; cannot open \(group.name, privacy: .public)")
             presentError(
                 title: "Could Not Open Window",
                 message: "trm is not ready to open a window yet. Try again in a moment."
