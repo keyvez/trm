@@ -2027,10 +2027,19 @@ class BaseTerminalController: NSWindowController,
                       // The peek moved on, or was dismissed: no longer ours.
                       self.peekedPane == peekAtStart, self.peekedPane != nil
                 else { return }
-                guard let overview = CommandCenterMonitor.shared.overviewPane(forPaneId: paneId)
-                else { continue }
+                // The board's own list is the confirmation, because it is
+                // computed the same way for local and remote panes.
+                //
+                // This used to wait on `agentTranscriptLocated`, which is a
+                // remote *mirror* flag: nil mirror, no confirmation, ever. On
+                // a machine that works through remote panes — where every pane
+                // is one, and a single slow probe leaves its mirror unlocated
+                // — that meant peek never opened an overview at all.
+                let onBoard = CommandCenterMonitor.shared.entries
+                    .contains { $0.paneId == paneId }
+                let overview = CommandCenterMonitor.shared.overviewPane(forPaneId: paneId)
 
-                if overview.agentTranscriptLocated {
+                if onBoard || overview?.agentTranscriptLocated == true {
                     guard !self.hasAgentOverview(for: pane) else { return }
                     self.showAgentOverview(for: pane)
                     self.overviewOpenedForPeek =
@@ -2039,7 +2048,7 @@ class BaseTerminalController: NSWindowController,
                 }
                 // Settled with nothing found: this pane is a shell, and the
                 // answer is no rather than not-yet.
-                if overview.remoteProbeConcluded { return }
+                if overview?.remoteProbeConcluded == true { return }
             }
         }
     }
