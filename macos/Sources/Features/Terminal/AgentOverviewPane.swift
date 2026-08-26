@@ -290,6 +290,11 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         return mirror.isAwaitingFirstLocate
     }
 
+    /// When a file was last written, or nil if it isn't there.
+    nonisolated static func modified(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
     /// Whether the remote probe has actually run and reached an answer.
     ///
     /// Distinct from `isResolvingRemoteAgent`, which reports "still asking"
@@ -444,6 +449,48 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             // session when several agents share a working directory.
             var session = cachedSession
             let cachedPidAlive = cachedAgentPid > 0 && kill(cachedAgentPid, 0) == 0
+
+            // `/clear` starts a fresh transcript under the *same* process, so
+            // a live pid is no longer evidence that the binding is current.
+            // Nothing below would notice — same pid, same cwd, a session
+            // already cached — and the overview would keep reading a file the
+            // agent abandoned, showing the conversation from before the clear
+            // for as long as the pane lived.
+            //
+            // The agent reports its own transcript through the SessionStart
+            // hook, and `/clear` fires that hook again. Reading the record is
+            // one small file read per refresh, and it is authoritative.
+            if let zmxSession,
+               let recorded = AgentSessionHook.recordedTranscript(zmxSession: zmxSession),
+               recorded != session?.url {
+                session = AgentSessionLocator.located(atRecorded: recorded)
+            }
+
+            // The hook is not always installed, and there is no second
+            // authoritative signal to fall back on: Claude Code appends to its
+            // transcript and closes it, so a running agent holds no descriptor
+            // to inspect — measured, not assumed. Zero open transcripts on a
+            // live agent.
+            //
+            // What is left is the shape of a clear on disk. The old file stops
+            // being written and a new one in the same project starts. Guarded
+            // tightly, because several agents can share one project directory
+            // and the newest file there may well belong to a different pane:
+            // the bound file must have gone properly quiet, the candidate must
+            // be newer than it, and the candidate must be live *now* rather
+            // than merely newer.
+            if !cwdChanged, let bound = session?.url,
+               let boundWritten = Self.modified(bound),
+               Date().timeIntervalSince(boundWritten) > 20,
+               let newest = AgentTranscriptReader.latestJSONL(
+                in: AgentTranscriptReader.projectDir(forCwd: cwd)),
+               newest != bound,
+               let newestWritten = Self.modified(newest),
+               newestWritten > boundWritten,
+               Date().timeIntervalSince(newestWritten) < 10 {
+                session = AgentSessionLocator.located(atRecorded: newest)
+            }
+
             if session == nil || !cachedPidAlive || cwdChanged {
                 if let agent = AgentSessionLocator.agentProcess(underShell: shellPid) {
                     if let located = AgentSessionLocator.locate(

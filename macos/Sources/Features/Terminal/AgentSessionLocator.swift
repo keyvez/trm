@@ -27,6 +27,15 @@ enum AgentSessionLocator {
     ///    This is what disambiguates two agents sharing one cwd.
     /// 3. Codex only: newest rollout whose `session_meta.cwd` matches.
     /// The final fallback (newest-in-cwd) stays with the caller.
+    /// Wrap a transcript path the agent itself reported.
+    ///
+    /// Used when re-checking a binding that is already in place: the hook
+    /// record is authoritative about *which file*, and the kind follows from
+    /// where that file lives.
+    static func located(atRecorded url: URL) -> Located {
+        Located(kind: isTranscriptPath(url.path, kind: .codex) ? .codex : .claude, url: url)
+    }
+
     static func locate(
         shellPid: pid_t,
         paneCwd: String?,
