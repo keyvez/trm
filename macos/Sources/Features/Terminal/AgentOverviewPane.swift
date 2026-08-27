@@ -256,6 +256,21 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// file costs one stat instead of a re-parse.
     private var lastMtime: Date?
 
+    /// True while a parse task is running, so the 1.5 s poll starts at most
+    /// one at a time.
+    ///
+    /// Transcripts and their remote mirrors run to tens of megabytes, and a
+    /// parse routinely outlasts the poll interval. Without this every tick
+    /// launched another parse of the same bytes and whichever finished last
+    /// won — so a parse of a mirror as it was moments after `tail -n +1`
+    /// created it could land *after* a good one and blank the overview. That
+    /// state then survived forever: the mirror stops changing when the
+    /// session goes idle, and an unchanged mtime is exactly the case the
+    /// early return below skips. Nine remote overviews re-parsing 15–27 MB
+    /// files every 1.5 s was also, on its own, a great deal of work to do to
+    /// arrive at the answer already on screen.
+    private var parseInFlight = false
+
     /// The transcript path resolved on the previous poll. Cached so a pane
     /// whose cwd hasn't changed skips directory enumeration.
     private var lastURL: URL?
@@ -438,6 +453,8 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             shellPid = Trm.shared.paneChildPid(paneId: UInt32(paneId))
         }
 
+        guard !parseInFlight else { return }
+        parseInFlight = true
         Task.detached(priority: .utility) {
             // Prefer the session bound to the agent process actually running
             // in this pane — the newest-file-in-cwd fallback shows the wrong
@@ -498,6 +515,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             guard let url else {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
+                    self.parseInFlight = false
                     self.lastCwd = cwd
                     self.lastURL = nil
                     self.locatedSession = nil
@@ -512,9 +530,14 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             // Unchanged transcript — nothing to re-parse.
             if let mtime, let knownMtime, mtime == knownMtime, url == knownURL {
                 await MainActor.run { [weak self] in
-                    self?.lastCwd = cwd
-                    self?.lastURL = url
-                    self?.locatedSession = session
+                    guard let self else { return }
+                    self.parseInFlight = false
+                    self.lastCwd = cwd
+                    self.lastURL = url
+                    self.locatedSession = session
+                    // See the remote path: a status set before the file had
+                    // content outlives its reason once the mtime settles.
+                    if !self.transcript.isEmpty { self.statusMessage = nil }
                 }
                 return
             }
@@ -525,6 +548,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                self.parseInFlight = false
                 self.lastCwd = cwd
                 self.lastURL = url
                 self.lastMtime = mtime
@@ -535,7 +559,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                     // history browsing by turn id (see didSet).
                     self.transcript = parsed
                     self.statusMessage = nil
-                } else {
+                } else if self.transcript.isEmpty {
                     self.statusMessage = "No messages in this session yet."
                 }
             }
@@ -566,10 +590,24 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
 
         let url = mirror.mirrorURL
         let knownMtime = lastMtime
-        Task.detached(priority: .utility) {
+        guard !parseInFlight else { return }
+        parseInFlight = true
+        Task.detached(priority: .utility) { [weak self] in
             let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
             // Unchanged mirror — nothing to re-parse.
-            if let mtime, let knownMtime, mtime == knownMtime { return }
+            if let mtime, let knownMtime, mtime == knownMtime {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.parseInFlight = false
+                    // A "still streaming" message set before the mirror had
+                    // content would otherwise never be revisited, because an
+                    // idle session stops changing the mirror's mtime and this
+                    // return is then the only path taken. Retire it as soon as
+                    // there is something on screen for it to be wrong about.
+                    if !self.transcript.isEmpty { self.statusMessage = nil }
+                }
+                return
+            }
 
             let parsed = kind == .codex
                 ? CodexTranscriptReader.parse(url: url)
@@ -577,12 +615,17 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                self.parseInFlight = false
                 self.lastMtime = mtime
                 self.agentKind = kind
                 if let parsed, !parsed.isEmpty {
                     self.transcript = parsed
                     self.statusMessage = nil
-                } else {
+                } else if self.transcript.isEmpty {
+                    // Only while there is genuinely nothing to show. An empty
+                    // parse must not put a status over a transcript that has
+                    // already arrived — the mirror is replayed from the top,
+                    // so "empty" is routinely just "not filled in yet".
                     self.statusMessage = "Streaming the session from \(host)…"
                 }
             }
