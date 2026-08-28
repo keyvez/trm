@@ -32,14 +32,23 @@ enum AgentSessionLocator {
     /// Used when re-checking a binding that is already in place: the hook
     /// record is authoritative about *which file*, and the kind follows from
     /// where that file lives.
-    static func located(atRecorded url: URL) -> Located {
-        Located(kind: isTranscriptPath(url.path, kind: .codex) ? .codex : .claude, url: url)
+    static func located(atRecorded url: URL) -> Located? {
+        if isTranscriptPath(url.path, kind: .codex) {
+            return Located(kind: .codex, url: url)
+        }
+        if isTranscriptPath(url.path, kind: .claude) {
+            return Located(kind: .claude, url: url)
+        }
+        // An unknown JSONL path is not implicitly Claude. That default made a
+        // stale or malformed record relabel a known Codex pane and feed the
+        // file to the wrong parser.
+        return nil
     }
 
     static func locate(
         shellPid: pid_t,
         paneCwd: String?,
-        zmxSession: String? = nil
+        recordKey: String? = nil
     ) -> Located? {
         guard shellPid > 0 else { return nil }
         guard let agent = agentProcess(underShell: shellPid) else { return nil }
@@ -48,14 +57,16 @@ enum AgentSessionLocator {
         // the transcript path the agent itself reported. Everything below is a
         // correlation of timestamps that cannot separate several agents
         // sharing a project directory.
-        if let zmxSession {
+        if let recordKey {
             let started = processStartDate(pid: agent.pid)
             if let url = AgentSessionHook.recordedTranscript(
-                zmxSession: zmxSession,
+                recordKey: recordKey,
                 recordedAfter: started?.addingTimeInterval(-30)
-            ) {
-                let kind = isTranscriptPath(url.path, kind: .codex) ? AgentKind.codex : .claude
-                return Located(kind: kind, url: url)
+            ), let located = located(atRecorded: url), located.kind == agent.kind {
+                // The record can outlive the process that wrote it. Requiring
+                // its path kind to agree with the process prevents an old
+                // Claude record from taking over a Codex pane (and vice versa).
+                return located
             }
         }
 
@@ -72,7 +83,15 @@ enum AgentSessionLocator {
                 candidates = codexRollouts(matchingCwd: cwd)
             }
             if let url = transcriptBorn(after: started, among: candidates) {
-                return Located(kind: agent.kind, url: url)
+                // Claude keeps one process alive across `/clear`, but starts a
+                // new JSONL each time. Its bridgeSessionId is stable across
+                // those files and distinct between neighbouring panes, so it
+                // upgrades the birth-time match to the current chat without
+                // falling into newest-file-in-cwd ambiguity.
+                let current = agent.kind == .claude
+                    ? latestClaudeTranscript(inBridgeOf: url, among: candidates)
+                    : nil
+                return Located(kind: agent.kind, url: current ?? url)
             }
         }
 
@@ -121,6 +140,73 @@ enum AgentSessionLocator {
         let modified: Date
     }
 
+    /// Claude's stable identity for one running CLI process. `/clear` changes
+    /// `sessionId` and the JSONL path, while `bridgeSessionId` survives and its
+    /// sequence advances. This is the exact local fallback when a process was
+    /// already running before the SessionStart hook was installed.
+    struct ClaudeBridgeIdentity: Equatable {
+        let id: String
+        let sequence: Int
+    }
+
+    /// Bridge metadata is repeated near the live tail, so a bounded scan keeps
+    /// this cheap even for transcripts containing tens of megabytes of media.
+    private static let claudeBridgeScanBytes: UInt64 = 256 * 1024
+
+    static func claudeBridgeIdentity(of url: URL) -> ClaudeBridgeIdentity? {
+        guard let lines = AgentTranscriptReader.readTailLines(
+            url: url, bytes: claudeBridgeScanBytes) else { return nil }
+
+        var best: ClaudeBridgeIdentity?
+        for line in lines where line.contains("\"bridgeSessionId\"") {
+            guard let data = line.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["type"] as? String == "bridge-session",
+                  let id = object["bridgeSessionId"] as? String,
+                  !id.isEmpty else { continue }
+            let sequence = (object["lastSequenceNum"] as? NSNumber)?.intValue ?? 0
+            let identity = ClaudeBridgeIdentity(id: id, sequence: sequence)
+            if best == nil || sequence > best!.sequence { best = identity }
+        }
+        return best
+    }
+
+    /// Follow a Claude process through one or more `/clear` files. Candidates
+    /// from another pane cannot win because their bridge id differs, even when
+    /// both panes share a project directory and are active simultaneously.
+    static func latestClaudeTranscript(
+        inBridgeOf current: URL,
+        among candidates: [URL]
+    ) -> URL? {
+        guard let currentIdentity = claudeBridgeIdentity(of: current),
+              let currentValues = try? current.resourceValues(forKeys: [.creationDateKey]),
+              let currentBorn = currentValues.creationDate else { return nil }
+
+        var bestURL = current
+        var bestIdentity = currentIdentity
+        var bestBorn = currentBorn
+        for url in candidates where url != current {
+            guard let values = try? url.resourceValues(forKeys: [.creationDateKey]),
+                  let born = values.creationDate,
+                  born >= currentBorn,
+                  let identity = claudeBridgeIdentity(of: url),
+                  identity.id == currentIdentity.id else { continue }
+            if identity.sequence > bestIdentity.sequence
+                || (identity.sequence == bestIdentity.sequence && born > bestBorn) {
+                bestURL = url
+                bestIdentity = identity
+                bestBorn = born
+            }
+        }
+        return bestURL
+    }
+
+    static func latestClaudeTranscript(inBridgeOf current: URL) -> URL? {
+        latestClaudeTranscript(
+            inBridgeOf: current,
+            among: jsonlFiles(in: current.deletingLastPathComponent()))
+    }
+
     /// A file written for only a moment and silent ever since is an abandoned
     /// stub — an agent that was started and quit, or a session that never got
     /// a first message. Observed in the wild: a 32 KB transcript with ten
@@ -146,8 +232,10 @@ enum AgentSessionLocator {
     /// 3. Not an abandoned stub, unless nothing else qualifies — a short
     ///    session the user really did leave idle is still the right answer
     ///    when it is the only candidate.
-    /// 4. Of what remains, the earliest born: the one this process made, not
-    ///    one a later agent made in the same directory.
+    /// 4. Prefer files born at/after this process. The slack window exists for
+    ///    timestamp granularity, not to let a pane opened seconds earlier win.
+    /// 5. Of post-start files, the earliest born is this process's best match;
+    ///    if clock slack is required, use the closest pre-start file instead.
     static func selectTranscript(
         startedAt: Date,
         slack: TimeInterval,
@@ -157,8 +245,21 @@ enum AgentSessionLocator {
         let live = candidates.filter {
             $0.born >= startedAt.addingTimeInterval(-slack) && $0.modified >= startedAt
         }
-        let active = live.filter { !isAbandonedStub($0, now: now) }
-        let pool = active.isEmpty ? live : active
+
+        // Two panes are often opened within the 30-second clock-fuzz window.
+        // For the later process, the earlier pane's transcript is then inside
+        // the slack and used to win simply because it was born first. Prefer
+        // files born at/after this process; only reach into the slack window
+        // when there is no such candidate at all.
+        let afterStart = live.filter { $0.born >= startedAt }
+        let timePool = afterStart.isEmpty ? live : afterStart
+        let active = timePool.filter { !isAbandonedStub($0, now: now) }
+        let pool = active.isEmpty ? timePool : active
+        if afterStart.isEmpty {
+            // All candidates precede the process due to timestamp granularity
+            // or genuine clock fuzz. The closest one is the plausible match.
+            return pool.max { $0.born < $1.born }
+        }
         return pool.min { $0.born < $1.born }
     }
 

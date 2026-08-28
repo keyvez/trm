@@ -856,7 +856,7 @@ final class CommandCenterServer: ObservableObject {
                 "id": "pane:\(entry.paneId)",
                 "pane": entry.paneId,
                 "watermark": entry.watermark,
-                "agent": entry.kind.displayName,
+                "agent": entry.kind?.displayName ?? "Agent",
                 "message": entry.message,
                 "working": entry.isWorking,
                 "needsAttention": entry.needsAttention,

@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-/// Installs and manages the Claude Code `SessionStart` hook that tells trm
+/// Installs and manages Claude Code and Codex `SessionStart` hooks that tell trm
 /// which transcript belongs to which pane.
 ///
 /// Without it, binding a pane to its agent transcript is a correlation of
@@ -12,7 +12,7 @@ import os
 /// one project directory, where the debris of old sessions is indistinguishable
 /// from the live one.
 ///
-/// The hook removes the guess. Claude Code runs it whenever a session starts,
+/// The hook removes the guess. Both agents run it whenever a session starts,
 /// resumes, or is cleared, handing it JSON containing `transcript_path` on
 /// stdin. The script writes that path to `~/.trm/agent-sessions/<key>`, keyed
 /// by the pane's **zmx session name** (`$ZMX_SESSION`, injected by zmx into
@@ -51,10 +51,10 @@ enum AgentSessionHook {
     /// at the old conversation. The hook rewrites the record at every session
     /// start, so a record older than the agent process cannot describe it.
     static func recordedTranscript(
-        zmxSession: String,
+        recordKey: String,
         recordedAfter: Date? = nil
     ) -> URL? {
-        let path = NSHomeDirectory() + "/.trm/agent-sessions/" + zmxSession
+        let path = NSHomeDirectory() + "/.trm/agent-sessions/" + recordKey
         guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
         let transcript = contents.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !transcript.isEmpty, FileManager.default.fileExists(atPath: transcript) else {
@@ -96,7 +96,11 @@ enum AgentSessionHook {
     path="$(printf '%s' "$payload" | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')"
     [ -n "$path" ] || exit 0
 
-    printf '%s\\n' "$path" > "$dir/$key" 2>/dev/null || exit 0
+    # Publish atomically: overviews poll this file, and must never observe the
+    # empty interval between truncating an old binding and writing the new one.
+    tmp="$dir/.$key.$$"
+    printf '%s\\n' "$path" > "$tmp" 2>/dev/null || exit 0
+    mv "$tmp" "$dir/$key" 2>/dev/null || { rm -f "$tmp"; exit 0; }
 
     # Records outlive their sessions; drop ones nothing points at any more.
     for f in "$dir"/*; do
@@ -109,44 +113,73 @@ enum AgentSessionHook {
 
     // MARK: - Local install
 
-    /// Whether the hook is installed for this machine's Claude Code.
-    static func isInstalled() -> Bool {
-        guard let settings = readSettings(atPath: localSettingsPath) else { return false }
-        return settingsContainHook(settings)
+    /// The two user configuration files that can register the shared script.
+    /// Exposed for tests so adding a supported agent cannot silently leave the
+    /// installer pointed at only the original one again.
+    static func configurationPaths(home: String) -> [String] {
+        [home + "/.claude/settings.json", home + "/.codex/hooks.json"]
     }
 
-    /// Write the script and register it in `~/.claude/settings.json`.
+    /// Whether the hook is installed for both supported agents on this machine.
+    static func isInstalled() -> Bool {
+        configurationPaths(home: NSHomeDirectory()).allSatisfy { path in
+            readSettings(atPath: path).map(settingsContainHook) == true
+        }
+    }
+
+    /// Write the script and register it in Claude's settings and Codex's
+    /// hooks file. Both use the same JSON lifecycle-hook shape.
     /// Returns nil on success, or a message describing what stopped it.
     @discardableResult
     static func install() -> String? {
         let home = NSHomeDirectory()
         if let error = writeScript(toDirectory: home + "/.trm/bin") { return error }
 
-        var settings = readSettings(atPath: localSettingsPath) ?? [:]
-        guard !settingsContainHook(settings) else { return nil }
-        settings = settingsAddingHook(settings)
-
-        do {
-            let data = try JSONSerialization.data(
-                withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
-            let url = URL(fileURLWithPath: localSettingsPath)
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            // Keep a copy of whatever was there: this is the user's own config.
-            if FileManager.default.fileExists(atPath: localSettingsPath) {
-                let backup = localSettingsPath + ".trm-backup"
-                try? FileManager.default.removeItem(atPath: backup)
-                try? FileManager.default.copyItem(atPath: localSettingsPath, toPath: backup)
+        var failures: [String] = []
+        for path in configurationPaths(home: home) {
+            if let error = installConfiguration(atPath: path, home: home) {
+                failures.append(error)
             }
-            try data.write(to: url, options: .atomic)
-        } catch {
-            return "Could not write ~/.claude/settings.json: \(error.localizedDescription)"
         }
-        logger.info("Installed the agent session hook locally")
+        guard failures.isEmpty else { return failures.joined(separator: "\n") }
+        logger.info("Installed the agent session hooks locally")
         return nil
     }
 
-    private static var localSettingsPath: String { NSHomeDirectory() + "/.claude/settings.json" }
+    private static func installConfiguration(atPath path: String, home: String) -> String? {
+        let fm = FileManager.default
+        let exists = fm.fileExists(atPath: path)
+        let displayPath = path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+        let settings: [String: Any]
+        if exists {
+            guard let parsed = readSettings(atPath: path) else {
+                return "Could not parse \(displayPath); it was left unchanged."
+            }
+            settings = parsed
+        } else {
+            settings = [:]
+        }
+        guard !settingsContainHook(settings) else { return nil }
+
+        do {
+            let updated = settingsAddingHook(settings)
+            let data = try JSONSerialization.data(
+                withJSONObject: updated, options: [.prettyPrinted, .sortedKeys])
+            let url = URL(fileURLWithPath: path)
+            try fm.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // Keep a copy of whatever was there: this is the user's own config.
+            if exists {
+                let backup = path + ".trm-backup"
+                try? fm.removeItem(atPath: backup)
+                try fm.copyItem(atPath: path, toPath: backup)
+            }
+            try data.write(to: url, options: .atomic)
+        } catch {
+            return "Could not write \(displayPath): \(error.localizedDescription)"
+        }
+        return nil
+    }
 
     private static func writeScript(toDirectory dir: String) -> String? {
         do {
@@ -177,22 +210,52 @@ enum AgentSessionHook {
             return "Could not write the hook script on \(host): \(error)"
         }
 
-        let read = runSSH(host: host, command: "cat $HOME/.claude/settings.json 2>/dev/null")
-        var settings = parseSettings(read.output ?? "") ?? [:]
-        if settingsContainHook(settings) { return nil }
-        settings = settingsAddingHook(settings)
+        var failures: [String] = []
+        for relativePath in [".claude/settings.json", ".codex/hooks.json"] {
+            if let error = installRemoteConfiguration(host: host, relativePath: relativePath) {
+                failures.append(error)
+            }
+        }
+        return failures.isEmpty ? nil : failures.joined(separator: "\n")
+    }
 
+    private static func installRemoteConfiguration(
+        host: String, relativePath: String
+    ) -> String? {
+        let path = "$HOME/\(relativePath)"
+        let directory = "$HOME/" + (relativePath as NSString).deletingLastPathComponent
+        let read = runSSH(
+            host: host,
+            command: "if [ -f \"\(path)\" ]; then cat \"\(path)\"; fi")
+        if let error = read.error {
+            return "Could not read ~/\(relativePath) on \(host): \(error)"
+        }
+        let existing = read.output ?? ""
+        let settings: [String: Any]
+        if existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            settings = [:]
+        } else if let parsed = parseSettings(existing) {
+            settings = parsed
+        } else {
+            return "Could not parse ~/\(relativePath) on \(host); it was left unchanged."
+        }
+        guard !settingsContainHook(settings) else { return nil }
+
+        let updated = settingsAddingHook(settings)
         guard let data = try? JSONSerialization.data(
-            withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]),
+            withJSONObject: updated, options: [.prettyPrinted, .sortedKeys]),
               let json = String(data: data, encoding: .utf8) else {
-            return "Could not build settings JSON for \(host)."
+            return "Could not build ~/\(relativePath) for \(host)."
         }
 
-        let install = "mkdir -p $HOME/.claude && "
-            + "cp $HOME/.claude/settings.json $HOME/.claude/settings.json.trm-backup 2>/dev/null; "
-            + "cat > $HOME/.claude/settings.json"
+        // Write through a sibling temporary file so an interrupted SSH call
+        // cannot truncate the user's hook configuration.
+        let install = "mkdir -p \"\(directory)\" && { "
+            + "if [ -f \"\(path)\" ]; then "
+            + "cp \"\(path)\" \"\(path).trm-backup\" || exit 1; fi; "
+            + "cat > \"\(path).trm-tmp\" && mv \"\(path).trm-tmp\" \"\(path)\"; }"
         if let error = runSSH(host: host, command: install, stdin: json).error {
-            return "Could not write settings.json on \(host): \(error)"
+            return "Could not write ~/\(relativePath) on \(host): \(error)"
         }
         return nil
     }
@@ -203,6 +266,7 @@ enum AgentSessionHook {
             host: host,
             command: "test -x $HOME/.trm/bin/\(scriptName) "
                 + "&& grep -q \(scriptName) $HOME/.claude/settings.json 2>/dev/null "
+                + "&& grep -q \(scriptName) $HOME/.codex/hooks.json 2>/dev/null "
                 + "&& echo yes")
         return (result.output ?? "").contains("yes")
     }

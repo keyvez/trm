@@ -1512,6 +1512,15 @@ class BaseTerminalController: NSWindowController,
     func swapPane(_ source: GridPane, with target: GridPane) {
         guard !isLayoutEditingDisabled else { return }
         guard source.id != target.id else { return }
+        // An overview dropped on another terminal visually becomes that
+        // terminal's companion. Keep its data binding in step with the move;
+        // previously only the cell moved, so it continued rendering the old
+        // agent while sitting beside the new one.
+        if case .agentOverview(let overview) = source,
+           let surface = soleTerminalSurface(in: target),
+           !rebindOverview(overview, to: surface, reposition: false) {
+            return
+        }
         ensurePaneDisplayOrder()
         let panes = gridPanes
         guard let srcIdx = panes.firstIndex(where: { $0.id == source.id }),
@@ -1542,6 +1551,16 @@ class BaseTerminalController: NSWindowController,
         let sourceID = source.id
         let targetID = target.id
         guard sourceID != targetID else { return }
+
+        // Stacking an overview with a terminal is an unambiguous statement of
+        // which agent it should follow. Rebind before changing the layout so
+        // a duplicate overview can reject the drop without leaving half of
+        // the operation applied.
+        if case .agentOverview(let overview) = source,
+           let surface = soleTerminalSurface(in: target),
+           !rebindOverview(overview, to: surface, reposition: false) {
+            return
+        }
 
         // Dropping a pane onto the stack it is already in is a *reorder*, not
         // a no-op: it's how you move a sub-pane to the top or bottom of its
@@ -1625,6 +1644,51 @@ class BaseTerminalController: NSWindowController,
     }
 
     // MARK: - Agent Overview Pane
+
+    /// The one terminal represented by a drop target. A stack with several
+    /// terminals is deliberately ambiguous and therefore does not trigger a
+    /// silent overview rebind.
+    private func soleTerminalSurface(in pane: GridPane) -> Ghostty.SurfaceView? {
+        switch pane {
+        case .terminal(let surface):
+            return surface
+        case .stack(let children):
+            let terminals = children.compactMap { child -> Ghostty.SurfaceView? in
+                if case .terminal(let surface) = child { return surface }
+                return nil
+            }
+            return terminals.count == 1 ? terminals[0] : nil
+        default:
+            return nil
+        }
+    }
+
+    /// Change which terminal an overview follows, enforcing the one-overview
+    /// per terminal invariant. Returns false when the target already has one.
+    @discardableResult
+    private func rebindOverview(
+        _ overview: AgentOverviewPane,
+        to surface: Ghostty.SurfaceView,
+        reposition: Bool
+    ) -> Bool {
+        guard overview.surface !== surface else { return true }
+        guard !agentOverviewPanes.contains(where: {
+            $0 !== overview && $0.surface === surface
+        }) else {
+            NSSound.beep()
+            return false
+        }
+
+        overview.rebind(to: surface)
+        if reposition { applyOverviewPlacement(overview) }
+        return true
+    }
+
+    /// Context-menu entry point for an explicit, inspectable binding change.
+    func rebindAgentOverview(_ overview: AgentOverviewPane, to surface: Ghostty.SurfaceView) {
+        guard !isLayoutEditingDisabled else { return }
+        _ = rebindOverview(overview, to: surface, reposition: true)
+    }
 
     /// Whether the given pane already has an agent overview open.
     func hasAgentOverview(for pane: GridPane) -> Bool {
@@ -5457,7 +5521,7 @@ class BaseTerminalController: NSWindowController,
         // surface, and the overview is closed as orphaned once the old
         // surface finally deallocates.
         for overview in agentOverviewPanes where overview.surface === surfaceView {
-            overview.surface = newView
+            overview.rebind(to: newView)
         }
         return newView
     }
@@ -5702,12 +5766,12 @@ class BaseTerminalController: NSWindowController,
         ExtensionBuilder.shared.createInteractively(description: description)
     }
 
-    /// Install the Claude Code SessionStart hook that records which
+    /// Install the Claude Code and Codex SessionStart hooks that record which
     /// transcript each pane's agent is writing — here and on the machines this
     /// window's remote panes run on.
     ///
-    /// Confirmed rather than silent: it edits `~/.claude/settings.json`, which
-    /// is the user's own config, on machines they may not be looking at.
+    /// Confirmed rather than silent: it edits the agents' user configuration,
+    /// on machines they may not be looking at.
     private func installAgentSessionHook() {
         var hosts: [String] = []
         var seen: Set<String> = []
@@ -5725,9 +5789,10 @@ class BaseTerminalController: NSWindowController,
             + "wrong when several agents share a project directory. This hook lets "
             + "the agent report it directly.\n\nWrites ~/.trm/bin/"
             + "\(AgentSessionHook.scriptName) and adds a SessionStart entry to "
-            + "~/.claude/settings.json (backed up first) on:\n\n• this Mac"
+            + "~/.claude/settings.json and ~/.codex/hooks.json (backed up first) on:\n\n• this Mac"
         for host in hosts { detail += "\n• \(host)" }
-        detail += "\n\nExisting agents pick it up when they next start or resume."
+        detail += "\n\nExisting agents pick it up when they next start or resume. "
+            + "Codex may ask you to trust the new lifecycle hook."
         alert.informativeText = detail
         alert.addButton(withTitle: "Install")
         alert.addButton(withTitle: "Cancel")

@@ -228,7 +228,7 @@ struct CommandCenterView: View {
                 .buttonStyle(.plain)
                 .help("Go to this pane")
 
-                Text(entry.kind.displayName)
+                Text(entry.kind?.displayName ?? "Agent")
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 5)
@@ -357,7 +357,7 @@ struct CommandCenterView: View {
                         .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                         .tracking(0.8)
                         .foregroundStyle(status.color.opacity(0.9))
-                    Text(entry.kind.displayName)
+                    Text(entry.kind?.displayName ?? "Agent")
                         .font(.system(size: 9.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(.tertiary)
                     if let location = entry.location {

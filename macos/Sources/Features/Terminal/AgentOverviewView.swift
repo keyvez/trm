@@ -277,7 +277,7 @@ struct AgentOverviewView: View {
             HStack(spacing: 6) {
                 Image(systemName: "questionmark.bubble.fill")
                     .foregroundStyle(Color.accentColor)
-                Text("\(pane.agentKind.displayName) is waiting for your answer")
+                Text("\(pane.agentDisplayName) is waiting for your answer")
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(.primary)
                 Spacer(minLength: 0)
@@ -597,7 +597,7 @@ struct AgentOverviewView: View {
 
                 OverviewSpeakButton(
                     speaker: pane.speaker,
-                    text: OverviewSpeaker.spokenText(blocks: pane.displayedTranscript.blocks)
+                    text: OverviewSpeaker.developerBriefing(for: pane.displayedTranscript)
                 )
 
                 Button(action: { pane.toggleBionic() }) {
@@ -824,7 +824,7 @@ struct AgentOverviewView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             if includeSectionLabel {
-                copyableSectionLabel("\(pane.agentKind.displayName) asked") {
+                copyableSectionLabel("\(pane.agentDisplayName) asked") {
                     questions.map { question in
                         var lines = [question.text]
                         lines.append(contentsOf: question.options.map { option in
@@ -894,7 +894,7 @@ struct AgentOverviewView: View {
 
     private func messageSection(_ blocks: [AgentTranscript.Block]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            copyableSectionLabel("\(pane.agentKind.displayName) said") {
+            copyableSectionLabel("\(pane.agentDisplayName) said") {
                 pane.displayedTranscript.blocks.map { block in
                     switch block {
                     case .paragraph(let text): return text
@@ -1878,13 +1878,21 @@ private struct OverviewSpeakButton: View {
 
     var body: some View {
         Button(action: { speaker.toggle(text) }) {
-            Image(systemName: speaker.isSpeaking ? "stop.fill" : "speaker.wave.2")
+            Image(systemName: speaker.isActive ? "stop.fill" : "speaker.wave.2")
                 .font(.system(size: 10))
-                .foregroundStyle(speaker.isSpeaking ? Color.accentColor : Color.secondary)
+                .foregroundStyle(speaker.isActive ? Color.accentColor : Color.secondary)
                 .frame(width: 16, height: 16)
         }
         .buttonStyle(.plain)
-        .disabled(text.isEmpty && !speaker.isSpeaking)
-        .help(speaker.isSpeaking ? "Stop speaking" : "Speak the reply aloud")
+        .disabled(text.isEmpty && !speaker.isActive)
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        if speaker.isActive { return "Stop speaking" }
+        if let error = speaker.lastError { return error }
+        return text.isEmpty
+            ? "No important developer update to speak"
+            : "Speak the important developer update"
     }
 }

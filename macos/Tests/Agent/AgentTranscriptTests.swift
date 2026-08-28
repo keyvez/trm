@@ -1014,6 +1014,21 @@ struct CodexTranscriptTests {
         #expect(t.lastUserPrompt == "real ask")
     }
 
+    @Test func agentsInstructionsAreNotCountedAsAHumanTurn() {
+        // Codex emits the resolved AGENTS.md as a user-role message on every
+        // fresh chat, including the one `/clear` creates. It is harness
+        // context, not a turn the person can navigate back to.
+        let t = CodexTranscriptReader.parse(lines: [
+            userLine("# AGENTS.md instructions for /workspace\n\n<INSTRUCTIONS>\nbe nice\n</INSTRUCTIONS>"),
+            userLine("<environment_context>\n<cwd>/workspace</cwd>\n</environment_context>"),
+            userLine("the actual request"),
+            assistantLine("On it."),
+        ])
+        #expect(t.turns.count == 1)
+        #expect(t.lastUserPrompt == "the actual request")
+        #expect(t.blocks == [.paragraph("On it.")])
+    }
+
     @Test func developerMessagesAreIgnored() {
         let t = CodexTranscriptReader.parse(lines: [
             userLine("go"),
@@ -1100,6 +1115,30 @@ struct CodexTranscriptTests {
         let t = CodexTranscriptReader.parse(lines: [userLine("go"), tc, assistantLine("ok")])
         #expect(t.contextUsedPercent == 50)
     }
+
+    @Test func recoversCodexPromptPushedOutOfTailWindow() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("CodexTranscriptTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let url = dir.appendingPathComponent("rollout.jsonl")
+        var lines = [userLine("the current Codex request")]
+        let filler = String(repeating: "z", count: 4096)
+        for i in 0..<850 {
+            lines.append(assistantLine("step \(i) \(filler)"))
+        }
+        lines.append(assistantLine("Current answer."))
+        try lines.joined(separator: "\n").write(
+            to: url, atomically: true, encoding: .utf8)
+
+        let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int ?? 0
+        #expect(size > 3 * 1024 * 1024, "fixture must exceed Codex's normal tail window")
+
+        let t = try #require(CodexTranscriptReader.parse(url: url))
+        #expect(t.lastUserPrompt == "the current Codex request")
+        #expect(t.latestBlocks == [.paragraph("Current answer.")])
+    }
 }
 
 /// Pure parts of the per-pane agent-session resolution.
@@ -1158,6 +1197,123 @@ struct AgentSessionLocatorTests {
         #expect(pick?.url.lastPathComponent == "j.jsonl")
     }
 
+    @Test func paneStartedInsideSlackDoesNotTakeEarlierPanesTranscript() {
+        // Two panes launched ten seconds apart used to bind to the first
+        // pane's file: it sat inside the 30-second slack window and "oldest
+        // wins" selected it. A real post-start candidate must win instead.
+        let started = Date(timeIntervalSince1970: 1_000_000)
+        let now = started.addingTimeInterval(600)
+        let earlierPane = candidate(
+            "earlier.jsonl", born: -10, modified: 500, from: started)
+        let thisPane = candidate(
+            "this-pane.jsonl", born: 2, modified: 500, from: started)
+        let pick = AgentSessionLocator.selectTranscript(
+            startedAt: started, slack: 30, now: now,
+            candidates: [earlierPane, thisPane])
+        #expect(pick?.url.lastPathComponent == "this-pane.jsonl")
+    }
+
+    @Test func clockSlackChoosesClosestPreStartTranscript() {
+        let started = Date(timeIntervalSince1970: 1_000_000)
+        let now = started.addingTimeInterval(600)
+        let far = candidate("far.jsonl", born: -25, modified: 500, from: started)
+        let close = candidate("close.jsonl", born: -1, modified: 500, from: started)
+        let pick = AgentSessionLocator.selectTranscript(
+            startedAt: started, slack: 30, now: now, candidates: [far, close])
+        #expect(pick?.url.lastPathComponent == "close.jsonl")
+    }
+
+    @Test func followsClaudeClearLineageWithoutTakingNeighborPane() throws {
+        // Mirrors the live fasmac failure: one long-running Claude process had
+        // crossed three `/clear` boundaries after the hook was installed, and
+        // another Claude pane shared the same cwd. The stable bridge id is the
+        // process identity; session ids and filenames change at every clear.
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ClaudeBridgeTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        func transcript(
+            _ name: String, bridge: String, sequence: Int, born: TimeInterval
+        ) throws -> URL {
+            let url = dir.appendingPathComponent(name + ".jsonl")
+            let line = """
+            {"type":"bridge-session","sessionId":"\(name)","bridgeSessionId":"\(bridge)","lastSequenceNum":\(sequence)}
+            """
+            try line.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.creationDate: Date(timeIntervalSince1970: born)],
+                ofItemAtPath: url.path)
+            return url
+        }
+
+        let initial = try transcript("initial", bridge: "bridge-mine", sequence: 0, born: 10)
+        let firstClear = try transcript(
+            "first-clear", bridge: "bridge-mine", sequence: 1_396, born: 20)
+        let neighbor = try transcript(
+            "neighbor", bridge: "bridge-other", sequence: 9_999, born: 40)
+        let current = try transcript(
+            "current", bridge: "bridge-mine", sequence: 4_464, born: 30)
+
+        let pick = AgentSessionLocator.latestClaudeTranscript(
+            inBridgeOf: initial,
+            among: [neighbor, firstClear, initial, current])
+        #expect(pick == current)
+        #expect(AgentSessionLocator.claudeBridgeIdentity(of: current) == .init(
+            id: "bridge-mine", sequence: 4_464))
+    }
+
+    @Test func remoteShellFollowsClaudeClearLineageWithoutTakingNeighborPane() throws {
+        // The laptop overview resolves a remote pane with generated POSIX sh,
+        // not `AgentSessionLocator`. Exercise that exact shared shell fragment
+        // so local coverage cannot mask the two implementations drifting.
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ClaudeRemoteBridgeTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        func transcript(
+            _ name: String, bridge: String, sequence: Int, born: TimeInterval
+        ) throws -> URL {
+            let url = dir.appendingPathComponent(name + ".jsonl")
+            let line = """
+            {"type":"bridge-session","sessionId":"\(name)","bridgeSessionId":"\(bridge)","lastSequenceNum":\(sequence)}
+            """
+            try line.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.creationDate: Date(timeIntervalSince1970: born)],
+                ofItemAtPath: url.path)
+            return url
+        }
+
+        let initial = try transcript("initial", bridge: "bridge-mine", sequence: 0, born: 10)
+        _ = try transcript("first-clear", bridge: "bridge-mine", sequence: 1_396, born: 20)
+        _ = try transcript("neighbor", bridge: "bridge-other", sequence: 9_999, born: 40)
+        let current = try transcript("current", bridge: "bridge-mine", sequence: 4_464, born: 30)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-s", initial.path]
+        let input = Pipe(), output = Pipe(), errors = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = errors
+        try process.run()
+        let script = AgentProbeShell.claudeBridgeFunctions
+            + "\nclaude_bridge_latest \"$1\"\n"
+        input.fileHandleForWriting.write(Data(script.utf8))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        let errorText = String(
+            decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        #expect(process.terminationStatus == 0, "\(errorText)")
+        let selected = String(
+            decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(selected == current.path)
+    }
+
     @Test func ignoresTranscriptNotWrittenSinceProcessStarted() {
         // The exact shape that broke remote overviews: a stub born 13 s before
         // the agent launched, written for ten seconds, untouched for hours.
@@ -1207,6 +1363,124 @@ struct AgentSessionLocatorTests {
             "/Users/x/.codex/sessions/2026/08/08/rollout-abc.txt", kind: .codex))
         #expect(!AgentSessionLocator.isTranscriptPath(
             "/Users/x/somewhere/else.jsonl", kind: .claude))
+    }
+
+    @Test func recordedPathDoesNotDefaultUnknownJsonlToClaude() {
+        #expect(AgentSessionLocator.located(atRecorded: URL(
+            fileURLWithPath: "/tmp/random.jsonl")) == nil)
+        #expect(AgentSessionLocator.located(atRecorded: URL(
+            fileURLWithPath: "/Users/x/.codex/sessions/2026/08/08/rollout-a.jsonl"))?.kind == .codex)
+    }
+}
+
+/// Pure configuration surgery for the cross-agent SessionStart hook.
+struct AgentSessionHookTests {
+
+    @Test func installerTargetsClaudeAndCodex() {
+        #expect(AgentSessionHook.configurationPaths(home: "/Users/test") == [
+            "/Users/test/.claude/settings.json",
+            "/Users/test/.codex/hooks.json",
+        ])
+    }
+
+    @Test func addingHookPreservesExistingLifecycleHooks() throws {
+        let existing: [String: Any] = [
+            "theme": "dark",
+            "hooks": [
+                "Stop": [["hooks": [["type": "command", "command": "done"]]]],
+            ],
+        ]
+        let updated = AgentSessionHook.settingsAddingHook(existing)
+        #expect(updated["theme"] as? String == "dark")
+        #expect(AgentSessionHook.settingsContainHook(updated))
+
+        let hooks = try #require(updated["hooks"] as? [String: Any])
+        #expect(hooks["Stop"] != nil)
+        let starts = try #require(hooks["SessionStart"] as? [[String: Any]])
+        #expect(starts.count == 1)
+    }
+
+    @Test func addingHookIsIdempotentWhenCallerChecksFirst() {
+        let once = AgentSessionHook.settingsAddingHook([:])
+        let twice = AgentSessionHook.settingsContainHook(once)
+            ? once : AgentSessionHook.settingsAddingHook(once)
+        let hooks = twice["hooks"] as? [String: Any]
+        let starts = hooks?["SessionStart"] as? [[String: Any]]
+        #expect(starts?.count == 1)
+    }
+
+    @Test func codexClearRebindsTheExactPaneToItsReplacementRollout() throws {
+        // Codex documents SessionStart(source=clear) with the new
+        // transcript_path. The record is keyed by zmx session, so another
+        // Codex pane in the same cwd cannot become this pane's replacement.
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("CodexClearHookTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let initial = home.appendingPathComponent("initial-rollout.jsonl")
+        let current = home.appendingPathComponent("current-rollout.jsonl")
+        let neighbor = home.appendingPathComponent("neighbor-rollout.jsonl")
+        for url in [initial, current, neighbor] {
+            try Data().write(to: url)
+        }
+
+        func runHook(source: String, transcript: URL) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = ["-c", AgentSessionHook.script]
+            var environment = ProcessInfo.processInfo.environment
+            environment["HOME"] = home.path
+            environment["ZMX_SESSION"] = "trm-codex-pane"
+            process.environment = environment
+            let input = Pipe(), errors = Pipe()
+            process.standardInput = input
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = errors
+            try process.run()
+            let payload = """
+            {"hook_event_name":"SessionStart","source":"\(source)","transcript_path":"\(transcript.path)"}
+            """
+            input.fileHandleForWriting.write(Data(payload.utf8))
+            try input.fileHandleForWriting.close()
+            process.waitUntilExit()
+            let errorText = String(
+                decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            #expect(process.terminationStatus == 0, "\(errorText)")
+        }
+
+        try runHook(source: "startup", transcript: initial)
+        try runHook(source: "clear", transcript: current)
+
+        let record = home.appendingPathComponent(".trm/agent-sessions/trm-codex-pane")
+        let selected = try String(contentsOf: record, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(selected == current.path)
+        #expect(selected != neighbor.path)
+    }
+
+    @Test func generatedHookAndRemoteProbeAreValidShell() throws {
+        for (name, script) in [
+            ("session hook", AgentSessionHook.script),
+            ("shared probe", AgentProbeShell.functions),
+            ("overview remote probe", RemoteAgentTranscriptMirror.locateScriptForTesting),
+        ] {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = ["-n"]
+            let input = Pipe()
+            process.standardInput = input
+            process.standardOutput = FileHandle.nullDevice
+            let errors = Pipe()
+            process.standardError = errors
+            try process.run()
+            input.fileHandleForWriting.write(Data(script.utf8))
+            try input.fileHandleForWriting.close()
+            process.waitUntilExit()
+            let errorText = String(
+                decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            #expect(process.terminationStatus == 0, "\(name): \(errorText)")
+        }
     }
 }
 

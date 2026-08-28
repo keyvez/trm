@@ -455,7 +455,7 @@ enum ZmxSessionManager {
             // same locator the Agent Overview uses, so a tile and an overview
             // never disagree about which conversation a pane is having.
             if let pid, let located = AgentSessionLocator.locate(
-                shellPid: pid, paneCwd: paneCwd, zmxSession: name) {
+                shellPid: pid, paneCwd: paneCwd, recordKey: name) {
                 let transcript = located.kind == .codex
                     ? CodexTranscriptReader.parse(url: located.url)
                     : AgentTranscriptReader.parse(url: located.url)

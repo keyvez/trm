@@ -1169,6 +1169,12 @@ enum CodexTranscriptReader {
     /// cost that motivates keeping this window small.
     private static let tailBytes: UInt64 = 3 * 1024 * 1024
 
+    /// Wider, one-off scan used when a long current turn has pushed its human
+    /// prompt out of the normal tail window. This mirrors the Claude reader:
+    /// the activity and reply still come from the cheap tail parse, while the
+    /// overview's "You asked" line is recovered from farther back.
+    private static let promptSearchBytes: UInt64 = 24 * 1024 * 1024
+
     private static let maxActivity = 12
 
     /// Root of all Codex session rollouts.
@@ -1181,8 +1187,22 @@ enum CodexTranscriptReader {
     static func parse(url: URL) -> AgentTranscript? {
         autoreleasepool {
             guard let lines = AgentTranscriptReader.readTailLines(url: url, bytes: tailBytes) else { return nil }
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let size = attributes?[.size] as? UInt64 ?? 0
             var transcript = parse(lines: lines)
-            transcript.updatedAt = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+
+            // Tool-heavy Codex turns can exceed the polling window. Without
+            // this recovery the pane shows the current tools and reply under
+            // no prompt (or appears to be on the wrong turn altogether).
+            if transcript.lastUserPrompt == nil, size > tailBytes,
+               let widerLines = AgentTranscriptReader.readTailLines(
+                   url: url, bytes: promptSearchBytes) {
+                let wider = parse(lines: widerLines)
+                transcript.lastUserPrompt = wider.lastUserPrompt
+                transcript.promptBlocks = wider.promptBlocks
+            }
+
+            transcript.updatedAt = attributes?[.modificationDate] as? Date
             transcript.markWorkingIfLive()
             return transcript
         }
@@ -1340,7 +1360,12 @@ enum CodexTranscriptReader {
     }
 
     private static func isSynthetic(_ text: String) -> Bool {
-        text.hasPrefix("<")
+        // Codex records harness context as user-role messages even though the
+        // person never typed it. Most arrives in XML-ish envelopes, but the
+        // resolved workspace instructions deliberately start with Markdown.
+        // Treating that AGENTS.md preamble as a prompt creates a fake first
+        // turn on every fresh chat (and again after `/clear`).
+        text.hasPrefix("<") || text.hasPrefix("# AGENTS.md instructions for ")
     }
 
     private static func flattenDetail(_ raw: String) -> String {

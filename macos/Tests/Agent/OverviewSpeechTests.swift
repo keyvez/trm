@@ -24,6 +24,29 @@ struct OverviewSpeechTests {
         #expect(OverviewSpeaker.plainProse("## Heading\n- item one\n1. item two")
                 == "Heading\nitem one\nitem two")
     }
+
+    @Test func briefingKeepsOutcomesAndDropsProcessNarration() {
+        var transcript = AgentTranscript()
+        transcript.blocks = [
+            .paragraph("Let me inspect the build output now."),
+            .paragraph("Streaming TTS is implemented. All 12 tests pass. It is not deployed yet."),
+        ]
+
+        let text = OverviewSpeaker.developerBriefing(for: transcript)
+        #expect(!text.lowercased().contains("let me"))
+        #expect(text.contains("Streaming TTS is implemented."))
+        #expect(text.contains("All 12 tests pass."))
+        #expect(text.contains("not deployed"))
+    }
+
+    @Test func briefingIsEmptyForLowSignalChatter() {
+        var transcript = AgentTranscript()
+        transcript.blocks = [
+            .paragraph("I am checking the next file."),
+            .paragraph("Now I will inspect the surrounding code."),
+        ]
+        #expect(OverviewSpeaker.developerBriefing(for: transcript).isEmpty)
+    }
 }
 
 /// GFM pipe tables parsed into real table blocks.

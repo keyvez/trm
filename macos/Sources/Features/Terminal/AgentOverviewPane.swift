@@ -70,12 +70,14 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     var placement: AgentOverviewPlacement = .trailing
 
     /// The terminal surface whose agent this view describes. Weak so the view
-    /// pane never keeps a closed terminal alive.
-    weak var surface: Ghostty.SurfaceView?
+    /// pane never keeps a closed terminal alive. Change this through
+    /// `rebind(to:)`: assigning the pointer without clearing the transcript
+    /// caches lets an old pane's parse land in the newly-bound overview.
+    private(set) weak var surface: Ghostty.SurfaceView?
 
     /// Stable pane ID of the bound surface, kept so the pane can still be
     /// labelled and matched after the surface goes away.
-    let boundPaneId: Int?
+    @Published private(set) var boundPaneId: Int?
 
     @Published var transcript = AgentTranscript() {
         didSet { reanchorTurnSelection() }
@@ -169,15 +171,20 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// case, not an either/or.
     @Published var sections: AgentOverviewSections = .default
 
-    /// Which agent this pane is currently showing. Drives the header title.
-    @Published var agentKind: AgentKind = .claude
+    /// Which agent this pane is currently showing. Nil until the bound
+    /// process or an exact transcript record identifies it; an unresolved
+    /// pane must not claim to be Claude merely because Claude was supported
+    /// first.
+    @Published var agentKind: AgentKind? = nil
+
+    var agentDisplayName: String { agentKind?.displayName ?? "Agent" }
 
     /// Whether bionic reading emphasis is applied to prose.
     @Published var bionicEnabled: Bool {
         didSet { UserDefaults.standard.set(bionicEnabled, forKey: Self.bionicDefaultsKey) }
     }
 
-    /// Set when the bound pane has no readable Claude transcript.
+    /// Set when the bound pane has no readable agent transcript.
     @Published var statusMessage: String? = nil
 
     private static let bionicDefaultsKey = "AgentOverviewBionicReading"
@@ -271,6 +278,11 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// arrive at the answer already on screen.
     private var parseInFlight = false
 
+    /// Invalidates detached parses when an overview starts following another
+    /// terminal. A task already reading a large transcript cannot be cancelled
+    /// reliably, but it can be prevented from publishing into the new binding.
+    private var bindingGeneration: UInt = 0
+
     /// The transcript path resolved on the previous poll. Cached so a pane
     /// whose cwd hasn't changed skips directory enumeration.
     private var lastURL: URL?
@@ -286,6 +298,11 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// For a remote pane (`remote_host` set), the SSH transcript mirror that
     /// stands in for the local process-tree walk and file reads.
     private var remoteMirror: RemoteAgentTranscriptMirror?
+
+    /// The remote source path behind the mirror's stable local URL. `/clear`
+    /// changes the former but not the latter, so this is the only reliable
+    /// signal that an empty mirror means a new chat rather than a partial read.
+    private var lastRemoteTranscriptPath: String?
 
     /// True while a remote pane's agent hasn't been resolved yet: the SSH
     /// probe is a round trip, so there is a window after the pane appears in
@@ -349,9 +366,9 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         // Prefer the bound pane's watermark — it is what the user labelled
         // that pane with, and matches what they see on the terminal itself.
         if let mark = boundWatermark {
-            return "\(agentKind.displayName) · \(mark)"
+            return "\(agentDisplayName) · \(mark)"
         }
-        if let boundPaneId { return "\(agentKind.displayName) · pane \(boundPaneId + 1)" }
+        if let boundPaneId { return "\(agentDisplayName) · pane \(boundPaneId + 1)" }
         return "Agent Overview"
     }
 
@@ -402,6 +419,39 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         if let mirror = remoteMirror { RemoteAgentTranscriptMirror.release(mirror) }
     }
 
+    /// Make this overview follow a different terminal pane.
+    ///
+    /// The surface pointer is only one part of the binding: local session
+    /// correlation, remote SSH mirrors, mtimes, history selection, and an
+    /// in-flight parse all belong to the previous terminal too. Reset them as
+    /// one atomic main-actor operation so no old summary can survive a move.
+    func rebind(to newSurface: Ghostty.SurfaceView) {
+        guard surface !== newSurface else { return }
+
+        bindingGeneration &+= 1
+        parseInFlight = false
+        speaker.stop()
+
+        if let mirror = remoteMirror {
+            RemoteAgentTranscriptMirror.release(mirror)
+            remoteMirror = nil
+        }
+
+        surface = newSurface
+        boundPaneId = newSurface.paneId
+        lastRemoteTranscriptPath = nil
+        lastMtime = nil
+        lastURL = nil
+        lastCwd = nil
+        locatedSession = nil
+        locatedAgentPid = 0
+        agentKind = nil
+        goToLatestTurn()
+        transcript = AgentTranscript()
+        statusMessage = "Looking for the agent in this pane…"
+        refresh()
+    }
+
     func toggleBionic() {
         bionicEnabled.toggle()
     }
@@ -416,6 +466,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             statusMessage = "The terminal pane this view was tracking has closed."
             return
         }
+        let generation = bindingGeneration
 
         // A remote pane's agent process and transcript live on the other
         // machine — resolve and stream them over SSH instead of walking the
@@ -446,6 +497,9 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         // inside the zmx server, which is the real parent of the agent.
         var shellPid: pid_t = 0
         let zmxSession = surface.zmxSessionName
+        // The hook uses the zmx session when persistence is active and the
+        // injected pane id otherwise. Mirror that choice when reading it.
+        let sessionRecordKey = zmxSession ?? surface.paneId.map { "pane-\($0)" }
         if let session = zmxSession,
            let serverShell = ZmxSessionManager.cachedServerShellPid(session: session) {
             shellPid = serverShell
@@ -472,10 +526,28 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             // The agent reports its own transcript through the SessionStart
             // hook, and `/clear` fires that hook again. Reading the record is
             // one small file read per refresh, and it is authoritative.
-            if let zmxSession,
-               let recorded = AgentSessionHook.recordedTranscript(zmxSession: zmxSession),
-               recorded != session?.url {
-                session = AgentSessionLocator.located(atRecorded: recorded)
+            if cachedPidAlive, let expectedKind = session?.kind,
+               let sessionRecordKey,
+               let started = AgentSessionLocator.processStartDate(pid: cachedAgentPid),
+               let recorded = AgentSessionHook.recordedTranscript(
+                   recordKey: sessionRecordKey,
+                   recordedAfter: started.addingTimeInterval(-30)),
+               let located = AgentSessionLocator.located(atRecorded: recorded),
+               located.kind == expectedKind,
+               located.url != session?.url {
+                session = located
+            }
+
+            // A Claude process that predates hook installation cannot report
+            // its new path on `/clear`. Follow Claude's stable bridge identity
+            // across the replacement JSONLs; unlike a newest-file fallback,
+            // this remains exact with several panes in the same directory.
+            if cachedPidAlive, session?.kind == .claude,
+               let current = session?.url,
+               let latest = AgentSessionLocator.latestClaudeTranscript(
+                   inBridgeOf: current),
+               latest != current {
+                session = AgentSessionLocator.Located(kind: .claude, url: latest)
             }
 
             // There is deliberately no "guess from the directory" fallback
@@ -491,36 +563,77 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             // The hook above is the answer, because the agent names its own
             // transcript instead of anyone inferring it.
 
+            var detectedKind = session?.kind
             if session == nil || !cachedPidAlive || cwdChanged {
+                // The cached binding belongs to the old process/cwd. Do not
+                // retain it if locating the replacement has no answer.
+                session = nil
                 if let agent = AgentSessionLocator.agentProcess(underShell: shellPid) {
+                    detectedKind = agent.kind
                     if let located = AgentSessionLocator.locate(
-                        shellPid: shellPid, paneCwd: cwd, zmxSession: zmxSession) {
+                        shellPid: shellPid, paneCwd: cwd, recordKey: sessionRecordKey) {
                         session = located
+                        detectedKind = located.kind
                     }
                     await MainActor.run { [weak self] in
-                        self?.locatedAgentPid = agent.pid
+                        guard let self, self.bindingGeneration == generation else { return }
+                        self.locatedAgentPid = agent.pid
+                        self.agentKind = agent.kind
                     }
                 } else {
-                    session = nil
                     await MainActor.run { [weak self] in
-                        self?.locatedAgentPid = 0
+                        guard let self, self.bindingGeneration == generation else { return }
+                        self.parseInFlight = false
+                        self.locatedAgentPid = 0
+                        self.locatedSession = nil
+                        self.agentKind = nil
+                        self.lastCwd = cwd
+                        self.lastURL = nil
+                        self.lastMtime = nil
+                        self.goToLatestTurn()
+                        self.transcript = AgentTranscript()
+                        self.statusMessage =
+                            "No coding agent found in \((cwd as NSString).lastPathComponent)."
                     }
+                    return
                 }
             }
 
-            let kind = session?.kind ?? .claude
-            let url = session?.url ?? AgentTranscriptReader.latestJSONL(
-                in: AgentTranscriptReader.projectDir(forCwd: cwd)
-            )
+            guard let kind = session?.kind ?? detectedKind else {
+                await MainActor.run { [weak self] in
+                    guard let self, self.bindingGeneration == generation else { return }
+                    self.parseInFlight = false
+                    self.agentKind = nil
+                    self.statusMessage = "Looking for a coding agent…"
+                }
+                return
+            }
+
+            // If exact correlation did not find a file, stay within the kind
+            // of process we actually saw. The old unconditional Claude lookup
+            // is how a Codex pane acquired a neighbour's Claude summary.
+            let fallbackURL: URL?
+            switch kind {
+            case .claude:
+                fallbackURL = AgentTranscriptReader.latestJSONL(
+                    in: AgentTranscriptReader.projectDir(forCwd: cwd))
+            case .codex:
+                fallbackURL = CodexTranscriptReader.latestRollout(matchingCwd: cwd)
+            }
+            let url = session?.url ?? fallbackURL
             guard let url else {
                 await MainActor.run { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.bindingGeneration == generation else { return }
                     self.parseInFlight = false
+                    self.agentKind = kind
                     self.lastCwd = cwd
                     self.lastURL = nil
+                    self.lastMtime = nil
                     self.locatedSession = nil
+                    self.goToLatestTurn()
+                    self.transcript = AgentTranscript()
                     self.statusMessage =
-                        "No coding agent session found for \((cwd as NSString).lastPathComponent)."
+                        "No \(kind.displayName) session found for \((cwd as NSString).lastPathComponent)."
                 }
                 return
             }
@@ -530,11 +643,12 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             // Unchanged transcript — nothing to re-parse.
             if let mtime, let knownMtime, mtime == knownMtime, url == knownURL {
                 await MainActor.run { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.bindingGeneration == generation else { return }
                     self.parseInFlight = false
                     self.lastCwd = cwd
                     self.lastURL = url
                     self.locatedSession = session
+                    self.agentKind = kind
                     // See the remote path: a status set before the file had
                     // content outlives its reason once the mtime settles.
                     if !self.transcript.isEmpty { self.statusMessage = nil }
@@ -547,19 +661,29 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                 : AgentTranscriptReader.parse(url: url)
 
             await MainActor.run { [weak self] in
-                guard let self else { return }
+                guard let self, self.bindingGeneration == generation else { return }
                 self.parseInFlight = false
                 self.lastCwd = cwd
                 self.lastURL = url
                 self.lastMtime = mtime
                 self.locatedSession = session
                 self.agentKind = kind
-                if let parsed, !parsed.isEmpty {
+                let sessionChanged = knownURL != url
+                if sessionChanged {
+                    // `/clear` and `/new` intentionally start with an empty
+                    // transcript. That emptiness is authoritative: retaining
+                    // the previous non-empty model is precisely how the old
+                    // turn remained on screen after the chat changed.
+                    self.goToLatestTurn()
+                    self.transcript = parsed ?? AgentTranscript()
+                } else if let parsed, !parsed.isEmpty {
                     // Setting the transcript re-anchors any in-progress
                     // history browsing by turn id (see didSet).
                     self.transcript = parsed
+                }
+                if !self.transcript.isEmpty {
                     self.statusMessage = nil
-                } else if self.transcript.isEmpty {
+                } else {
                     self.statusMessage = "No messages in this session yet."
                 }
             }
@@ -569,10 +693,13 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// Remote-pane refresh: drive the SSH mirror, then stat and parse the
     /// local mirror file exactly like a local transcript.
     private func refreshRemote(host: String, remoteSession: String) {
+        let generation = bindingGeneration
         if let mirror = remoteMirror,
            mirror.host != host || mirror.remoteSession != remoteSession {
             RemoteAgentTranscriptMirror.release(mirror)
             remoteMirror = nil
+            lastRemoteTranscriptPath = nil
+            lastMtime = nil
         }
         if remoteMirror == nil {
             // Shared: several overviews routinely describe one remote session,
@@ -588,6 +715,17 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             return
         }
 
+        if let remotePath = mirror.locatedTranscriptPath,
+           remotePath != lastRemoteTranscriptPath {
+            // The stream will replay the new file into the same mirror URL.
+            // Clear the prior turn immediately, including the empty interval
+            // between `/clear` and the first prompt in the fresh chat.
+            lastRemoteTranscriptPath = remotePath
+            lastMtime = nil
+            goToLatestTurn()
+            transcript = AgentTranscript()
+        }
+
         let url = mirror.mirrorURL
         let knownMtime = lastMtime
         guard !parseInFlight else { return }
@@ -597,7 +735,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             // Unchanged mirror — nothing to re-parse.
             if let mtime, let knownMtime, mtime == knownMtime {
                 await MainActor.run { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.bindingGeneration == generation else { return }
                     self.parseInFlight = false
                     // A "still streaming" message set before the mirror had
                     // content would otherwise never be revisited, because an
@@ -614,7 +752,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                 : AgentTranscriptReader.parse(url: url)
 
             await MainActor.run { [weak self] in
-                guard let self else { return }
+                guard let self, self.bindingGeneration == generation else { return }
                 self.parseInFlight = false
                 self.lastMtime = mtime
                 self.agentKind = kind

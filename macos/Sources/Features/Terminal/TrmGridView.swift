@@ -146,6 +146,10 @@ struct TrmGridView: View {
     /// list, whose rows are panes rather than overviews.
     var onSendToPaneAgent: ((Ghostty.SurfaceView, String) -> Void)? = nil
 
+    /// Open the repository-backed issue tracker advertised by a terminal's
+    /// current working directory.
+    var onShowIssueTracker: ((Ghostty.SurfaceView, IssueTrackerProject) -> Void)? = nil
+
     /// Whether the given pane already has an agent overview open.
     var hasAgentOverview: ((GridPane) -> Bool)? = nil
 
@@ -155,6 +159,11 @@ struct TrmGridView: View {
 
     /// Callback to set an overview's placement from its context menu.
     var onSetOverviewPlacement: ((AgentOverviewPane, AgentOverviewPlacement) -> Void)? = nil
+
+    /// Explicitly change which terminal an overview follows. This is separate
+    /// from placement: a pane can be visually moved without leaving its data
+    /// source mysterious or implicit.
+    var onRebindAgentOverview: ((AgentOverviewPane, Ghostty.SurfaceView) -> Void)? = nil
 
     /// Callback to move a pane in a direction (left/right/up/down).
     var onMovePane: ((GridPane, BaseTerminalController.PaneMoveDirection) -> Void)? = nil
@@ -714,6 +723,24 @@ struct TrmGridView: View {
     /// Context menu for an agent overview cell: placement choices + close.
     @ViewBuilder
     private func overviewPlacementMenu(_ overviewPane: AgentOverviewPane) -> some View {
+        if let onRebindAgentOverview {
+            Menu {
+                ForEach(terminalSurfaces(in: panes), id: \.id) { surface in
+                    Button {
+                        onRebindAgentOverview(overviewPane, surface)
+                    } label: {
+                        if overviewPane.surface === surface {
+                            Label(terminalLabel(surface), systemImage: "checkmark")
+                        } else {
+                            Text(terminalLabel(surface))
+                        }
+                    }
+                }
+            } label: {
+                Label("Follow Agent Pane", systemImage: "link")
+            }
+            SwiftUI.Divider()
+        }
         if let onSetOverviewPlacement {
             Menu {
                 ForEach(AgentOverviewPlacement.allCases, id: \.self) { placement in
@@ -739,6 +766,43 @@ struct TrmGridView: View {
                 Label("Close Agent Overview", systemImage: "xmark.circle")
             }
         }
+    }
+
+    /// Terminal choices for the overview binding menu, including terminals
+    /// nested in stacks and excluding duplicate identities.
+    private func terminalSurfaces(in source: [GridPane]) -> [Ghostty.SurfaceView] {
+        var result: [Ghostty.SurfaceView] = []
+        var seen = Set<ObjectIdentifier>()
+
+        func visit(_ pane: GridPane) {
+            switch pane {
+            case .terminal(let surface):
+                if seen.insert(ObjectIdentifier(surface)).inserted {
+                    result.append(surface)
+                }
+            case .stack(let children):
+                children.forEach(visit)
+            default:
+                break
+            }
+        }
+
+        source.forEach(visit)
+        return result
+    }
+
+    private func terminalLabel(_ surface: Ghostty.SurfaceView) -> String {
+        if let paneId = surface.paneId,
+           let watermark = Trm.shared.watermark(forPaneId: UInt32(paneId)),
+           !watermark.isEmpty {
+            return watermark
+        }
+        if let cwd = surface.pwd, !cwd.isEmpty {
+            return (cwd as NSString).lastPathComponent
+        }
+        if !surface.title.isEmpty { return surface.title }
+        if let paneId = surface.paneId { return "Pane \(paneId + 1)" }
+        return "Terminal Pane"
     }
 
     /// Centered Reconnect button over a remote pane whose SSH link died.
@@ -1266,6 +1330,7 @@ struct TrmGridView: View {
                 surfaceView: surface,
                 isSplit: true
             )
+            .overlay(paneControls(for: .terminal(surface)), alignment: .topTrailing)
             .overlay(watermarkOverlay(forPaneId: paneId))
             .overlay(servicePluginOverlays(forPaneId: paneId))
             .overlay(liveSummaryOverlay(forPaneId: paneId), alignment: .bottom)
@@ -1599,8 +1664,11 @@ struct TrmGridView: View {
 
     @ViewBuilder
     private func paneControls(for pane: GridPane) -> some View {
-        if onDetachPane != nil || onAttachPane != nil {
+        if onDetachPane != nil || onAttachPane != nil || onShowIssueTracker != nil {
             HStack(spacing: 4) {
+                if case .terminal(let surface) = pane, let onShowIssueTracker {
+                    IssueTrackerPaneButton(surface: surface, onOpen: onShowIssueTracker)
+                }
                 paneButtons(for: pane)
             }
             .padding(6)

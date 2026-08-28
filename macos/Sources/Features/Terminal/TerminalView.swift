@@ -187,7 +187,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
     }
 
     private var sidebarAgentNames: [Int: String] {
-        Dictionary(agentMonitor.entries.map { ($0.paneId, $0.kind.displayName) },
+        Dictionary(agentMonitor.entries.map { ($0.paneId, $0.kind?.displayName ?? "Agent") },
                    uniquingKeysWith: { first, _ in first })
     }
 
@@ -253,6 +253,9 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                             (self.delegate as? BaseTerminalController)?
                                 .sendMessageToSurface(surface, text: text)
                         },
+                        onShowIssueTracker: { surface, project in
+                            IssueTrackerWindowController.show(project: project, from: surface)
+                        },
                         hasAgentOverview: { pane in
                             (self.delegate as? BaseTerminalController)?.hasAgentOverview(for: pane) ?? false
                         },
@@ -262,6 +265,10 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         },
                         onSetOverviewPlacement: { overviewPane, placement in
                             (self.delegate as? BaseTerminalController)?.setOverviewPlacement(overviewPane, placement)
+                        },
+                        onRebindAgentOverview: { overviewPane, surface in
+                            (self.delegate as? BaseTerminalController)?.rebindAgentOverview(
+                                overviewPane, to: surface)
                         },
                         onMovePane: { pane, direction in
                             (self.delegate as? BaseTerminalController)?.movePane(pane, direction: direction)

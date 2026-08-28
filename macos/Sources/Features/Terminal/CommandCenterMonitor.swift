@@ -36,7 +36,7 @@ final class CommandCenterMonitor: ObservableObject {
         let watermark: String
         /// Which agent is running: two agents behave differently enough that
         /// "who am I talking to" belongs on the card, not just in the pane.
-        let kind: AgentKind
+        let kind: AgentKind?
         /// Where the work is: the project directory, and the machine when the
         /// pane is remote.
         let location: String?
@@ -388,7 +388,11 @@ final class CommandCenterMonitor: ObservableObject {
             id: ObjectIdentifier(surface),
             paneId: paneId,
             watermark: (watermark?.isEmpty == false ? watermark! : "pane \(paneId)"),
-            kind: .claude,
+            // The remote probe or local overview may still be identifying the
+            // process. "Agent" is honest during that window; defaulting this
+            // field to Claude made Codex panes look misbound before parsing
+            // had even begun.
+            kind: nil,
             location: cwd.map { ($0 as NSString).lastPathComponent },
             host: surface.remoteHost,
             message: resolving

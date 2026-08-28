@@ -241,6 +241,15 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
         return locatedKindLocked
     }
 
+    /// Identity of the remote transcript currently feeding the stable local
+    /// mirror URL. The URL itself never changes, so consumers need this value
+    /// to distinguish an idle file from `/clear` replacing it with a new,
+    /// initially empty conversation.
+    var locatedTranscriptPath: String? {
+        lock.lock(); defer { lock.unlock() }
+        return locatedPathLocked
+    }
+
     /// True until the first probe returns. Distinguishes "the SSH round trip
     /// hasn't come back" from "it came back and there is no agent here" —
     /// which look identical from `locatedKind` alone, and made a pane whose
@@ -301,22 +310,6 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     if [ ! -S "$SOCK" ]; then SOCK="$T/$S"; fi
     [ -S "$SOCK" ] || { echo "ERR no-session"; exit 0; }
 
-    # Exact answer first: the agent's SessionStart hook records the transcript
-    # it is actually writing, keyed by this session name. Everything below is a
-    # correlation of file times that cannot separate several agents sharing a
-    # project directory. Absent (hook not installed, or an agent that was
-    # already running when it was) — fall through.
-    REC="$HOME/.trm/agent-sessions/$S"
-    if [ -f "$REC" ]; then
-      P="$(cat "$REC" 2>/dev/null)"
-      if [ -n "$P" ] && [ -f "$P" ]; then
-        case "$P" in
-          */.codex/*) echo "OK codex $P"; exit 0 ;;
-          *)          echo "OK claude $P"; exit 0 ;;
-        esac
-      fi
-    fi
-
     SHELL_PID=""
     for pid in $(lsof -t "$SOCK" 2>/dev/null); do
       c="$(pgrep -P "$pid" 2>/dev/null | head -1)"
@@ -349,6 +342,26 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
       secs="$(printf %s "$et" | awk -F'[-:]' '{ if (NF==4) print $1*86400+$2*3600+$3*60+$4; else if (NF==3) print $1*3600+$2*60+$3; else if (NF==2) print $1*60+$2; else print $1 }')"
       echo $(( $(date +%s) - secs ))
     }
+
+    \(AgentProbeShell.claudeBridgeFunctions)
+
+    # Exact answer: the SessionStart hook names the transcript, but its record
+    # can outlive the process that wrote it. Accept it only when it is fresh
+    # for, and the same kind as, the agent currently under this shell. Without
+    # both checks an old Claude record can relabel a later Codex pane.
+    REC="$HOME/.trm/agent-sessions/$S"
+    if [ -n "$AGENT_PID" ] && [ -f "$REC" ]; then
+      P="$(cat "$REC" 2>/dev/null)"
+      STARTED="$(started_at "$AGENT_PID")"
+      RECORDED="$(stat -f %m "$REC" 2>/dev/null)"
+      if [ -n "$P" ] && [ -f "$P" ] && [ -n "$STARTED" ] \
+         && [ -n "$RECORDED" ] && [ "$RECORDED" -ge $(( STARTED - 30 )) ]; then
+        case "$AGENT_KIND:$P" in
+          codex:*/.codex/sessions/*.jsonl) echo "OK codex $P"; exit 0 ;;
+          claude:*/.claude/projects/*.jsonl) P="$(claude_bridge_latest "$P")"; echo "OK claude $P"; exit 0 ;;
+        esac
+      fi
+    fi
 
     # Codex writes one rollout per session under a date-sharded tree, and
     # records the directory it was started in as `cwd` in the first line's
@@ -393,29 +406,39 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     #   - not an abandoned stub (a moment of writes, silent since), unless
     #     nothing else qualifies — a genuinely brief session the user left
     #     idle is still the right answer when it is the only candidate.
-    # Of what survives, the earliest born: the one this agent made rather than
-    # one a later agent made beside it. Falls back to newest by mtime.
+    # Prefer a file born at/after this process. The slack is only for timestamp
+    # granularity; without that split, a pane opened seconds earlier wins for
+    # the later pane. Falls back to newest by mtime.
     born_after() {
       dir="$1"; apid="$2"
       started="$(started_at "$apid")"
       [ -n "$started" ] || { newest_jsonl "$dir"; return; }
       now="$(date +%s)"
       earliest=$(( started - 30 ))
-      best=""; bestb=0; stub=""; stubb=0
+      after=""; afterb=0; afterstub=""; afterstubb=0
+      before=""; beforeb=0; beforestub=""; beforestubb=0
       for f in "$dir"/*.jsonl; do
         [ -e "$f" ] || continue
         b="$(stat -f %B "$f" 2>/dev/null)" || continue
         m="$(stat -f %m "$f" 2>/dev/null)" || continue
         [ "$b" -ge "$earliest" ] || continue
         [ "$m" -ge "$started" ] || continue
-        if [ $(( m - b )) -lt 60 ] && [ $(( now - m )) -gt 300 ]; then
-          if [ -z "$stub" ] || [ "$b" -lt "$stubb" ]; then stub="$f"; stubb="$b"; fi
-          continue
+        isstub=0
+        [ $(( m - b )) -lt 60 ] && [ $(( now - m )) -gt 300 ] && isstub=1
+        if [ "$b" -ge "$started" ]; then
+          if [ "$isstub" -eq 1 ]; then
+            if [ -z "$afterstub" ] || [ "$b" -lt "$afterstubb" ]; then afterstub="$f"; afterstubb="$b"; fi
+          elif [ -z "$after" ] || [ "$b" -lt "$afterb" ]; then after="$f"; afterb="$b"; fi
+        else
+          if [ "$isstub" -eq 1 ]; then
+            if [ -z "$beforestub" ] || [ "$b" -gt "$beforestubb" ]; then beforestub="$f"; beforestubb="$b"; fi
+          elif [ -z "$before" ] || [ "$b" -gt "$beforeb" ]; then before="$f"; beforeb="$b"; fi
         fi
-        if [ -z "$best" ] || [ "$b" -lt "$bestb" ]; then best="$f"; bestb="$b"; fi
       done
-      if [ -n "$best" ]; then printf '%s\n' "$best"
-      elif [ -n "$stub" ]; then printf '%s\n' "$stub"
+      if [ -n "$after" ]; then printf '%s\n' "$after"
+      elif [ -n "$afterstub" ]; then printf '%s\n' "$afterstub"
+      elif [ -n "$before" ]; then printf '%s\n' "$before"
+      elif [ -n "$beforestub" ]; then printf '%s\n' "$beforestub"
       else newest_jsonl "$dir"; fi
     }
 
@@ -425,11 +448,15 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
         codex)  pat='/\\.codex/sessions/.*\\.jsonl$' ;;
       esac
       OPEN="$(lsof -p "$AGENT_PID" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -E "$pat" | head -1)"
-      [ -n "$OPEN" ] && { echo "OK $AGENT_KIND $OPEN"; exit 0; }
+      if [ -n "$OPEN" ]; then
+        [ "$AGENT_KIND" = claude ] && OPEN="$(claude_bridge_latest "$OPEN")"
+        echo "OK $AGENT_KIND $OPEN"; exit 0
+      fi
       CWD="$(cwd_of "$AGENT_PID")"
       if [ "$AGENT_KIND" = claude ] && [ -n "$CWD" ]; then
         ENC="$(printf %s "$CWD" | tr './_' '---')"
         P="$(born_after "$HOME/.claude/projects/$ENC" "$AGENT_PID")"
+        [ -n "$P" ] && P="$(claude_bridge_latest "$P")"
         [ -n "$P" ] && { echo "OK claude $P"; exit 0; }
       fi
       if [ "$AGENT_KIND" = codex ]; then
@@ -458,6 +485,9 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     fi
     echo "ERR no-agent"
     """
+
+    /// Keep the sizeable generated probe under a real shell parser in tests.
+    static var locateScriptForTesting: String { locateScript }
 
     private func locateRemoteSession() {
         lock.lock()
