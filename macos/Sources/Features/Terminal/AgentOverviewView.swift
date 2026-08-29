@@ -604,6 +604,23 @@ struct AgentOverviewView: View {
                     OverviewPlaybackControls(speaker: pane.speaker)
                 }
 
+                Button(action: { pane.toggleCards() }) {
+                    Image(systemName: "rectangle.grid.1x2")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(pane.cardsEnabled ? Color.accentColor : Color.secondary)
+                        .frame(width: 18, height: 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(pane.cardsEnabled
+                                      ? Color.accentColor.opacity(0.18)
+                                      : Color.clear)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(pane.cardsEnabled
+                      ? "Show the reply as prose"
+                      : "Split the reply into cards")
+
                 Button(action: { pane.toggleBionic() }) {
                     Text("B")
                         .font(.system(size: 11, weight: .bold, design: .serif))
@@ -907,14 +924,46 @@ struct AgentOverviewView: View {
                     }
                 }.joined(separator: "\n\n")
             }
+            if pane.cardsEnabled {
+                cardsView
+            } else {
+                ForEach(pane.displayedTranscript.blocks) { block in
+                    switch block {
+                    case .paragraph(let text):
+                        paragraphView(text)
+                    case .code(let language, let text):
+                        codeBlock(language: language, text: text)
+                    case .image(let data):
+                        inlineImage(data)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The reply broken into its parts.
+    ///
+    /// Cards are derived from the accumulated turn, and a turn's messages are
+    /// appended rather than replaced — so as the agent keeps talking, earlier
+    /// cards keep their identity and position and new ones arrive underneath.
+    /// Nothing already on screen is rebuilt because a later message landed.
+    @ViewBuilder
+    private var cardsView: some View {
+        let cards = AgentCardSplitter.cards(for: pane.displayedTranscript)
+        if cards.isEmpty {
             ForEach(pane.displayedTranscript.blocks) { block in
                 switch block {
-                case .paragraph(let text):
-                    paragraphView(text)
-                case .code(let language, let text):
-                    codeBlock(language: language, text: text)
-                case .image(let data):
-                    inlineImage(data)
+                case .paragraph(let text): paragraphView(text)
+                case .code(let language, let text): codeBlock(language: language, text: text)
+                case .image(let data): inlineImage(data)
+                }
+            }
+        } else {
+            LazyVStack(alignment: .leading, spacing: 8) {
+                ForEach(cards) { card in
+                    AgentCardView(card: card, pane: pane) { block in
+                        AnyView(self.markdownBlockView(block))
+                    }
                 }
             }
         }
@@ -930,6 +979,16 @@ struct AgentOverviewView: View {
         let parts = OverviewMarkdownBlock.parse(text)
         VStack(alignment: .leading, spacing: paragraphSpacing) {
             ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
+                markdownBlockView(part)
+            }
+        }
+    }
+
+    /// One parsed markdown block, styled. Shared by the prose view and the
+    /// cards view so a change to how a table or a quote looks lands in both.
+    @ViewBuilder
+    func markdownBlockView(_ part: OverviewMarkdownBlock) -> some View {
+        Group {
                 switch part {
                 case .heading(let level, let text):
                     Text(overviewStyledMarkdown(
@@ -967,7 +1026,6 @@ struct AgentOverviewView: View {
                 case .table(let headers, let rows):
                     tableView(headers: headers, rows: rows)
                 }
-            }
         }
     }
 

@@ -38,3 +38,4 @@ ios/build-ios/
 
 # Artifacts the zig sprite test writes relative to its working directory
 sprite_face_test-*.png
+issues/artifacts/

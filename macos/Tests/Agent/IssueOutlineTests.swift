@@ -534,3 +534,30 @@ struct IssueOutlineTests {
         #expect(state.selection == nil)
     }
 }
+
+/// trm keeps its own tracker in the format trm reads, so the window can be
+/// pointed at this repo. If that ever stops parsing, this catches it.
+struct TrmOwnTrackerTests {
+    @Test func trmsOwnTrackerParses() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Agent
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // macos
+        guard FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("ISSUES.md").path) else { return }
+        let project = IssueTrackerProject(
+            rootPath: root.path, indexFileName: "ISSUES.md", remoteHost: nil)
+        let snapshot = try IssueTrackerStore.snapshot(project)
+
+        #expect(!snapshot.issues.isEmpty)
+        // Every indexed row has a record file behind it, which is the whole
+        // point of the split.
+        for issue in snapshot.issues {
+            #expect(!issue.title.isEmpty)
+            #expect(!issue.detail.hasPrefix("No `issues/"), "\(issue.id) has no record file")
+            #expect(!issue.statusIsOutOfSync,
+                    "\(issue.id): index says \(issue.status.rawValue), record disagrees")
+        }
+        #expect(snapshot.issues.contains { $0.id == "T-01" })
+    }
+}

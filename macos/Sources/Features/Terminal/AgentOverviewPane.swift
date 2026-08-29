@@ -179,6 +179,13 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
 
     var agentDisplayName: String { agentKind?.displayName ?? "Agent" }
 
+    /// Whether the reply is shown as cards rather than as running prose.
+    @Published var cardsEnabled: Bool {
+        didSet { UserDefaults.standard.set(cardsEnabled, forKey: Self.cardsDefaultsKey) }
+    }
+
+    static let cardsDefaultsKey = "AgentOverviewCardsView"
+
     /// Whether bionic reading emphasis is applied to prose.
     @Published var bionicEnabled: Bool {
         didSet { UserDefaults.standard.set(bionicEnabled, forKey: Self.bionicDefaultsKey) }
@@ -376,6 +383,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         self.surface = surface
         self.boundPaneId = surface?.paneId
         self.bionicEnabled = UserDefaults.standard.bool(forKey: Self.bionicDefaultsKey)
+        self.cardsEnabled = UserDefaults.standard.bool(forKey: Self.cardsDefaultsKey)
         // `object(forKey:)` rather than `double(forKey:)`: an absent key
         // reads as 0.0, which would start every new overview at the minimum.
         if let saved = UserDefaults.standard.object(forKey: Self.fontScaleDefaultsKey) as? Double {
@@ -450,6 +458,10 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         transcript = AgentTranscript()
         statusMessage = "Looking for the agent in this pane…"
         refresh()
+    }
+
+    func toggleCards() {
+        cardsEnabled.toggle()
     }
 
     func toggleBionic() {
