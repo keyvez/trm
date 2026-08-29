@@ -743,7 +743,12 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         guard !parseInFlight else { return }
         parseInFlight = true
         Task.detached(priority: .utility) { [weak self] in
-            let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let mtime = attributes?[.modificationDate] as? Date
+            // Whether the transfer has actually delivered anything. This is
+            // what separates "still arriving" from "arrived, and the session
+            // has nothing in it" — two states that looked identical before.
+            let mirrorHasData = ((attributes?[.size] as? NSNumber)?.intValue ?? 0) > 0
             // Unchanged mirror — nothing to re-parse.
             if let mtime, let knownMtime, mtime == knownMtime {
                 await MainActor.run { [weak self] in
@@ -753,8 +758,15 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                     // content would otherwise never be revisited, because an
                     // idle session stops changing the mirror's mtime and this
                     // return is then the only path taken. Retire it as soon as
-                    // there is something on screen for it to be wrong about.
-                    if !self.transcript.isEmpty { self.statusMessage = nil }
+                    // there is something on screen for it to be wrong about,
+                    // and correct it when the mirror turns out to be complete
+                    // and simply empty.
+                    if !self.transcript.isEmpty {
+                        self.statusMessage = nil
+                    } else {
+                        self.statusMessage = Self.remoteEmptyStatus(
+                            host: host, mirrorHasData: mirrorHasData)
+                    }
                 }
                 return
             }
@@ -776,10 +788,25 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                     // parse must not put a status over a transcript that has
                     // already arrived — the mirror is replayed from the top,
                     // so "empty" is routinely just "not filled in yet".
-                    self.statusMessage = "Streaming the session from \(host)…"
+                    self.statusMessage = Self.remoteEmptyStatus(
+                        host: host, mirrorHasData: mirrorHasData)
                 }
             }
         }
+    }
+
+    /// What to say about a remote session that has produced no transcript.
+    ///
+    /// "Streaming…" is a claim that a transfer is in progress, and it was
+    /// being made about sessions whose transfer had finished perfectly well
+    /// and simply had nothing in them — a mirror of fifteen lines and no
+    /// assistant messages sat under that message indefinitely, reading as a
+    /// hang. Once bytes have arrived the stream has plainly worked, so the
+    /// honest remaining answer is the one the local path already gives.
+    static func remoteEmptyStatus(host: String, mirrorHasData: Bool) -> String {
+        mirrorHasData
+            ? "No messages in this session yet."
+            : "Streaming the session from \(host)…"
     }
 
     // MARK: - Working directory
