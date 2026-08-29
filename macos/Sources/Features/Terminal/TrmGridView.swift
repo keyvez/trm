@@ -189,6 +189,7 @@ struct TrmGridView: View {
 
     /// Callback to peek (expand) a stacked sub-pane.
     var onPeekPane: ((GridPane) -> Void)? = nil
+    var onClosePane: ((GridPane) -> Void)? = nil
 
     /// Switch a terminal pane's shell to another machine (context menu).
     var onSwitchPaneRemote: ((GridPane) -> Void)? = nil
@@ -664,6 +665,7 @@ struct TrmGridView: View {
                     // the generic move/stack items don't apply to it.
                     overviewPlacementMenu(overviewPane)
                     sidebarMenuItem(for: pane)
+                    closePaneMenuItem(for: pane)
                 } else {
                     if let onPeekPane {
                         Button {
@@ -681,6 +683,7 @@ struct TrmGridView: View {
                         Divider()
                         pluginsMenu(forPaneId: pid)
                     }
+                    closePaneMenuItem(for: pane)
                 }
             }
             .onDrop(of: [.ghosttySurfaceId, .trmAgentOverviewId], delegate: PaneStackDropDelegate(
@@ -868,6 +871,35 @@ struct TrmGridView: View {
             } label: {
                 Label("Send to Sidebar", systemImage: "sidebar.squares.right")
             }
+        }
+    }
+
+    /// Closing a pane was reachable from a sidebar tile's menu but not from
+    /// the cell itself, so the one place you are actually looking at the pane
+    /// was the one place you could not close it.
+    ///
+    /// Last in the menu and destructive, like the sidebar's. A terminal pane
+    /// goes through the usual confirmation, so a live agent is not killed by a
+    /// right-click and a slip.
+    @ViewBuilder
+    private func closePaneMenuItem(for pane: GridPane) -> some View {
+        if let onClosePane {
+            Divider()
+            Button(role: .destructive) {
+                onClosePane(pane)
+            } label: {
+                Label(closeLabel(for: pane), systemImage: "xmark")
+            }
+        }
+    }
+
+    private func closeLabel(for pane: GridPane) -> String {
+        switch pane {
+        case .agentOverview: return "Close Overview"
+        case .webview: return "Close Web Pane"
+        case .plugin: return "Close Plugin Pane"
+        case .stack(let children): return "Close \(children.count) Panes"
+        case .terminal: return "Close Pane"
         }
     }
 

@@ -77,6 +77,13 @@ final class CommandCenterMonitor: ObservableObject {
 
     @Published private(set) var entries: [Entry] = []
 
+    /// The entry stream, for observers that need to react once per scan rather
+    /// than once per view body. `$entries` itself is `private(set)`, so this is
+    /// the read-only door onto it.
+    var entriesPublisher: AnyPublisher<[Entry], Never> {
+        $entries.eraseToAnyPublisher()
+    }
+
     /// Whether the first scan has finished looking.
     ///
     /// "No agents running" and "haven't looked yet" are different answers and

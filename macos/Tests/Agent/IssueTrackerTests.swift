@@ -92,20 +92,4 @@ struct IssueTrackerTests {
         #expect(content.contains("Keep the regression test"))
         #expect(content.contains("forwarded to Codex in fasmac"))
     }
-
-    @Test func boardRowsRemainInTrackerOrder() {
-        func issue(_ id: String) -> TrackedIssue {
-            TrackedIssue(
-                id: id, title: id, status: .open, detailStatus: .open,
-                section: "Open", report: "", detail: "", detailModifiedAt: nil,
-                artifacts: [])
-        }
-        let rows = IssueTrackerView.rows(
-            [issue("O-01"), issue("O-02"), issue("O-03"), issue("O-04"), issue("O-05")],
-            columns: 2)
-        #expect(rows.map { $0.map(\.id) } == [["O-01", "O-02"], ["O-03", "O-04"], ["O-05"]])
-        #expect(IssueTrackerView.columnCount(for: 719) == 2)
-        #expect(IssueTrackerView.columnCount(for: 0) == 1)
-    }
-
 }

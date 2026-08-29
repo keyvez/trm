@@ -439,13 +439,208 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         return String(cut) + "…"
     }
 
-    /// All prose, retained for formatting tests. Playback uses the selective briefing above.
+    /// All prose, retained for formatting tests.
     static func spokenText(blocks: [AgentTranscript.Block]) -> String {
         blocks.compactMap { block -> String? in
             guard case .paragraph(let text) = block else { return nil }
             let cleaned = plainProse(text)
             return cleaned.isEmpty ? nil : cleaned
         }.joined(separator: "\n\n")
+    }
+
+    // MARK: The full reading
+
+    /// The whole reply, read the way a person would read it aloud.
+    ///
+    /// The briefing above answers "what do I need to know"; this answers "read
+    /// me what it said", which is the thing you usually want and was the wrong
+    /// way round before. Reading everything does not mean reading it
+    /// *literally*: a diff, a table, a git invocation and a forty-character
+    /// hash are all things a person skips or names rather than pronounces, and
+    /// a synthesiser that spells them out is worse than one that stays quiet.
+    static func fullReading(for transcript: AgentTranscript) -> String {
+        var parts: [String] = []
+        var pendingCode: [String] = []
+
+        func flushCode() {
+            guard !pendingCode.isEmpty else { return }
+            // Consecutive blocks collapse into one phrase: three in a row is
+            // one interruption, not three.
+            let kinds = Set(pendingCode)
+            let noun: String
+            if kinds.count == 1, let only = kinds.first {
+                noun = pendingCode.count == 1
+                    ? "a \(only)" : "\(spelled(pendingCode.count)) \(only)s"
+            } else {
+                noun = "\(spelled(pendingCode.count)) code blocks"
+            }
+            parts.append("Then \(noun).")
+            pendingCode = []
+        }
+
+        for block in transcript.blocks {
+            switch block {
+            case .paragraph(let text):
+                let spoken = speakableProse(text)
+                if !spoken.isEmpty {
+                    flushCode()
+                    parts.append(spoken)
+                }
+            case .code(let language, let text):
+                pendingCode.append(codeNoun(language: language, text: text))
+            case .image:
+                flushCode()
+                parts.append("Then an image.")
+            }
+        }
+        flushCode()
+        return parts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// What to call a code block without reading it.
+    private static func codeNoun(language: String?, text: String) -> String {
+        let lowered = (language ?? "").lowercased()
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ["diff", "patch"].contains(lowered) { return "diff" }
+        if ["sh", "bash", "zsh", "shell", "console", "terminal"].contains(lowered) {
+            return body.hasPrefix("git ") ? "git command" : "shell command"
+        }
+        if lowered.isEmpty {
+            // Unlabelled fences are usually a command or a diff; both are
+            // recognisable from the first line and neither should be read.
+            if body.hasPrefix("diff ") || body.hasPrefix("--- ") || body.hasPrefix("+++ ") {
+                return "diff"
+            }
+            if body.hasPrefix("git ") { return "git command" }
+            if let first = body.split(separator: "\n").first,
+               shellVerbs.contains(String(first.split(separator: " ").first ?? "")) {
+                return "shell command"
+            }
+            return "code block"
+        }
+        return "\(lowered) block"
+    }
+
+    static let shellVerbs: Set<String> = [
+        "git", "npm", "npx", "yarn", "pnpm", "cargo", "zig", "swift", "xcodebuild",
+        "make", "cmake", "docker", "kubectl", "ssh", "scp", "rsync", "curl", "wget",
+        "python", "python3", "pip", "pip3", "node", "deno", "bun", "go", "rustc",
+        "brew", "apt", "sudo", "cd", "ls", "rm", "mv", "cp", "mkdir", "cat", "grep",
+        "sed", "awk", "find", "chmod", "chown", "tar", "open", "defaults", "codesign",
+    ]
+
+    private static func spelled(_ count: Int) -> String {
+        switch count {
+        case 2: return "two"
+        case 3: return "three"
+        case 4: return "four"
+        case 5: return "five"
+        default: return "\(count)"
+        }
+    }
+
+    /// One paragraph, with the parts nobody can pronounce turned into the
+    /// short phrase a person would use instead.
+    static func speakableProse(_ text: String) -> String {
+        // A table is data, not a sentence. Naming its size beats reading a
+        // hundred cells separated by commas, which is what used to happen.
+        var lines: [String] = []
+        var tableRows = 0
+        for line in text.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("|") {
+                if !OverviewMarkdownBlock.isTableSeparator(trimmed) { tableRows += 1 }
+                continue
+            }
+            if tableRows > 0 {
+                lines.append(tablePhrase(rows: tableRows))
+                tableRows = 0
+            }
+            lines.append(line)
+        }
+        if tableRows > 0 { lines.append(tablePhrase(rows: tableRows)) }
+
+        var value = lines.joined(separator: "\n")
+        value = value.replacingOccurrences(
+            of: #"\[([^\]]+)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+        // Inline code is judged span by span rather than stripped wholesale:
+        // `retry` is a word, `git filter-repo --force` is not.
+        value = replacingInlineCode(in: value)
+        for marker in ["**", "__", "*", "_"] {
+            value = value.replacingOccurrences(of: marker, with: "")
+        }
+        value = value.replacingOccurrences(
+            of: #"(?m)^\s*(#{1,6}\s+|[-+•]\s+|>\s+|\d+\.\s+)"#,
+            with: "", options: .regularExpression)
+        value = value.replacingOccurrences(
+            of: #"https?://\S+"#, with: "a link", options: .regularExpression)
+        // A bare token nobody could say out loud — a hash, a UUID, a base64
+        // blob — is named or dropped rather than spelled.
+        value = value.replacingOccurrences(
+            of: #"(?<![\w/])[0-9a-fA-F]{7,40}(?![\w/])"#,
+            with: "a commit", options: .regularExpression)
+        value = value.replacingOccurrences(
+            of: #"\S{32,}"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(
+            of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+        return value
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func tablePhrase(rows: Int) -> String {
+        rows <= 1 ? "Then a table." : "Then a table of \(rows) rows."
+    }
+
+    /// Decide, per backticked span, whether it is a word or a machine.
+    private static func replacingInlineCode(in text: String) -> String {
+        var result = ""
+        var rest = Substring(text)
+        while let open = rest.firstIndex(of: "`") {
+            result += rest[..<open]
+            let afterOpen = rest.index(after: open)
+            guard let close = rest[afterOpen...].firstIndex(of: "`") else {
+                result += rest[open...]
+                return result
+            }
+            result += spokenForm(of: String(rest[afterOpen..<close]))
+            rest = rest[rest.index(after: close)...]
+        }
+        result += rest
+        return result
+    }
+
+    /// What a backticked span becomes when spoken.
+    static func spokenForm(of span: String) -> String {
+        let value = span.trimmingCharacters(in: .whitespaces)
+        guard !value.isEmpty else { return "" }
+        let words = value.split(separator: " ")
+        let head = String(words.first ?? "")
+
+        if head == "git" { return "a git command" }
+        if shellVerbs.contains(head) { return "a command" }
+        if value.hasPrefix("http://") || value.hasPrefix("https://") { return "a link" }
+        // A path: say the file, which is the part a person would say. The
+        // character check is what stops a JSON blob — which also contains a
+        // slash — from being read as its own last path component.
+        if value.contains("/"), words.count == 1,
+           value.range(of: #"^[A-Za-z0-9._/~\-]+$"#, options: .regularExpression) != nil {
+            let last = value.split(separator: "/").last.map(String.init) ?? value
+            return last.count <= 24 ? last : "a file"
+        }
+        if value.range(of: #"^[0-9a-fA-F]{7,40}$"#, options: .regularExpression) != nil {
+            return "a commit"
+        }
+        // A short, wordy identifier is readable; a long or symbol-heavy one is
+        // not, and there is no useful way to pronounce it.
+        if value.count <= 24, words.count <= 3,
+           value.range(of: #"^[A-Za-z0-9 _.\-]+$"#, options: .regularExpression) != nil {
+            return value
+        }
+        return words.count > 1 ? "a command" : "a value"
     }
 
     static func plainProse(_ text: String) -> String {

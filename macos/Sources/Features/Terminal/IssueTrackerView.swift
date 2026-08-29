@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// The pane-chrome affordance. Discovery is deliberately data-driven: any
@@ -42,21 +43,18 @@ struct IssueTrackerPaneButton: View {
                 project = discovered
 
                 let diagnostic = [
-                    "pane=\(surface.paneId.map(String.init) ?? "?")",
                     "host=\(host ?? "local")",
-                    "session=\(session ?? "none")",
-                    "pwd=\(cwd ?? "missing")",
-                    "project=\(discovered?.rootPath ?? "none")",
+                    "session=\(session ?? "-")",
+                    "cwd=\(cwd ?? "-")",
+                    "project=\(discovered?.locationLabel ?? "none")",
                 ].joined(separator: " ")
                 if diagnostic != lastDiagnostic {
-                    TrmDiagnostics.log("[issue-tracker] \(diagnostic)")
                     lastDiagnostic = diagnostic
+                    TrmDiagnostics.log("[issue-tracker] pane discovery \(diagnostic)")
                 }
 
-                // Local shell integration invalidates this task when pwd
-                // changes. A restored remote pane has no such event, so retry
-                // periodically in case the session changes directory or its
-                // host was asleep during the first probe.
+                // A remote pane's cwd arrives over SSH and can resolve late.
+                // Keep looking so the button appears without a relaunch.
                 guard host != nil else { break }
                 do {
                     try await Task.sleep(nanoseconds: 30_000_000_000)
@@ -98,8 +96,11 @@ final class IssueTrackerWindowController: NSWindowController, NSWindowDelegate {
             defer: false)
         window.title = "\(project.name) Issues"
         window.titlebarAppearsTransparent = true
-        window.titleVisibility = .visible
-        window.minSize = NSSize(width: 780, height: 560)
+        // The workspace draws its own toolbar in the titlebar band, the way
+        // Xcode and Mail do. The window title would sit on top of it; the
+        // project name is in the toolbar's leading slot instead.
+        window.titleVisibility = .hidden
+        window.minSize = NSSize(width: 900, height: 560)
         window.isReleasedWhenClosed = false
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.contentView = NSHostingView(rootView: IssueTrackerView(model: model))
@@ -126,562 +127,10 @@ final class IssueTrackerWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
-private enum IssueTrackerRoute: Hashable {
-    case board
-    case issue(String)
-}
+// MARK: - Shared formatting
 
-private enum IssueTrackerFilter: String, CaseIterable, Identifiable {
-    case active = "Active"
-    case all = "All"
-    case open = "Open"
-    case staged = "Staged"
-    case complete = "Deployed"
-
-    var id: String { rawValue }
-
-    func includes(_ issue: TrackedIssue) -> Bool {
-        switch self {
-        case .all: return true
-        case .active: return issue.status != .deployed
-        case .open: return issue.status == .open || issue.status == .unverified
-        case .staged: return issue.status == .staged
-        case .complete: return issue.status == .deployed
-        }
-    }
-}
-
-struct IssueTrackerView: View {
-    @ObservedObject var model: IssueTrackerModel
-    @ObservedObject private var monitor = CommandCenterMonitor.shared
-
-    @State private var route: IssueTrackerRoute? = .board
-    @State private var filter: IssueTrackerFilter = .active
-    @State private var search = ""
-    @State private var drafts: [String: String] = [:]
-
-    private var visibleIssues: [TrackedIssue] {
-        model.issues.filter { issue in
-            guard filter.includes(issue) else { return false }
-            let needle = search.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !needle.isEmpty else { return true }
-            return issue.id.localizedCaseInsensitiveContains(needle)
-                || issue.title.localizedCaseInsensitiveContains(needle)
-                || issue.report.localizedCaseInsensitiveContains(needle)
-        }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            trackerHeader
-            Divider().opacity(0.6)
-            NavigationSplitView {
-                sidebar
-                    .navigationSplitViewColumnWidth(min: 230, ideal: 290, max: 380)
-            } detail: {
-                detail
-            }
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear { model.start() }
-        .onDisappear { model.stop() }
-    }
-
-    private var trackerHeader: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "checklist")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(model.project.name)
-                    .font(.system(size: 14, weight: .semibold))
-                Text(model.project.locationLabel)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
-            issueCounts
-            Picker("Show", selection: $filter) {
-                ForEach(IssueTrackerFilter.allCases) { value in
-                    Text(value.rawValue).tag(value)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .frame(width: 330)
-            TextField("Search issues", text: $search)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 220)
-            Button { model.refresh() } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.plain)
-            .help("Refresh issue records and artifacts")
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
-
-    private var issueCounts: some View {
-        HStack(spacing: 7) {
-            countPill(model.issues.filter { $0.status == .open }.count, color: .orange)
-            countPill(model.issues.filter { $0.status == .staged }.count, color: .blue)
-            countPill(model.issues.filter { $0.status == .deployed }.count, color: .green)
-        }
-        .help("Open · staged · deployed")
-    }
-
-    private func countPill(_ count: Int, color: Color) -> some View {
-        Text("\(count)")
-            .font(.system(size: 10, weight: .semibold, design: .rounded))
-            .foregroundStyle(color)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(color.opacity(0.12), in: Capsule())
-    }
-
-    private var sidebar: some View {
-        List(selection: $route) {
-            NavigationLink(value: IssueTrackerRoute.board) {
-                Label("Progress board", systemImage: "square.grid.2x2")
-                    .font(.system(size: 12, weight: .semibold))
-            }
-
-            ForEach(groupedIssues, id: \.section) { group in
-                Section(group.section) {
-                    ForEach(group.issues) { issue in
-                        NavigationLink(value: IssueTrackerRoute.issue(issue.id)) {
-                            HStack(alignment: .top, spacing: 7) {
-                                Circle()
-                                    .fill(statusColor(issue.status))
-                                    .frame(width: 7, height: 7)
-                                    .padding(.top, 4)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(issue.id)
-                                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                    Text(issue.title)
-                                        .font(.system(size: 11.5, weight: .medium))
-                                        .lineLimit(2)
-                                }
-                            }
-                            .padding(.vertical, 2)
-                        }
-                    }
-                }
-            }
-        }
-        .listStyle(.sidebar)
-        .overlay {
-            if model.isLoading && model.issues.isEmpty {
-                ProgressView("Reading issues…")
-                    .controlSize(.small)
-            }
-        }
-    }
-
-    private var groupedIssues: [(section: String, issues: [TrackedIssue])] {
-        var order: [String] = []
-        var grouped: [String: [TrackedIssue]] = [:]
-        for issue in visibleIssues {
-            let section = sectionLabel(issue.section)
-            if grouped[section] == nil { order.append(section) }
-            grouped[section, default: []].append(issue)
-        }
-        return order.map { ($0, grouped[$0] ?? []) }
-    }
-
-    @ViewBuilder
-    private var detail: some View {
-        if let error = model.errorMessage, model.issues.isEmpty {
-            unavailable(
-                title: "Couldn’t read this tracker",
-                systemImage: "exclamationmark.triangle",
-                detail: error)
-        } else {
-            switch route ?? .board {
-            case .board:
-                issueBoard
-            case .issue(let id):
-                if let issue = model.issues.first(where: { $0.id == id }) {
-                    issueDetail(issue)
-                } else {
-                    unavailable(title: "Issue not found", systemImage: "questionmark.folder")
-                }
-            }
-        }
-    }
-
-    private func unavailable(
-        title: String, systemImage: String, detail: String? = nil
-    ) -> some View {
-        VStack(spacing: 10) {
-            Image(systemName: systemImage)
-                .font(.system(size: 34, weight: .light))
-                .foregroundStyle(.secondary)
-            Text(title)
-                .font(.system(size: 16, weight: .semibold))
-            if let detail {
-                Text(detail)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 460)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(30)
-    }
-
-    private var issueBoard: some View {
-        GeometryReader { geometry in
-            let columnCount = Self.columnCount(for: geometry.size.width)
-            let columns = Array(
-                repeating: GridItem(.flexible(minimum: 320), spacing: 12, alignment: .top),
-                count: columnCount)
-            let assignments = model.agentAssignments(monitor.entries)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Agent progress")
-                                .font(.system(size: 22, weight: .bold))
-                            Text("Live transcript activity, evidence, and an issue-scoped steering box.")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if !assignments.unassigned.isEmpty {
-                            Label(
-                                "\(assignments.unassigned.count) unassigned",
-                                systemImage: "person.crop.circle.badge.questionmark")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal, 4)
-
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
-                        ForEach(visibleIssues) { issue in
-                            issueCard(
-                                issue,
-                                agents: assignments.byIssue[issue.id] ?? [])
-                                .frame(maxWidth: .infinity)
-                        }
-                    }
-                }
-                .padding(16)
-            }
-        }
-    }
-
-    private func issueCard(
-        _ issue: TrackedIssue, agents: [CommandCenterMonitor.Entry]
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button { route = .issue(issue.id) } label: {
-                HStack(alignment: .top, spacing: 8) {
-                    statusBadge(issue.status)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(issue.id)
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                        Text(issue.title)
-                            .font(.system(size: 13, weight: .semibold))
-                            .multilineTextAlignment(.leading)
-                            .lineLimit(2)
-                    }
-                    Spacer(minLength: 4)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if let agent = agents.first {
-                agentProgress(agent, compact: true)
-            } else {
-                HStack(spacing: 6) {
-                    Image(systemName: "person.crop.circle.badge.questionmark")
-                    Text("No agent has named \(issue.id) in this project yet")
-                }
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if !issue.artifacts.isEmpty {
-                artifactRow(Array(issue.artifacts.prefix(3)), compact: true)
-            }
-
-            Spacer(minLength: 0)
-            responseComposer(issue, compact: true)
-        }
-        .padding(12)
-        .frame(minHeight: 280, maxHeight: 320, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.primary.opacity(0.045)))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(agents.first?.needsAttention == true
-                    ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.09),
-                    lineWidth: agents.first?.needsAttention == true ? 1.5 : 1))
-    }
-
-    private func issueDetail(_ issue: TrackedIssue) -> some View {
-        GeometryReader { geometry in
-            let horizontal = geometry.size.width >= 920
-            Group {
-                if horizontal {
-                    HStack(spacing: 0) {
-                        issueDocument(issue)
-                            .frame(maxWidth: .infinity)
-                        Divider()
-                        issueWorkPanel(issue)
-                            .frame(width: min(470, geometry.size.width * 0.4))
-                    }
-                } else {
-                    VStack(spacing: 0) {
-                        issueDocument(issue)
-                        Divider()
-                        issueWorkPanel(issue)
-                            .frame(height: min(380, geometry.size.height * 0.45))
-                    }
-                }
-            }
-        }
-    }
-
-    private func issueDocument(_ issue: TrackedIssue) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .top, spacing: 10) {
-                    statusBadge(issue.status)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(issue.id)
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                        Text(issue.title)
-                            .font(.system(size: 25, weight: .bold))
-                            .textSelection(.enabled)
-                    }
-                    Spacer()
-                    if let changed = issue.mostRecentChange {
-                        Text(relativeTime(changed))
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-
-                if issue.statusIsOutOfSync {
-                    Label(
-                        "Index says \(issue.status.rawValue); issue record says \(issue.detailStatus?.rawValue ?? "unknown")",
-                        systemImage: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.orange)
-                        .padding(9)
-                        .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
-                }
-
-                if !issue.report.isEmpty {
-                    documentSection("Tracker report", text: issue.report)
-                }
-                documentSection("Work record", text: issue.detail)
-            }
-            .padding(24)
-            .frame(maxWidth: 900, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-        }
-    }
-
-    private func documentSection(_ title: String, text: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title.uppercased())
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.tertiary)
-                .tracking(0.8)
-            IssueMarkdownView(text: text)
-        }
-    }
-
-    private func issueWorkPanel(_ issue: TrackedIssue) -> some View {
-        let agents = model.agents(for: issue, entries: monitor.entries)
-        return VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Label("Live work", systemImage: "waveform.path.ecg")
-                    .font(.system(size: 12, weight: .semibold))
-                Spacer()
-                if let first = agents.first {
-                    statusDot(first)
-                    Text(first.isWorking ? "Streaming" : first.needsAttention ? "Needs you" : "Idle")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(14)
-            Divider().opacity(0.5)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if agents.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label("No agent linked to \(issue.id)", systemImage: "person.crop.circle.badge.questionmark")
-                                .font(.system(size: 12, weight: .semibold))
-                            Text("Sending below uses the pane that opened this tracker when possible, and prefixes the instruction with the issue ID so subsequent progress stays attached here.")
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(.secondary)
-                        }
-                    } else {
-                        ForEach(agents) { agent in
-                            agentProgress(agent, compact: false)
-                        }
-                    }
-
-                    if !issue.artifacts.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("ARTIFACTS")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.tertiary)
-                                .tracking(0.7)
-                            artifactColumn(issue.artifacts)
-                        }
-                    }
-                }
-                .padding(14)
-            }
-
-            Divider().opacity(0.5)
-            responseComposer(issue, compact: false)
-                .padding(14)
-        }
-        .background(Color.primary.opacity(0.022))
-    }
-
-    private func agentProgress(
-        _ agent: CommandCenterMonitor.Entry, compact: Bool
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                statusDot(agent)
-                Text(agent.watermark)
-                    .font(.system(size: 10.5, weight: .semibold))
-                Text(agent.kind?.displayName ?? "Agent")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if agent.isWorking {
-                    ProgressView().controlSize(.mini)
-                }
-            }
-            Text(agent.message)
-                .font(.system(size: compact ? 10.5 : 11.5))
-                .foregroundStyle(.primary.opacity(0.88))
-                .lineLimit(compact ? 4 : 12)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-            if !compact, !agent.activity.isEmpty {
-                ForEach(agent.activity.suffix(4), id: \.self) { line in
-                    Label(line, systemImage: "terminal")
-                        .font(.system(size: 9.5, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-            }
-            if let error = agent.errorText {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 9.5, weight: .medium))
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            }
-        }
-        .padding(compact ? 9 : 11)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            (agent.needsAttention ? Color.accentColor : Color.primary)
-                .opacity(agent.needsAttention ? 0.09 : 0.035),
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    private func responseComposer(_ issue: TrackedIssue, compact: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .bottom, spacing: 6) {
-                TextField(
-                    compact ? "Steer this issue…" : "Respond or steer the agent working on this issue…",
-                    text: draftBinding(issue.id),
-                    axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(compact ? 1...2 : 2...5)
-                    .onSubmit { sendDraft(issue) }
-                Button { sendDraft(issue) } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: compact ? 18 : 22))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(draft(issue.id).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? Color.secondary : Color.accentColor)
-                .disabled(draft(issue.id).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help("Save under this issue and send to its agent")
-            }
-            if let status = model.submissionStatus[issue.id] {
-                Text(status)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(status.hasPrefix("Not sent") ? Color.red : Color.secondary)
-                    .lineLimit(2)
-            }
-        }
-    }
-
-    private func sendDraft(_ issue: TrackedIssue) {
-        let text = draft(issue.id)
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        model.submit(issue: issue, text: text, entries: monitor.entries)
-        drafts[issue.id] = ""
-    }
-
-    private func draft(_ id: String) -> String { drafts[id] ?? "" }
-    private func draftBinding(_ id: String) -> Binding<String> {
-        Binding(get: { drafts[id] ?? "" }, set: { drafts[id] = $0 })
-    }
-
-    private func artifactRow(_ artifacts: [IssueArtifact], compact: Bool) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            ForEach(artifacts) { artifact in
-                IssueArtifactPreview(model: model, artifact: artifact, compact: compact)
-                    .frame(maxWidth: .infinity)
-            }
-        }
-    }
-
-    private func artifactColumn(_ artifacts: [IssueArtifact]) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            ForEach(artifacts) { artifact in
-                IssueArtifactPreview(model: model, artifact: artifact, compact: false)
-            }
-        }
-    }
-
-    private func statusBadge(_ status: TrackedIssueStatus) -> some View {
-        Text(status.rawValue)
-            .font(.system(size: 8.5, weight: .bold, design: .rounded))
-            .foregroundStyle(statusColor(status))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(statusColor(status).opacity(0.11), in: Capsule())
-    }
-
-    private func statusDot(_ entry: CommandCenterMonitor.Entry) -> some View {
-        Circle()
-            .fill(entry.needsAttention ? Color.accentColor
-                : entry.errorCount > 0 ? Color.red
-                : entry.isWorking ? Color.green : Color.secondary.opacity(0.45))
-            .frame(width: 7, height: 7)
-    }
-
-    private func statusColor(_ status: TrackedIssueStatus) -> Color {
+enum IssueTrackerFormat {
+    static func statusColor(_ status: TrackedIssueStatus) -> Color {
         switch status {
         case .open: return .orange
         case .staged: return .blue
@@ -690,7 +139,27 @@ struct IssueTrackerView: View {
         }
     }
 
-    private func sectionLabel(_ raw: String) -> String {
+    static func agentColor(_ state: IssueAgentSummary.State) -> Color {
+        switch state {
+        case .working: return .green
+        case .waiting: return .orange
+        case .failed: return .red
+        case .finished: return .secondary
+        }
+    }
+
+    /// The same colours, reached from a tag name — the tag is the only place
+    /// agent state is drawn now.
+    static func agentStateColor(_ tagName: String) -> Color {
+        switch tagName {
+        case "working": return .green
+        case "waiting": return .orange
+        case "failed": return .red
+        default: return .secondary
+        }
+    }
+
+    static func sectionLabel(_ raw: String) -> String {
         if let divider = raw.range(of: " — ") {
             let tail = String(raw[divider.upperBound...])
             if let stop = tail.range(of: ".  ") { return String(tail[..<stop.lowerBound]) }
@@ -699,188 +168,337 @@ struct IssueTrackerView: View {
         return raw
     }
 
-    private func relativeTime(_ timestamp: TimeInterval) -> String {
+    /// One formatter, not one per line per render.
+    private static let relative: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: Date(timeIntervalSince1970: timestamp), relativeTo: Date())
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+
+    static func relativeTime(_ timestamp: TimeInterval) -> String {
+        relative.localizedString(
+            for: Date(timeIntervalSince1970: timestamp), relativeTo: Date())
     }
 
-    static func columnCount(for width: CGFloat) -> Int {
-        max(1, Int((max(0, width) + 12) / 360))
-    }
-
-    static func rows(_ issues: [TrackedIssue], columns: Int) -> [[TrackedIssue]] {
-        guard columns > 0 else { return issues.isEmpty ? [] : [issues] }
-        return stride(from: 0, to: issues.count, by: columns).map { start in
-            Array(issues[start..<min(start + columns, issues.count)])
-        }
+    static func byteSize(_ size: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
     }
 }
 
-private struct IssueArtifactPreview: View {
+// MARK: - Keyboard routing
+
+/// A window-scoped key monitor.
+///
+/// One place decides what a key means, and it steps aside entirely while a
+/// text field has the caret. `onKeyPress` is macOS 14 and trm ships to 13.
+private struct TrackerKeyMonitor: NSViewRepresentable {
+    /// Return true to swallow the event.
+    let handler: (NSEvent, Bool) -> Bool
+
+    func makeNSView(context: Context) -> NSView {
+        let view = MonitorView()
+        view.handler = handler
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? MonitorView)?.handler = handler
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
+        (nsView as? MonitorView)?.teardown()
+    }
+
+    final class MonitorView: NSView {
+        var handler: ((NSEvent, Bool) -> Bool)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            teardown()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let window = self.window, event.window === window else {
+                    return event
+                }
+                let editing = window.firstResponder is NSText
+                    || window.firstResponder is NSTextView
+                return self.handler?(event, editing) == true ? nil : event
+            }
+        }
+
+        func teardown() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+
+        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+    }
+}
+
+// MARK: - Root
+
+/// The whole window: a search bar and an outline.
+///
+/// The tracker is a plain-text file organised into headings and one line per
+/// issue, and this is that file with the live agent state written into it as
+/// tags. There is no navigator, no view switcher and no inspector, because
+/// the document is the interface — the earlier three-pane version was an IDE
+/// built around a to-do list.
+struct IssueTrackerView: View {
     @ObservedObject var model: IssueTrackerModel
-    let artifact: IssueArtifact
-    let compact: Bool
+    @StateObject private var state = IssueOutlineState()
+    @FocusState private var focus: IssueOutlineState.FocusTarget?
 
     var body: some View {
-        Group {
-            switch artifact.kind {
-            case .image:
-                image
-            case .text:
-                text
-            case .other:
-                fileLabel
+        VStack(spacing: 0) {
+            searchBar
+            if !state.availableTags.isEmpty {
+                TagFilterBar(state: state)
             }
+            Divider()
+            content
         }
-        .task(id: artifact.loadID) {
-            model.loadArtifact(artifact)
+        .background(Color(nsColor: .textBackgroundColor))
+        .background(TrackerKeyMonitor(handler: handleKey))
+        .onAppear {
+            model.start()
+            state.recompute(rows: model.rows)
+        }
+        .onDisappear { model.stop() }
+        .onReceive(model.$rows) { state.recompute(rows: $0) }
+        .onChange(of: state.search) { _ in state.recompute(rows: model.rows) }
+        .onChange(of: state.collapsed) { _ in state.recompute(rows: model.rows) }
+        .onChange(of: state.focusedProject) { _ in state.recompute(rows: model.rows) }
+        .onChange(of: state.focusTarget) { target in
+            if focus != target { focus = target }
+        }
+        .onChange(of: focus) { value in
+            if state.focusTarget != value { state.focusTarget = value }
         }
     }
 
     @ViewBuilder
-    private var image: some View {
-        if let data = model.artifactData[artifact.id], let image = NSImage(data: data) {
-            VStack(alignment: .leading, spacing: 4) {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: compact ? 68 : 280)
-                    .background(Color.black.opacity(0.18))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                Text(artifact.name)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        } else if let error = model.artifactErrors[artifact.id] {
-            Label(error, systemImage: "exclamationmark.triangle")
-                .font(.system(size: 9))
-                .foregroundStyle(.red)
+    private var content: some View {
+        if let error = model.errorMessage, model.rows.isEmpty {
+            OutlineErrorState(model: model, message: error)
+            Spacer()
+        } else if model.isLoading, model.rows.isEmpty {
+            OutlineLoadingState(model: model)
+        } else if state.projects.isEmpty {
+            OutlineEmptyState(state: state)
+            Spacer()
         } else {
-            ZStack {
-                RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04))
-                ProgressView().controlSize(.mini)
-            }
-            .frame(height: compact ? 58 : 120)
+            outline
         }
     }
 
-    @ViewBuilder
-    private var text: some View {
-        if compact {
-            fileLabel
-        } else if let data = model.artifactData[artifact.id],
-                  let value = String(data: data, encoding: .utf8) {
-            VStack(alignment: .leading, spacing: 5) {
-                Label(artifact.name, systemImage: "doc.text")
+    private var outline: some View {
+        ScrollViewReader { proxy in
+            List(selection: selectionBinding) {
+                ForEach(state.projects) { project in
+                    // Focused, the heading is in the bar instead: repeating it
+                    // over the only section on screen says nothing.
+                    if state.focusedProject == nil {
+                        ProjectLine(
+                            project: project,
+                            collapsed: state.collapsed.contains(project.label),
+                            toggle: { state.toggle(project.label) },
+                            focus: { state.focus(on: project.label) })
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                    }
+
+                    if state.focusedProject != nil
+                        || !state.collapsed.contains(project.label) {
+                        ForEach(project.rows) { row in
+                            TaskLine(
+                                model: model,
+                                state: state,
+                                row: row,
+                                selected: state.selection == row.id,
+                                focus: $focus)
+                                .equatable()
+                                .listRowInsets(EdgeInsets())
+                                .listRowSeparator(.hidden)
+                                .tag(row.id)
+                                .contextMenu { IssueContextMenu(model: model, row: row) }
+                        }
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .onChange(of: state.selection) { selection in
+                guard let selection else { return }
+                proxy.scrollTo(selection, anchor: nil)
+            }
+        }
+    }
+
+    private var selectionBinding: Binding<String?> {
+        Binding(get: { state.selection }, set: { state.select($0) })
+    }
+
+    // MARK: Search bar
+
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Text(model.project.name)
+                .font(.system(size: 12, weight: .semibold))
+                .help(model.project.locationLabel)
+
+            HStack(spacing: 5) {
+                Image(systemName: "magnifyingglass")
                     .font(.system(size: 10, weight: .semibold))
-                Text(String(value.prefix(4_000)))
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .lineLimit(24)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
+                    .foregroundStyle(.tertiary)
+                TextField("Search — try @waiting, @next, not @deployed", text: $state.search)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5))
+                    .focused($focus, equals: .search)
+                    .onSubmit { focus = nil }
+                if !state.search.isEmpty {
+                    Button { state.search = "" } label: {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.tertiary)
+                }
             }
-        } else {
-            fileLabel
+            .padding(.horizontal, 7)
+            .frame(height: 22)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(0.05)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(
+                        focus == .search ? Color.accentColor : Color.primary.opacity(0.12),
+                        lineWidth: focus == .search ? 1.5 : 1))
+
+            if let focused = state.focusedProject {
+                Button { state.focus(on: nil) } label: {
+                    HStack(spacing: 5) {
+                        Text(focused)
+                            .font(.system(size: 10.5))
+                            .lineLimit(1)
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 7)
+                    .frame(height: 18)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.14)))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Focused on \(focused) — click to show every section (⎋)")
+                .fixedSize()
+            }
+
+            Text(countLabel)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+
+            if model.nextIssueID != nil { HandOffButton(model: model) }
+
+            Button { model.refresh() } label: {
+                Image(systemName: "arrow.clockwise").font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tertiary)
+            .help("Refresh (⌘R)")
         }
+        .padding(.leading, 84)
+        .padding(.trailing, 14)
+        .frame(height: 38)
     }
 
-    private var fileLabel: some View {
-        Label(artifact.name, systemImage: artifact.kind == .image ? "photo" : "doc")
-            .font(.system(size: 9.5, weight: .medium))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+    private var countLabel: String {
+        let shown = state.projects.reduce(0) { $0 + $1.rows.count }
+        return shown == model.rows.count ? "\(shown)" : "\(shown)/\(model.rows.count)"
+    }
+
+    // MARK: Keys
+
+    private func handleKey(_ event: NSEvent, editing: Bool) -> Bool {
+        let escape: UInt16 = 53, up: UInt16 = 126, down: UInt16 = 125, ret: UInt16 = 36
+
+        if event.keyCode == escape {
+            state.popFocus()
+            return true
+        }
+        let modifiers = event.modifierFlags
+            .intersection([.command, .option, .control, .shift])
+
+        if modifiers == [.command, .shift] {
+            guard event.charactersIgnoringModifiers?.lowercased() == "n",
+                  let selection = state.selection else { return false }
+            model.markNext(selection)
+            return true
+        }
+        if modifiers == .command {
+            switch event.charactersIgnoringModifiers {
+            case "r": model.refresh(); return true
+            case "f": state.focusTarget = .search; return true
+            // TaskPaper's fold keys, same way round.
+            case "9": state.collapseAll(rows: model.rows); return true
+            case "0": state.expandAll(); return true
+            default: return false
+            }
+        }
+
+        guard !editing, modifiers.isEmpty else { return false }
+        switch event.keyCode {
+        case up: state.moveSelection(by: -1); return true
+        case down: state.moveSelection(by: 1); return true
+        case ret:
+            guard state.selection != nil else { return false }
+            state.focusTarget = .composer
+            return true
+        default: break
+        }
+        guard event.charactersIgnoringModifiers == "/" else { return false }
+        state.focusTarget = .search
+        return true
     }
 }
 
-private struct IssueMarkdownView: View {
-    let text: String
+/// Appears only when an issue is marked. Hands it to an agent that has
+/// stopped; the switch under it does the same the moment one frees up.
+private struct HandOffButton: View {
+    @ObservedObject var model: IssueTrackerModel
+    @ObservedObject private var monitor = CommandCenterMonitor.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            ForEach(Array(OverviewMarkdownBlock.parse(text).enumerated()), id: \.offset) { _, block in
-                blockView(block)
+        Menu {
+            Button("Hand \(model.nextIssueID ?? "it") to \(target?.watermark ?? "an agent")") {
+                model.handOffNext(monitor.entries)
             }
+            .disabled(target == nil)
+            Toggle("Automatically, when an agent frees up",
+                   isOn: $model.handsOffAutomatically)
+            if let status = model.handOffStatus {
+                Divider()
+                Text(status)
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "chevron.right.2").font(.system(size: 8, weight: .black))
+                Text(model.nextIssueID ?? "")
+                    .font(.system(size: 10.5, design: .monospaced))
+            }
+            .foregroundStyle(Color.accentColor)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("The issue marked to work on next")
     }
 
-    @ViewBuilder
-    private func blockView(_ block: OverviewMarkdownBlock) -> some View {
-        switch block {
-        case .heading(let level, let text):
-            Text(markdown(text))
-                .font(.system(size: max(13, 21 - CGFloat(level) * 1.8), weight: .semibold))
-                .padding(.top, level <= 2 ? 6 : 2)
-                .textSelection(.enabled)
-        case .paragraph(let text):
-            Text(markdown(text))
-                .font(.system(size: 12))
-                .lineSpacing(3)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        case .bullets(let items, let ordered):
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text(ordered ? "\(index + 1)." : "•")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 20, alignment: .trailing)
-                        Text(markdown(item))
-                            .font(.system(size: 12))
-                            .textSelection(.enabled)
-                    }
-                }
-            }
-        case .quote(let text):
-            Text(markdown(text))
-                .font(.system(size: 12).italic())
-                .foregroundStyle(.secondary)
-                .padding(.leading, 10)
-                .overlay(alignment: .leading) {
-                    Rectangle().fill(Color.accentColor.opacity(0.55)).frame(width: 2)
-                }
-                .textSelection(.enabled)
-        case .rule:
-            Divider().padding(.vertical, 4)
-        case .table(let headers, let rows):
-            ScrollView(.horizontal) {
-                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
-                    GridRow {
-                        ForEach(headers.indices, id: \.self) { index in
-                            Text(markdown(headers[index]))
-                                .font(.system(size: 10.5, weight: .semibold))
-                        }
-                    }
-                    Divider().gridCellUnsizedAxes(.horizontal)
-                    ForEach(rows.indices, id: \.self) { row in
-                        GridRow {
-                            ForEach(rows[row].indices, id: \.self) { column in
-                                Text(markdown(rows[row][column]))
-                                    .font(.system(size: 10.5))
-                                    .textSelection(.enabled)
-                            }
-                        }
-                    }
-                }
-                .padding(8)
-            }
-            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 6))
-        }
-    }
-
-    private func markdown(_ source: String) -> AttributedString {
-        (try? AttributedString(
-            markdown: source,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(source)
-    }
+    private var target: IssueAgentSummary? { model.handOffTarget(monitor.entries) }
 }

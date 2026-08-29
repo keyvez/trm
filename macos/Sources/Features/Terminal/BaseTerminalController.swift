@@ -2648,7 +2648,9 @@ class BaseTerminalController: NSWindowController,
     /// out of the sidebar that does kill the pane's session, so it asks first
     /// for terminals — a parked pane is off-screen, and its output is easy to
     /// forget about.
-    func closeSidebarPane(_ pane: GridPane) {
+    /// Close a pane of any kind, from wherever it is being closed — the
+    /// sidebar tile's menu, or the grid cell's.
+    func closePane(_ pane: GridPane) {
         switch pane {
         case .terminal(let surface):
             closeSurface(surface)
@@ -2659,7 +2661,7 @@ class BaseTerminalController: NSWindowController,
         case .agentOverview(let overview):
             closeAgentOverview(overview)
         case .stack(let children):
-            for child in children { closeSidebarPane(child) }
+            for child in children { closePane(child) }
         }
     }
 

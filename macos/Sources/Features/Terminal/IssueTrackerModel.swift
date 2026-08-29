@@ -97,6 +97,46 @@ struct TrackedIssue: Identifiable, Hashable, Sendable {
 
 struct IssueTrackerSnapshot: Sendable {
     let issues: [TrackedIssue]
+    /// The issue somebody has marked to be picked up next, if any.
+    let nextIssueID: String?
+
+    init(issues: [TrackedIssue], nextIssueID: String? = nil) {
+        self.issues = issues
+        self.nextIssueID = nextIssueID
+    }
+}
+
+/// The "work on this next" marker, as a file.
+///
+/// One issue id, in the gitignored folder trm already owns and is the only
+/// place it writes. A file rather than a preference because the tracker's
+/// whole premise is that there is no hidden database beside it: this one is
+/// readable by the agent that is about to be handed the issue, editable by
+/// hand, and it travels with the project, so marking something on one machine
+/// is visible on the other.
+enum IssueNextMarker {
+    static let relativePath = "issues/artifacts/next.md"
+
+    static func parse(_ text: String) -> String? {
+        for line in text.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+            guard trimmed.range(of: #"^[A-Za-z]+-[0-9]+$"#, options: .regularExpression) != nil
+            else { continue }
+            return trimmed.uppercased()
+        }
+        return nil
+    }
+
+    static func render(_ issueID: String) -> String {
+        """
+        # trm — the issue to work on next
+        # One issue id. Clear it here or in trm; deleting the file also works.
+
+        \(issueID.uppercased())
+
+        """
+    }
 }
 
 /// Pure parsing kept separate from I/O so a hand-written tracker remains the
@@ -313,8 +353,10 @@ enum IssueTrackerStore {
                     modifiedAt: artifact.modifiedAt,
                     kind: kind(for: artifact.name))
             }
-            return IssueTrackerSnapshot(issues: IssueTrackerParser.parse(
-                index: index, documents: documents, artifacts: artifacts))
+            return IssueTrackerSnapshot(
+                issues: IssueTrackerParser.parse(
+                    index: index, documents: documents, artifacts: artifacts),
+                nextIssueID: response.next.flatMap(IssueNextMarker.parse))
         }
 
         let root = URL(fileURLWithPath: project.rootPath, isDirectory: true)
@@ -335,8 +377,45 @@ enum IssueTrackerStore {
                 values?.contentModificationDate?.timeIntervalSince1970 ?? 0)
         }
         let artifacts = localArtifacts(root: root)
-        return IssueTrackerSnapshot(issues: IssueTrackerParser.parse(
-            index: index, documents: documents, artifacts: artifacts))
+        // Folded into the snapshot rather than read separately: a remote
+        // tracker polls every five seconds, and the marker is one short line.
+        // A second SSH round trip for it would double the polling cost.
+        let next = (try? String(
+            contentsOf: root.appendingPathComponent(IssueNextMarker.relativePath),
+            encoding: .utf8)).flatMap(IssueNextMarker.parse)
+        return IssueTrackerSnapshot(
+            issues: IssueTrackerParser.parse(
+                index: index, documents: documents, artifacts: artifacts),
+            nextIssueID: next)
+    }
+
+    /// Write, or clear, the marker. Clearing removes the file rather than
+    /// leaving an empty one, so the folder says what is true.
+    static func writeNext(
+        _ project: IssueTrackerProject, issueID: String?
+    ) throws {
+        if let issueID,
+           issueID.range(of: #"^[A-Za-z]+-[0-9]+$"#, options: .regularExpression) == nil {
+            throw StoreError.message("Invalid issue id \(issueID).")
+        }
+        if let host = project.remoteHost {
+            let response = try remote(request: [
+                "op": "write_next",
+                "root": project.rootPath,
+                "text": issueID.map(IssueNextMarker.render) ?? "",
+            ], host: host)
+            if let error = response.error { throw StoreError.message(error) }
+            return
+        }
+        let url = URL(fileURLWithPath: project.rootPath, isDirectory: true)
+            .appendingPathComponent(IssueNextMarker.relativePath)
+        guard let issueID else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(IssueNextMarker.render(issueID).utf8).write(to: url, options: .atomic)
     }
 
     static func readArtifact(
@@ -516,9 +595,10 @@ enum IssueTrackerStore {
         let data: String?
         let relativePath: String?
         let sessions: [String: RemoteSessionContext]?
+        let next: String?
 
         enum CodingKeys: String, CodingKey {
-            case error, root, index, documents, artifacts, data, sessions
+            case error, root, index, documents, artifacts, data, sessions, next
             case indexFileName = "index_file"
             case relativePath = "relative"
         }
@@ -703,7 +783,13 @@ try:
                         "relative": relative, "name": name,
                         "size": stat.st_size, "modified": stat.st_mtime
                     })
-        respond({"index": index, "documents": documents, "artifacts": artifacts})
+        next_path = os.path.join(root, "issues", "artifacts", "next.md")
+        next_text = ""
+        if os.path.isfile(next_path):
+            with open(next_path, "r", encoding="utf-8", errors="replace") as handle:
+                next_text = handle.read()
+        respond({"index": index, "documents": documents, "artifacts": artifacts,
+                 "next": next_text})
 
     elif op == "read_artifact":
         root = os.path.realpath(os.path.expanduser(request["root"]))
@@ -736,6 +822,21 @@ try:
                 handle.write("\n")
             handle.write(request["block"])
         respond({"relative": os.path.relpath(path, root).replace(os.sep, "/")})
+
+    elif op == "write_next":
+        root = os.path.realpath(os.path.expanduser(request["root"]))
+        artifacts_root = os.path.realpath(os.path.join(root, "issues", "artifacts"))
+        path = os.path.realpath(os.path.join(artifacts_root, "next.md"))
+        if not within(path, artifacts_root):
+            raise ValueError("Marker path leaves the issue tracker")
+        text = request.get("text", "")
+        if text:
+            os.makedirs(artifacts_root, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+        elif os.path.exists(path):
+            os.remove(path)
+        respond({"relative": "issues/artifacts/next.md"})
 
     else:
         raise ValueError("Unknown issue tracker operation")
@@ -818,6 +919,249 @@ actor IssueTrackerDiscoveryCache {
     }
 }
 
+/// What one agent is doing, reduced to the four things the workspace draws.
+///
+/// The monitor's `Entry` carries a live surface reference and a whole
+/// transcript; a row must not. This is the value the list diffs on, so a
+/// streaming message that changes nothing visible changes nothing at all.
+struct IssueAgentSummary: Identifiable, Equatable {
+    /// The four states the workspace distinguishes, in the order they win.
+    /// "Finished" is the absence of the other three, not a separate signal:
+    /// an agent with nothing open and no question has had its say.
+    enum State: String, Equatable {
+        case waiting
+        case failed
+        case working
+        case finished
+
+        var label: String {
+            switch self {
+            case .waiting: return "waiting for you"
+            case .failed: return "failed"
+            case .working: return "working"
+            case .finished: return "finished"
+            }
+        }
+
+        /// One word, because a tag is one word.
+        var tagName: String {
+            switch self {
+            case .waiting: return "waiting"
+            case .failed: return "failed"
+            case .working: return "working"
+            case .finished: return "done"
+            }
+        }
+    }
+
+    let id: ObjectIdentifier
+    let paneId: Int
+    /// The pane's own label. This is how somebody maps a row back to a cell,
+    /// so it is shown verbatim rather than prettified.
+    let watermark: String
+    /// "Claude", "Codex", or "Agent" when the kind could not be established.
+    let kindLabel: String
+    let kindIsKnown: Bool
+    let state: State
+    /// The sentence to lead with: what the agent said, not what it typed.
+    let headline: String
+    let message: String
+    let activity: [String]
+    let errorText: String?
+    let updatedAt: Date?
+
+    /// The watermark reduced to something that can follow an `@`.
+    var tagName: String {
+        let cleaned = watermark.unicodeScalars.map { scalar -> Character in
+            CharacterSet.alphanumerics.contains(scalar) || scalar == "-" || scalar == "_"
+                ? Character(scalar) : "-"
+        }
+        return String(cleaned).replacingOccurrences(
+            of: "-+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    init(_ entry: CommandCenterMonitor.Entry) {
+        id = entry.id
+        paneId = entry.paneId
+        watermark = entry.watermark
+        kindLabel = entry.kind?.displayName ?? "Agent"
+        kindIsKnown = entry.kind != nil
+        // A question outranks everything: it is the only state where the
+        // agent has stopped and is waiting on this window specifically.
+        // Errors only mean "failed" once the agent has stopped working —
+        // a failed tool call mid-turn is usually one the agent recovers from.
+        if entry.needsAttention {
+            state = .waiting
+        } else if entry.isWorking {
+            state = .working
+        } else if entry.errorCount > 0 {
+            state = .failed
+        } else {
+            state = .finished
+        }
+        message = entry.message
+        activity = entry.activity
+        errorText = entry.errorText
+        updatedAt = entry.updatedAt
+        headline = Self.headline(entry: entry, state: state)
+    }
+
+    /// The developer update, never a command line.
+    ///
+    /// `Entry.message` is already the summarizer's paragraph in the good case
+    /// and a tool phrase in the bad one. Prefer the first real sentence of it;
+    /// when the agent has failed, the error is the more useful headline.
+    private static func headline(
+        entry: CommandCenterMonitor.Entry, state: State
+    ) -> String {
+        if state == .failed, let error = entry.errorText, !error.isEmpty {
+            return condense(error)
+        }
+        let text = condense(entry.message)
+        if !text.isEmpty { return text }
+        switch state {
+        case .working: return "Working…"
+        case .waiting: return "Waiting for you."
+        case .failed: return "The last turn ended in an error."
+        case .finished: return "Finished; nothing open."
+        }
+    }
+
+    private static func condense(_ source: String) -> String {
+        var collected: [String] = []
+        for line in source.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                if !collected.isEmpty { break }
+                continue
+            }
+            collected.append(trimmed)
+            if collected.joined(separator: " ").count >= 200 { break }
+        }
+        let joined = collected.joined(separator: " ")
+        guard joined.count > 220 else { return joined }
+        return String(joined.prefix(219)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+}
+
+/// One line of the workspace: an issue, plus whichever agents have named it.
+///
+/// Built once per monitor update rather than once per view body, and
+/// `Equatable` so an unchanged row is an unchanged view.
+struct IssueRow: Identifiable, Equatable {
+    /// One `@tag` on a task line.
+    ///
+    /// Everything the old workspace said with a badge, a pill, a coloured
+    /// edge or a whole column is a tag here: status, the agent and what it is
+    /// doing, the artifact count, drift. One vocabulary, and the same strings
+    /// the search bar matches — so what you can see is exactly what you can
+    /// filter by, which is the whole trick TaskPaper plays.
+    struct Tag: Hashable {
+        enum Role: Hashable {
+            case status
+            case agent
+            case agentState
+            case next
+            case meta
+            case warning
+        }
+
+        let name: String
+        let value: String?
+        let role: Role
+
+        var text: String { value.map { "@\(name)(\($0))" } ?? "@\(name)" }
+    }
+
+    /// What the row's update line is describing, so it can be iconed without
+    /// re-deriving the reason.
+    enum UpdateKind: Equatable {
+        case question
+        case working
+        case error
+        case record
+    }
+
+    let issue: TrackedIssue
+    let agents: [IssueAgentSummary]
+    /// The one line the row is allowed to say about progress, resolved once
+    /// here rather than re-parsed out of the report on every body evaluation.
+    let latestUpdate: String
+    let updateKind: UpdateKind
+    /// Marked as the one to pick up next.
+    let isNext: Bool
+    /// The task line's trailing tags, in the order they are drawn.
+    let tags: [Tag]
+
+    var id: String { issue.id }
+    var agent: IssueAgentSummary? { agents.first }
+
+    init(issue: TrackedIssue, agents: [IssueAgentSummary], isNext: Bool = false) {
+        self.issue = issue
+        self.agents = agents
+        self.isNext = isNext
+        let agent = agents.first
+        switch agent?.state {
+        case .waiting: updateKind = .question
+        case .failed: updateKind = .error
+        case .working: updateKind = .working
+        case .finished, nil: updateKind = .record
+        }
+        if let agent {
+            latestUpdate = agent.headline
+        } else {
+            let summary = issue.summary
+            // The tracker's report is free-form prose; a note gets one line.
+            latestUpdate = summary.isEmpty
+                ? "No agent has named \(issue.id) in this project yet."
+                : summary.replacingOccurrences(of: "\n", with: " ")
+        }
+
+        var tags: [Tag] = []
+        if isNext { tags.append(Tag(name: "next", value: nil, role: .next)) }
+        tags.append(Tag(
+            name: issue.status.rawValue.lowercased(), value: nil, role: .status))
+        if let agent {
+            tags.append(Tag(name: agent.tagName, value: nil, role: .agent))
+            tags.append(Tag(name: agent.state.tagName, value: nil, role: .agentState))
+        }
+        if !issue.artifacts.isEmpty {
+            tags.append(Tag(
+                name: "artifacts", value: "\(issue.artifacts.count)", role: .meta))
+        }
+        if issue.statusIsOutOfSync {
+            tags.append(Tag(
+                name: "drift",
+                value: issue.detailStatus?.rawValue.lowercased(),
+                role: .warning))
+        }
+        if issue.section == "Not present in the index" {
+            tags.append(Tag(name: "unindexed", value: nil, role: .warning))
+        }
+        self.tags = tags
+    }
+
+    /// Whether this row carries a tag, for the search bar.
+    func hasTag(_ name: String, value: String?) -> Bool {
+        tags.contains { tag in
+            guard tag.name.caseInsensitiveCompare(name) == .orderedSame else { return false }
+            guard let value else { return true }
+            return tag.value?.localizedCaseInsensitiveContains(value) == true
+        }
+    }
+
+    /// Free text matches the things the outline actually shows, plus the
+    /// tracker report behind the note line.
+    func matchesText(_ needle: String) -> Bool {
+        issue.id.localizedCaseInsensitiveContains(needle)
+            || issue.title.localizedCaseInsensitiveContains(needle)
+            || latestUpdate.localizedCaseInsensitiveContains(needle)
+            || issue.report.localizedCaseInsensitiveContains(needle)
+    }
+
+}
+
 @MainActor
 final class IssueTrackerModel: ObservableObject {
     struct AgentAssignments {
@@ -835,15 +1179,58 @@ final class IssueTrackerModel: ObservableObject {
     @Published private(set) var submissionStatus: [String: String] = [:]
     @Published private(set) var remoteWorkingDirectories: [String: String] = [:]
 
+    /// The workspace's row model, rebuilt once per monitor update and once per
+    /// tracker change — never per view body. The old board asked
+    /// `agents(for:)` inside every card, which rescanned every transcript for
+    /// every one of fasmac's 65 issues on each streaming message.
+    @Published private(set) var rows: [IssueRow] = []
+    /// Project agents that no issue claims. They are the reason the navigator
+    /// has an "Unassigned" group: an agent working in this repo on nothing the
+    /// tracker knows about is a thing to notice, not to hide.
+    @Published private(set) var unassignedAgents: [IssueAgentSummary] = []
+    @Published private(set) var projectAgentCount = 0
+    @Published private(set) var lastRefreshedAt: Date?
+    @Published private(set) var isRefreshing = false
+    /// The issue marked to be picked up next, mirrored from
+    /// `issues/artifacts/next.md`.
+    @Published private(set) var nextIssueID: String?
+    @Published private(set) var handOffStatus: String?
+    /// Hand the marked issue over the moment an agent frees up.
+    ///
+    /// Off by default and remembered per project. This is the one control in
+    /// the window that types into a live terminal without being asked twice,
+    /// so it is a thing you switch on deliberately rather than a default you
+    /// discover afterwards.
+    @Published var handsOffAutomatically: Bool {
+        didSet {
+            guard handsOffAutomatically != oldValue else { return }
+            UserDefaults.standard.set(handsOffAutomatically, forKey: Self.autoKey(project))
+            if handsOffAutomatically {
+                handOffIfAnAgentIsFree(CommandCenterMonitor.shared.entries)
+            }
+        }
+    }
+
     private weak var sourceSurface: Ghostty.SurfaceView?
     private var timer: Timer?
     private var refreshInFlight = false
     private var remoteContextRefreshInFlight = false
     private var artifactVersions: [String: String] = [:]
+    private var monitorSubscription: AnyCancellable?
+    /// When each agent was last handed something. The monitor takes a few
+    /// seconds to notice an agent has started, and without this the automatic
+    /// hand-off would fire again on every scan in that gap.
+    private var handedOffAt: [ObjectIdentifier: Date] = [:]
+    private static let handOffCooldown: TimeInterval = 45
 
     init(project: IssueTrackerProject, sourceSurface: Ghostty.SurfaceView?) {
         self.project = project
         self.sourceSurface = sourceSurface
+        handsOffAutomatically = UserDefaults.standard.bool(forKey: Self.autoKey(project))
+    }
+
+    private static func autoKey(_ project: IssueTrackerProject) -> String {
+        "IssueTracker.autoHandOff.\(project.id)"
     }
 
     func updateSource(_ surface: Ghostty.SurfaceView) {
@@ -852,6 +1239,13 @@ final class IssueTrackerModel: ObservableObject {
 
     func start() {
         CommandCenterMonitor.shared.subscribe()
+        // One rebuild per monitor publish. Subscribing here rather than in the
+        // view keeps the derivation off the render path entirely: a body
+        // evaluation now reads a finished array.
+        monitorSubscription = CommandCenterMonitor.shared.entriesPublisher
+            .sink { [weak self] entries in
+                self?.rebuildRows(entries: entries)
+            }
         refresh()
         guard timer == nil else { return }
         let interval: TimeInterval = project.remoteHost == nil ? 2 : 5
@@ -863,6 +1257,7 @@ final class IssueTrackerModel: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        monitorSubscription = nil
         CommandCenterMonitor.shared.unsubscribe()
     }
 
@@ -870,6 +1265,7 @@ final class IssueTrackerModel: ObservableObject {
         refreshRemotePaneContexts()
         guard !refreshInFlight else { return }
         refreshInFlight = true
+        isRefreshing = true
         let project = project
         let startedAt = Date()
         Task { [weak self] in
@@ -878,6 +1274,7 @@ final class IssueTrackerModel: ObservableObject {
             }.value
             guard let self else { return }
             self.refreshInFlight = false
+            self.isRefreshing = false
             let wasInitialLoad = self.isLoading
             self.isLoading = false
             switch result {
@@ -886,10 +1283,14 @@ final class IssueTrackerModel: ObservableObject {
                 // to reconcile the whole board even though no file changed.
                 // The polling interval is intentionally short for live work;
                 // make the no-change path correspondingly cheap.
-                if self.issues != snapshot.issues {
+                let markerMoved = self.nextIssueID != snapshot.nextIssueID
+                if markerMoved { self.nextIssueID = snapshot.nextIssueID }
+                if self.issues != snapshot.issues || markerMoved {
                     self.issues = snapshot.issues
+                    self.rebuildRows(entries: CommandCenterMonitor.shared.entries)
                 }
                 self.errorMessage = nil
+                self.lastRefreshedAt = Date()
                 if wasInitialLoad {
                     let elapsed = Date().timeIntervalSince(startedAt)
                     TrmDiagnostics.log(
@@ -983,6 +1384,189 @@ final class IssueTrackerModel: ObservableObject {
             projectAgents: candidates,
             byIssue: byIssue,
             unassigned: candidates.filter { !assigned.contains($0.id) })
+    }
+
+    /// Fold one monitor snapshot into the row model.
+    ///
+    /// Everything expensive happens here, once: the transcript scan that maps
+    /// agents to issue ids, and the reduction of a live `Entry` to the value a
+    /// row can be compared against. Unchanged results are not republished, so
+    /// a poll that finds nothing new costs one array comparison and no
+    /// SwiftUI invalidation at all.
+    func rebuildRows(entries: [CommandCenterMonitor.Entry]) {
+        let assignments = agentAssignments(entries)
+        var summaries: [ObjectIdentifier: IssueAgentSummary] = [:]
+        summaries.reserveCapacity(assignments.projectAgents.count)
+        for entry in assignments.projectAgents {
+            summaries[entry.id] = IssueAgentSummary(entry)
+        }
+
+        var next: [IssueRow] = []
+        next.reserveCapacity(issues.count)
+        for issue in issues {
+            let assigned = (assignments.byIssue[issue.id] ?? [])
+                .compactMap { summaries[$0.id] }
+                // The row shows one agent; make it a deterministic one rather
+                // than whichever pane the grid happened to enumerate first.
+                .sorted { lhs, rhs in
+                    if lhs.state != rhs.state {
+                        return Self.agentPriority(lhs.state) < Self.agentPriority(rhs.state)
+                    }
+                    return lhs.paneId < rhs.paneId
+                }
+            next.append(IssueRow(
+                issue: issue, agents: assigned, isNext: issue.id == nextIssueID))
+        }
+        if rows != next { rows = next }
+
+        handOffIfAnAgentIsFree(entries)
+
+        let unassigned = assignments.unassigned.compactMap { summaries[$0.id] }
+        if unassignedAgents != unassigned { unassignedAgents = unassigned }
+        if projectAgentCount != assignments.projectAgents.count {
+            projectAgentCount = assignments.projectAgents.count
+        }
+    }
+
+    // MARK: The next issue
+
+    /// Mark an issue to be picked up next, or clear the mark.
+    ///
+    /// Exactly one issue carries it. Marking a second moves the mark rather
+    /// than collecting a list: "the one to work on next" is a single answer,
+    /// and a window that quietly accumulated five of them would be a queue
+    /// wearing a different word.
+    func markNext(_ issueID: String?) {
+        let normalized = issueID?.uppercased()
+        let resolved = normalized == nextIssueID ? nil : normalized
+        guard resolved != nextIssueID else { return }
+        let previous = nextIssueID
+        nextIssueID = resolved
+        rebuildRows(entries: CommandCenterMonitor.shared.entries)
+
+        let project = project
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try IssueTrackerStore.writeNext(project, issueID: resolved) }
+            }.value
+            guard let self else { return }
+            if case .failure(let error) = result {
+                // Put it back: the file is the truth, and a mark the window
+                // shows but the folder does not have is a lie the next
+                // refresh would silently correct anyway.
+                self.nextIssueID = previous
+                self.handOffStatus = "Couldn’t mark it: \(error.localizedDescription)"
+                self.rebuildRows(entries: CommandCenterMonitor.shared.entries)
+            } else {
+                self.handOffStatus = nil
+            }
+        }
+    }
+
+    /// Which agent would receive the marked issue right now.
+    ///
+    /// Only an agent that has actually stopped: handing work to one that is
+    /// mid-turn interleaves it with what it is already doing, and handing it
+    /// to one that just asked you a question buries the question.
+    func handOffTarget(_ entries: [CommandCenterMonitor.Entry]) -> IssueAgentSummary? {
+        let byIssue = agentAssignments(entries)
+        var free: [IssueAgentSummary] = []
+        for entry in byIssue.unassigned {
+            let summary = IssueAgentSummary(entry)
+            guard summary.state == .finished else { continue }
+            if let handed = handedOffAt[summary.id],
+               Date().timeIntervalSince(handed) < Self.handOffCooldown { continue }
+            free.append(summary)
+        }
+        // The pane this window was opened from wins a tie: it is the one the
+        // person was last looking at.
+        if let sourceSurface,
+           let preferred = free.first(where: { $0.id == ObjectIdentifier(sourceSurface) }) {
+            return preferred
+        }
+        return free.min { $0.paneId < $1.paneId }
+    }
+
+    /// Hand the marked issue to an agent and clear the mark.
+    @discardableResult
+    func handOffNext(_ entries: [CommandCenterMonitor.Entry]) -> Bool {
+        guard let issueID = nextIssueID,
+              let issue = issues.first(where: { $0.id == issueID }) else { return false }
+        guard let target = handOffTarget(entries),
+              let entry = entry(for: target),
+              let surface = entry.surface else {
+            handOffStatus = "No agent in this project is free right now."
+            return false
+        }
+        // One line. A newline in a message sent to an agent's prompt submits
+        // it early, and half an instruction is worse than none.
+        let text = "[Issue \(issue.id)] Work on this next: \(Self.oneLine(issue.title)). "
+            + "The record is issues/\(issue.id).md; put evidence in "
+            + "issues/artifacts/\(issue.id)/."
+
+        handedOffAt[target.id] = Date()
+        handOffStatus = "Handing \(issue.id) to \(target.watermark)…"
+        let project = project
+        Task { [weak self] in
+            // Recorded before delivery, exactly as a typed response is: if the
+            // pane dies between the two, the instruction still has a home.
+            let result = await Task.detached(priority: .userInitiated) {
+                Result {
+                    try IssueTrackerStore.appendResponse(
+                        project: project,
+                        issueID: issue.id,
+                        text: "Picked up as the next issue to work on.",
+                        delivery: "handed to \(target.kindLabel) in \(target.watermark)")
+                }
+            }.value
+            guard let self else { return }
+            if case .failure(let error) = result {
+                self.handedOffAt[target.id] = nil
+                self.handOffStatus = "Not handed over: \(error.localizedDescription)"
+                return
+            }
+            if Self.send(text, to: surface) {
+                self.handOffStatus = "\(issue.id) handed to \(target.watermark)"
+                self.markNext(nil)
+            } else {
+                self.handedOffAt[target.id] = nil
+                self.handOffStatus =
+                    "Saved under \(issue.id), but \(target.watermark) disappeared"
+            }
+        }
+        return true
+    }
+
+    /// The opt-in half: same hand-off, triggered by an agent going quiet.
+    private func handOffIfAnAgentIsFree(_ entries: [CommandCenterMonitor.Entry]) {
+        guard handsOffAutomatically, nextIssueID != nil else { return }
+        // "No agents found yet" and "no agents free" are different answers,
+        // and only one of them should dispatch work.
+        guard CommandCenterMonitor.shared.hasSettled, !isLoading else { return }
+        guard handOffTarget(entries) != nil else { return }
+        handOffNext(entries)
+    }
+
+    private static func oneLine(_ text: String) -> String {
+        text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private static func agentPriority(_ state: IssueAgentSummary.State) -> Int {
+        switch state {
+        case .waiting: return 0
+        case .failed: return 1
+        case .working: return 2
+        case .finished: return 3
+        }
+    }
+
+    /// The live monitor entry behind a row's agent, for the actions that need
+    /// the surface itself — revealing the pane, opening its overview.
+    func entry(for agent: IssueAgentSummary) -> CommandCenterMonitor.Entry? {
+        CommandCenterMonitor.shared.entries.first { $0.id == agent.id }
     }
 
     func submit(

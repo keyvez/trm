@@ -597,7 +597,7 @@ struct AgentOverviewView: View {
 
                 OverviewSpeakButton(
                     speaker: pane.speaker,
-                    text: OverviewSpeaker.developerBriefing(for: pane.displayedTranscript)
+                    transcript: pane.displayedTranscript
                 )
 
                 Button(action: { pane.toggleBionic() }) {
@@ -1874,25 +1874,37 @@ private extension View {
 /// nested object's changes.
 private struct OverviewSpeakButton: View {
     @ObservedObject var speaker: OverviewSpeaker
-    let text: String
+    let transcript: AgentTranscript
 
+    /// The whole reply by default; the short briefing on ⌥-click.
+    ///
+    /// This used to be the other way round, and the summary threw away most of
+    /// what the agent said — you pressed play to hear the reply and got three
+    /// ranked sentences instead. Reading it all is the ordinary want, so the
+    /// briefing is the one behind a modifier. The flags are read at the moment
+    /// of the click, since SwiftUI's tap gestures do not carry them.
     var body: some View {
-        Button(action: { speaker.toggle(text) }) {
+        Button {
+            let summarize = NSEvent.modifierFlags.contains(.option)
+            speaker.toggle(summarize
+                ? OverviewSpeaker.developerBriefing(for: transcript)
+                : OverviewSpeaker.fullReading(for: transcript))
+        } label: {
             Image(systemName: speaker.isActive ? "stop.fill" : "speaker.wave.2")
                 .font(.system(size: 10))
                 .foregroundStyle(speaker.isActive ? Color.accentColor : Color.secondary)
                 .frame(width: 16, height: 16)
         }
         .buttonStyle(.plain)
-        .disabled(text.isEmpty && !speaker.isActive)
+        .disabled(!speaker.isActive && OverviewSpeaker.fullReading(for: transcript).isEmpty)
         .help(helpText)
     }
 
     private var helpText: String {
         if speaker.isActive { return "Stop speaking" }
         if let error = speaker.lastError { return error }
-        return text.isEmpty
-            ? "No important developer update to speak"
-            : "Speak the important developer update"
+        return OverviewSpeaker.fullReading(for: transcript).isEmpty
+            ? "Nothing to speak"
+            : "Speak the reply · ⌥-click for the short briefing"
     }
 }

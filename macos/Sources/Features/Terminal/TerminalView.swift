@@ -295,6 +295,9 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         onPeekPane: { pane in
                             (self.delegate as? BaseTerminalController)?.peekPane(pane)
                         },
+                        onClosePane: { pane in
+                            (self.delegate as? BaseTerminalController)?.closePane(pane)
+                        },
                         onSwitchPaneRemote: { pane in
                             (self.delegate as? BaseTerminalController)?.switchPaneToRemote(pane)
                         },
@@ -524,7 +527,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         (delegate as? BaseTerminalController)?.restorePaneFromSidebar(pane.id)
                     },
                     onClose: { pane in
-                        (delegate as? BaseTerminalController)?.closeSidebarPane(pane)
+                        (delegate as? BaseTerminalController)?.closePane(pane)
                     },
                     onRestoreAll: {
                         (delegate as? BaseTerminalController)?.restoreAllPanesFromSidebar()
