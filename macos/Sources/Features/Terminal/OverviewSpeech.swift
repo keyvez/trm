@@ -195,16 +195,51 @@ final class OverviewSpeaker: NSObject, ObservableObject {
     @Published private(set) var isSpeaking = false
     @Published private(set) var isPreparing = false
     @Published private(set) var lastError: String?
+    /// Playback rate, pitch held steady. Remembered between replies — someone
+    /// who listens at 1.5× wants 1.5× next time too.
+    @Published var rate: Float = UserDefaults.standard.object(forKey: rateKey) as? Float ?? 1 {
+        didSet {
+            let clamped = min(max(rate, 0.5), 2)
+            if clamped != rate { rate = clamped; return }
+            timePitch?.rate = rate
+            UserDefaults.standard.set(rate, forKey: Self.rateKey)
+        }
+    }
+    /// How far in, and how much there is, in seconds of rendered audio.
+    @Published private(set) var elapsed: TimeInterval = 0
+    @Published private(set) var rendered: TimeInterval = 0
+    /// True once the whole reply has been generated; until then `rendered`
+    /// is still growing and the end of the scrubber is not the end of the text.
+    @Published private(set) var isComplete = false
 
     var isActive: Bool { isSpeaking || isPreparing }
+    var canSeek: Bool { !buffers.isEmpty }
+
+    private static let rateKey = "OverviewSpeaker.rate"
 
     private var audioEngine: AVAudioEngine?
     private var playerNode: AVAudioPlayerNode?
+    private var timePitch: AVAudioUnitTimePitch?
     private var generationTask: Task<Void, Never>?
     private var requestID: UUID?
     private var pendingBuffers = 0
     private var streamEnded = false
     private var sampleRate: Double?
+
+    /// Every buffer rendered for this reply, in order.
+    ///
+    /// Kept so playback can go backwards: the synthesiser streams forwards
+    /// once and cannot be asked to produce the same audio again, so seeking
+    /// means rescheduling audio already in hand. At roughly half a second per
+    /// buffer a long reply is a few hundred of them — a few megabytes, freed
+    /// when playback stops.
+    private var buffers: [AVAudioPCMBuffer] = []
+    /// Index of the next buffer to schedule; everything before it has played
+    /// or been skipped.
+    private var cursor = 0
+    /// Seconds of audio before `cursor`, so elapsed does not need the node's
+    /// clock — which resets on every reschedule.
+    private var playedSeconds: TimeInterval = 0
 
     override init() {
         super.init()
@@ -225,6 +260,12 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         lastError = nil
         streamEnded = false
         pendingBuffers = 0
+        buffers = []
+        cursor = 0
+        playedSeconds = 0
+        elapsed = 0
+        rendered = 0
+        isComplete = false
         generationTask = Task { [weak self] in
             do {
                 for try await chunk in LocalNeuralSpeechEngine.shared.stream(trimmed) {
@@ -234,6 +275,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
                 }
                 guard let self, self.requestID == id else { return }
                 self.streamEnded = true
+                self.isComplete = true
                 self.finishIfDrained()
             } catch is CancellationError {
                 // The stop button is not an error.
@@ -282,18 +324,89 @@ final class OverviewSpeaker: NSObject, ObservableObject {
             }
         }
 
+        buffers.append(buffer)
+        rendered += Double(frames) / chunk.sampleRate
+        // Only schedule what the cursor has reached. After a skip back the
+        // cursor trails the newest buffer, and freshly arriving audio must
+        // queue behind the replay rather than jump the line.
+        if cursor == buffers.count - 1 {
+            enqueue(buffer)
+            cursor = buffers.count
+        }
+        if !playerNode.isPlaying { playerNode.play() }
+        isPreparing = false
+        isSpeaking = true
+    }
+
+    /// Hand one buffer to the node and count it as in flight.
+    private func enqueue(_ buffer: AVAudioPCMBuffer) {
+        guard let playerNode else { return }
+        let seconds = Double(buffer.frameLength) / buffer.format.sampleRate
         pendingBuffers += 1
         playerNode.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) {
             [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.pendingBuffers = max(0, self.pendingBuffers - 1)
+                self.playedSeconds += seconds
+                self.elapsed = self.playedSeconds
+                // A skip back leaves the cursor behind the rendered end;
+                // keep feeding it as the node drains.
+                if self.cursor < self.buffers.count {
+                    let next = self.buffers[self.cursor]
+                    self.cursor += 1
+                    self.enqueue(next)
+                    if self.playerNode?.isPlaying == false { self.playerNode?.play() }
+                }
                 self.finishIfDrained()
             }
         }
-        if !playerNode.isPlaying { playerNode.play() }
-        isPreparing = false
-        isSpeaking = true
+    }
+
+    // MARK: Seeking
+
+    /// Move by `offset` seconds through the audio rendered so far.
+    ///
+    /// Seeks land on a buffer boundary — about half a second — because that is
+    /// the granularity the synthesiser produced and splitting one is not worth
+    /// the arithmetic. Backwards is the useful direction: it is for "what did
+    /// it just say", not for scrubbing a recording.
+    func seek(by offset: TimeInterval) {
+        guard !buffers.isEmpty else { return }
+        let target = max(0, min(playedSeconds + offset, rendered))
+        var index = 0
+        var seconds: TimeInterval = 0
+        while index < buffers.count {
+            let length = Double(buffers[index].frameLength) / buffers[index].format.sampleRate
+            if seconds + length > target { break }
+            seconds += length
+            index += 1
+        }
+        restart(from: index, at: seconds)
+    }
+
+    func restart() { restart(from: 0, at: 0) }
+
+    private func restart(from index: Int, at seconds: TimeInterval) {
+        guard let playerNode else { return }
+        // Stopping clears the node's queue, which is the only way to unschedule
+        // buffers already handed to it.
+        playerNode.stop()
+        pendingBuffers = 0
+        cursor = index
+        playedSeconds = seconds
+        elapsed = seconds
+        // Prime a few so playback resumes without waiting on the generator.
+        let priming = min(buffers.count, index + 8)
+        while cursor < priming {
+            let buffer = buffers[cursor]
+            cursor += 1
+            enqueue(buffer)
+        }
+        if cursor > index {
+            playerNode.play()
+            isSpeaking = true
+        }
     }
 
     private func configureAudio(sampleRate: Double) throws {
@@ -303,16 +416,23 @@ final class OverviewSpeaker: NSObject, ObservableObject {
             standardFormatWithSampleRate: sampleRate, channels: 1) else {
             throw LocalNeuralSpeechEngine.SpeechError.render("Unsupported speech sample rate.")
         }
+        // Time-pitch rather than varispeed: changing the rate should make the
+        // voice faster, not higher.
+        let speed = AVAudioUnitTimePitch()
+        speed.rate = min(max(rate, 0.5), 2)
         engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: format)
+        engine.attach(speed)
+        engine.connect(node, to: speed, format: format)
+        engine.connect(speed, to: engine.mainMixerNode, format: format)
         try engine.start()
         self.audioEngine = engine
         self.playerNode = node
+        self.timePitch = speed
         self.sampleRate = sampleRate
     }
 
     private func finishIfDrained() {
-        guard streamEnded, pendingBuffers == 0 else { return }
+        guard streamEnded, pendingBuffers == 0, cursor >= buffers.count else { return }
         stopAudio()
         generationTask = nil
         requestID = nil
@@ -325,8 +445,14 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         audioEngine?.stop()
         playerNode = nil
         audioEngine = nil
+        timePitch = nil
         sampleRate = nil
         pendingBuffers = 0
+        buffers = []
+        cursor = 0
+        playedSeconds = 0
+        elapsed = 0
+        rendered = 0
     }
 
     /// Questions, failures, outcomes, tests, deploy state, and decisions make

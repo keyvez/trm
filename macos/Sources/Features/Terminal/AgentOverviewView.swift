@@ -600,6 +600,10 @@ struct AgentOverviewView: View {
                     transcript: pane.displayedTranscript
                 )
 
+                if pane.speaker.isActive {
+                    OverviewPlaybackControls(speaker: pane.speaker)
+                }
+
                 Button(action: { pane.toggleBionic() }) {
                     Text("B")
                         .font(.system(size: 11, weight: .bold, design: .serif))
@@ -1906,5 +1910,85 @@ private struct OverviewSpeakButton: View {
         return OverviewSpeaker.fullReading(for: transcript).isEmpty
             ? "Nothing to speak"
             : "Speak the reply · ⌥-click for the short briefing"
+    }
+}
+
+/// Skip, restart and speed, shown only while something is being spoken.
+///
+/// A long reply read in full is the case these exist for: at four minutes you
+/// need to hear a sentence again, or to get through the rest faster. They stay
+/// out of the header entirely when nothing is playing.
+struct OverviewPlaybackControls: View {
+    @ObservedObject var speaker: OverviewSpeaker
+
+    /// The rates worth having. Below 0.75 the voice drags; above 2 it stops
+    /// being language.
+    private static let rates: [Float] = [0.75, 1, 1.25, 1.5, 1.75, 2]
+
+    var body: some View {
+        HStack(spacing: 7) {
+            control("backward.end.fill", "Start again") { speaker.restart() }
+                .disabled(!speaker.canSeek)
+            control("gobackward.10", "Back 10 seconds") { speaker.seek(by: -10) }
+                .disabled(!speaker.canSeek)
+            control("goforward.10", "Forward 10 seconds") { speaker.seek(by: 10) }
+                .disabled(!speaker.canSeek || speaker.elapsed >= speaker.rendered - 0.5)
+
+            Button {
+                let rates = Self.rates
+                let index = rates.firstIndex(of: speaker.rate) ?? 1
+                speaker.rate = rates[(index + 1) % rates.count]
+            } label: {
+                Text(Self.label(speaker.rate))
+                    .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(speaker.rate == 1 ? Color.secondary : Color.accentColor)
+                    .padding(.horizontal, 4)
+                    .frame(height: 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(speaker.rate == 1
+                                  ? Color.primary.opacity(0.06)
+                                  : Color.accentColor.opacity(0.16)))
+            }
+            .buttonStyle(.plain)
+            .help("Playback speed")
+
+            Text(Self.position(speaker.elapsed, of: speaker.rendered,
+                               complete: speaker.isComplete))
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+        }
+    }
+
+    private func control(
+        _ symbol: String, _ help: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 10))
+                .foregroundStyle(Color.secondary)
+                .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    static func label(_ rate: Float) -> String {
+        rate == rate.rounded() ? "\(Int(rate))×" : String(format: "%.2g×", rate)
+    }
+
+    /// While the reply is still being generated the total is what has been
+    /// rendered so far, so it is shown with a trailing marker rather than
+    /// pretending to be the end.
+    static func position(
+        _ elapsed: TimeInterval, of total: TimeInterval, complete: Bool
+    ) -> String {
+        "\(clock(elapsed))/\(clock(total))\(complete ? "" : "+")"
+    }
+
+    private static func clock(_ seconds: TimeInterval) -> String {
+        let whole = Int(seconds.rounded())
+        return String(format: "%d:%02d", whole / 60, whole % 60)
     }
 }

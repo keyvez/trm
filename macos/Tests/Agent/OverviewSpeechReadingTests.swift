@@ -139,3 +139,48 @@ struct OverviewSpeechReadingTests {
         #expect(spoken.contains("Worth checking before deploy"))
     }
 }
+
+/// Playback: the labels and the clock, which are the parts that are pure
+/// enough to pin. Seeking itself needs a running audio graph.
+@MainActor
+struct OverviewPlaybackTests {
+
+    @Test func rateLabelsReadAsSpeeds() {
+        #expect(OverviewPlaybackControls.label(1) == "1×")
+        #expect(OverviewPlaybackControls.label(2) == "2×")
+        #expect(OverviewPlaybackControls.label(1.5) == "1.5×")
+        #expect(OverviewPlaybackControls.label(0.75) == "0.75×")
+    }
+
+    @Test func thePositionSaysWhenTheEndIsNotYetTheEnd() {
+        // Still generating: the total is only what has been rendered, and the
+        // marker says so rather than implying the reply is 40 seconds long.
+        #expect(OverviewPlaybackControls.position(9, of: 40, complete: false) == "0:09/0:40+")
+        // Finished generating: the total is the total.
+        #expect(OverviewPlaybackControls.position(9, of: 40, complete: true) == "0:09/0:40")
+        #expect(OverviewPlaybackControls.position(0, of: 0, complete: true) == "0:00/0:00")
+        #expect(OverviewPlaybackControls.position(125, of: 605, complete: true)
+                == "2:05/10:05")
+    }
+
+    @Test func theRateIsClampedToWhatIsStillLanguage() {
+        let speaker = OverviewSpeaker()
+        speaker.rate = 5
+        #expect(speaker.rate == 2)
+        speaker.rate = 0.1
+        #expect(speaker.rate == 0.5)
+        speaker.rate = 1.5
+        #expect(speaker.rate == 1.5)
+        speaker.rate = 1
+    }
+
+    @Test func seekingIsInertWithNothingRendered() {
+        let speaker = OverviewSpeaker()
+        #expect(!speaker.canSeek)
+        // Must not crash or move a clock that has no audio behind it.
+        speaker.seek(by: -10)
+        speaker.restart()
+        #expect(speaker.elapsed == 0)
+        #expect(!speaker.isSpeaking)
+    }
+}
