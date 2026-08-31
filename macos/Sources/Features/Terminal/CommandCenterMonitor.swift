@@ -203,7 +203,8 @@ final class CommandCenterMonitor: ObservableObject {
                 if let existing = openOverviews[key] {
                     source = existing
                 } else {
-                    let pane = headless[key] ?? AgentOverviewPane(surface: surface)
+                    let pane = headless[key]
+                        ?? AgentOverviewPane(surface: surface, readsShellPanes: false)
                     headless[key] = pane
                     // Only headless panes need driving; an on-screen overview
                     // is already on its own timer.
@@ -259,6 +260,11 @@ final class CommandCenterMonitor: ObservableObject {
         for surface: Ghostty.SurfaceView,
         from pane: AgentOverviewPane
     ) -> Entry? {
+        // The overview reads plain shell panes too now. The board does not
+        // show them: it is a board of agents working unattended, and a shell
+        // sitting at a prompt is neither working nor unattended — you are
+        // looking right at it.
+        guard !pane.isShellPane else { return nil }
         let transcript = pane.transcript
         // Anything at all means this pane has an agent. Requiring a *reply*
         // here made a row vanish the moment you sent it a message: the new

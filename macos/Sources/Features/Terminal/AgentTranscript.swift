@@ -263,6 +263,45 @@ struct AgentOverviewSections: OptionSet, Hashable {
         }
     }
 
+    /// The same sections, named for a shell pane.
+    ///
+    /// One panel, two kinds of pane: a shell's turns are its commands, so
+    /// "What I Asked" is the command line, "What Claude Said" is the output,
+    /// and the activity strip is the one program that ran. Naming them after
+    /// an agent in a pane that has none reads as the wrong window.
+    func menuTitle(isShell: Bool) -> String {
+        guard isShell else { return menuTitle }
+        switch self {
+        case .prompt: return "The Command"
+        case .questions: return "Questions"
+        case .activity: return "What Ran"
+        case .reply: return "Output"
+        case .errors: return "Errors Only"
+        default: return "Sections"
+        }
+    }
+
+    func menuSubtitle(isShell: Bool) -> String {
+        guard isShell else { return menuSubtitle }
+        switch self {
+        case .prompt: return "The command line you typed"
+        case .questions: return "Questions and answer choices"
+        case .activity: return "The program it ran, and how it went"
+        case .reply: return "What the command printed"
+        case .errors: return "Lines that report a failure"
+        default: return ""
+        }
+    }
+
+    /// Short label for the header bar, naming the selection at a glance.
+    func barLabel(isShell: Bool) -> String {
+        guard isShell else { return barLabel }
+        if self == Self.all || isEmpty { return "Everything" }
+        let names = Self.allCases.filter { contains($0) }
+        if names.count == 1 { return names[0].menuTitle(isShell: true) }
+        return "\(names.count) sections"
+    }
+
     var menuSubtitle: String {
         switch self {
         case .prompt: return "Your last prompt"

@@ -177,7 +177,37 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// first.
     @Published var agentKind: AgentKind? = nil
 
-    var agentDisplayName: String { agentKind?.displayName ?? "Agent" }
+    /// True once the pane has been established to be an ordinary shell —
+    /// nothing with a transcript running in it — and the overview has switched
+    /// to reading its scrollback instead.
+    ///
+    /// An overview of a shell pane is not a consolation prize. The same
+    /// question is being asked of both kinds of pane ("what has this been
+    /// doing, and did any of it fail"), and the same answer is available: a
+    /// shell's turns are its commands, its tool calls are the programs it ran,
+    /// and its errors are the lines those printed.
+    @Published private(set) var isShellPane: Bool = false
+
+    /// The commands parsed out of a shell pane's scrollback, oldest first and
+    /// index-aligned with `transcript.turns`.
+    @Published private(set) var shellCommands: [ShellCommand] = []
+
+    /// The scrollback those commands came from, kept whole so "copy the full
+    /// log" means the log rather than the part that fit on screen.
+    @Published private(set) var shellScrollback: String = ""
+
+    /// The command the view is showing, honouring turn paging.
+    var displayedShellCommand: ShellCommand? {
+        guard !shellCommands.isEmpty else { return nil }
+        let index = shellCommands.count - 1 - turnOffset
+        guard shellCommands.indices.contains(index) else { return shellCommands.last }
+        return shellCommands[index]
+    }
+
+    var agentDisplayName: String {
+        if let agentKind { return agentKind.displayName }
+        return isShellPane ? "Shell" : "Agent"
+    }
 
     /// Whether the reply is shown as cards rather than as running prose.
     @Published var cardsEnabled: Bool {
@@ -311,6 +341,34 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// signal that an empty mirror means a new chat rather than a partial read.
     private var lastRemoteTranscriptPath: String?
 
+    /// When the shell scrollback was last read, so the poll that costs a
+    /// subprocess (or an SSH round trip) runs far less often than the poll
+    /// that costs a `stat`.
+    private var lastShellReadAt: Date?
+
+    /// Hash of the pane's visible screen at the last scrollback read, so an
+    /// idle pane is not dumped again to learn that nothing happened.
+    private var lastShellViewportHash: Int?
+
+    /// How often a shell pane's scrollback is re-read, at the fastest.
+    /// `zmx history` is a process spawn per pane.
+    private static let shellReadInterval: TimeInterval = 2.5
+
+    /// How long a pane whose screen has not changed still gets re-read.
+    /// Output that lands entirely above the fold — a scrolled-back pane, a
+    /// command whose result never reached the visible rows — would otherwise
+    /// never be noticed.
+    private static let shellIdleReadInterval: TimeInterval = 30
+
+    /// The same, over SSH. A round trip per pane per poll is the thing the
+    /// remote mirror exists to avoid, so this is deliberately slow.
+    private static let remoteShellReadInterval: TimeInterval = 10
+
+    /// Lines of scrollback read for a shell pane. Enough to hold a build log
+    /// and the commands around it; bounded because this is parsed on every
+    /// read and rendered into a column.
+    private static let shellScrollbackLines = 800
+
     /// True while a remote pane's agent hasn't been resolved yet: the SSH
     /// probe is a round trip, so there is a window after the pane appears in
     /// which "no transcript" means "still asking", not "nothing there". The
@@ -379,8 +437,18 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         return "Agent Overview"
     }
 
-    init(surface: Ghostty.SurfaceView?) {
+    /// Whether this overview reads plain shell panes.
+    ///
+    /// False for the headless panes the Command Center keeps for every
+    /// surface on the machine: reading a shell costs a `zmx history` spawn
+    /// per pane, and the board does not show shells, so that work would buy
+    /// nothing. Such a pane still learns that it *is* a shell, which is what
+    /// the board filters on.
+    private let readsShellPanes: Bool
+
+    init(surface: Ghostty.SurfaceView?, readsShellPanes: Bool = true) {
         self.surface = surface
+        self.readsShellPanes = readsShellPanes
         self.boundPaneId = surface?.paneId
         self.bionicEnabled = UserDefaults.standard.bool(forKey: Self.bionicDefaultsKey)
         self.cardsEnabled = UserDefaults.standard.bool(forKey: Self.cardsDefaultsKey)
@@ -454,6 +522,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         locatedSession = nil
         locatedAgentPid = 0
         agentKind = nil
+        clearShellState()
         goToLatestTurn()
         transcript = AgentTranscript()
         statusMessage = "Looking for the agent in this pane…"
@@ -518,6 +587,27 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         } else if let paneId = surface.paneId {
             shellPid = Trm.shared.paneChildPid(paneId: UInt32(paneId))
         }
+
+        // Read for the shell path, which needs the pane's own scrollback
+        // rather than a transcript file.
+        //
+        // The viewport is read first, for two jobs. It is the fallback source
+        // for a pane with no session to ask. And its hash says whether
+        // anything has happened in the pane at all: dumping a whole session's
+        // scrollback costs a process spawn, and a pane sitting at a prompt
+        // has nothing new in it however often you ask. Fetched only while
+        // this could still be a shell — once an agent is identified the pane
+        // never takes this path again.
+        let couldBeShell = readsShellPanes && (isShellPane || agentKind == nil)
+        let viewportText: String? = couldBeShell ? surface.cachedVisibleContents.get() : nil
+        let viewportHash = viewportText?.hashValue
+        let sinceLastRead = lastShellReadAt.map { Date().timeIntervalSince($0) } ?? .infinity
+        let shellReadDue = couldBeShell
+            && sinceLastRead >= Self.shellReadInterval
+            && (viewportHash != lastShellViewportHash
+                || sinceLastRead >= Self.shellIdleReadInterval
+                || shellCommands.isEmpty)
+        let shellLines = Self.shellScrollbackLines
 
         guard !parseInFlight else { return }
         parseInFlight = true
@@ -591,8 +681,23 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                         guard let self, self.bindingGeneration == generation else { return }
                         self.locatedAgentPid = agent.pid
                         self.agentKind = agent.kind
+                        self.clearShellState()
                     }
                 } else {
+                    // No agent in this pane — so read it as what it is. The
+                    // scrollback is the shell's transcript, and everything the
+                    // overview does with an agent's (turns, activity, errors,
+                    // cards, copying) it can do with this.
+                    let scrollback: String? = shellReadDue
+                        ? (zmxSession.flatMap {
+                            ZmxSessionManager.history(session: $0, lines: shellLines)
+                        } ?? viewportText)
+                        : nil
+                    let commands = scrollback.map {
+                        ShellTranscriptReader.commands(
+                            inScrollback: $0,
+                            cwdName: (cwd as NSString).lastPathComponent)
+                    }
                     await MainActor.run { [weak self] in
                         guard let self, self.bindingGeneration == generation else { return }
                         self.parseInFlight = false
@@ -602,10 +707,12 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                         self.lastCwd = cwd
                         self.lastURL = nil
                         self.lastMtime = nil
-                        self.goToLatestTurn()
-                        self.transcript = AgentTranscript()
-                        self.statusMessage =
-                            "No coding agent found in \((cwd as NSString).lastPathComponent)."
+                        self.applyShell(
+                            scrollback: scrollback,
+                            commands: commands,
+                            viewportHash: viewportHash,
+                            emptyStatus:
+                                "Nothing has run in \((cwd as NSString).lastPathComponent) yet.")
                     }
                     return
                 }
@@ -638,6 +745,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                     guard let self, self.bindingGeneration == generation else { return }
                     self.parseInFlight = false
                     self.agentKind = kind
+                    self.clearShellState()
                     self.lastCwd = cwd
                     self.lastURL = nil
                     self.lastMtime = nil
@@ -661,6 +769,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                     self.lastURL = url
                     self.locatedSession = session
                     self.agentKind = kind
+                    self.clearShellState()
                     // See the remote path: a status set before the file had
                     // content outlives its reason once the mtime settles.
                     if !self.transcript.isEmpty { self.statusMessage = nil }
@@ -680,6 +789,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                 self.lastMtime = mtime
                 self.locatedSession = session
                 self.agentKind = kind
+                self.clearShellState()
                 let sessionChanged = knownURL != url
                 if sessionChanged {
                     // `/clear` and `/new` intentionally start with an empty
@@ -723,7 +833,15 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         mirror.poll()
 
         guard let kind = mirror.locatedKind else {
-            statusMessage = mirror.statusMessage ?? "Looking for an agent on \(host)…"
+            // The probe has answered and there is no agent over there. That
+            // makes it a shell like any other, and its scrollback is fetched
+            // the same way the session browser fetches one — except far less
+            // often, since this is an SSH round trip per read.
+            if !mirror.isAwaitingFirstLocate {
+                refreshRemoteShell(host: host, remoteSession: remoteSession)
+            } else {
+                statusMessage = mirror.statusMessage ?? "Looking for an agent on \(host)…"
+            }
             return
         }
 
@@ -780,6 +898,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                 self.parseInFlight = false
                 self.lastMtime = mtime
                 self.agentKind = kind
+                self.clearShellState()
                 if let parsed, !parsed.isEmpty {
                     self.transcript = parsed
                     self.statusMessage = nil
@@ -793,6 +912,103 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                 }
             }
         }
+    }
+
+    // MARK: - Shell panes
+
+    /// Read a remote shell pane's scrollback over SSH.
+    ///
+    /// Deliberately infrequent: unlike the local path, where reading costs a
+    /// process spawn, every read here is a connection to another machine.
+    /// A shell being watched from across the network is not being watched
+    /// frame by frame.
+    private func refreshRemoteShell(host: String, remoteSession: String) {
+        let generation = bindingGeneration
+        let due = readsShellPanes && (lastShellReadAt.map {
+            Date().timeIntervalSince($0) >= Self.remoteShellReadInterval
+        } ?? true)
+        guard due else {
+            isShellPane = true
+            return
+        }
+        guard !parseInFlight else { return }
+        parseInFlight = true
+        let lines = Self.shellScrollbackLines
+        Task.detached(priority: .utility) { [weak self] in
+            let scrollback = ZmxSessionManager.remoteHistory(
+                remoteSession, host: host, lines: lines)
+            let commands = scrollback.map {
+                ShellTranscriptReader.commands(inScrollback: $0)
+            }
+            await MainActor.run { [weak self] in
+                guard let self, self.bindingGeneration == generation else { return }
+                self.parseInFlight = false
+                self.agentKind = nil
+                self.applyShell(
+                    scrollback: scrollback,
+                    commands: commands,
+                    emptyStatus: "Nothing has run in this session on \(host) yet.")
+            }
+        }
+    }
+
+    /// Publish a shell read.
+    ///
+    /// A read that was skipped by the throttle passes nil, which must leave
+    /// what is on screen alone: the alternative is a pane that blanks itself
+    /// between reads, which is what "no new data" would otherwise be taken to
+    /// mean. A read that came back with nothing is different, and says so.
+    private func applyShell(
+        scrollback: String?, commands: [ShellCommand]?,
+        viewportHash: Int? = nil, emptyStatus: String
+    ) {
+        isShellPane = true
+        guard let scrollback, let commands else {
+            // Throttled, not empty — keep the last good read.
+            if transcript.isEmpty && shellCommands.isEmpty {
+                statusMessage = statusMessage ?? "Reading this pane…"
+            }
+            return
+        }
+        lastShellReadAt = Date()
+        lastShellViewportHash = viewportHash
+        shellScrollback = scrollback
+
+        guard !commands.isEmpty else {
+            shellCommands = []
+            goToLatestTurn()
+            transcript = AgentTranscript()
+            statusMessage = emptyStatus
+            return
+        }
+
+        // Paging is by turn, and the turns are these commands — so the two
+        // are replaced together and stay index-aligned.
+        //
+        // Only when something actually changed. A shell pane is re-read every
+        // couple of seconds whether or not anything has happened in it, and
+        // republishing an identical transcript rebuilds the view — including
+        // any selection in it — for nothing.
+        let next = ShellTranscriptReader.transcript(commands: commands, updatedAt: Date())
+        if shellCommands != commands {
+            shellCommands = commands
+        }
+        if next.turns != transcript.turns || next.isWorking != transcript.isWorking {
+            transcript = next
+        }
+        statusMessage = nil
+    }
+
+    /// Forget everything read as a shell. Called the moment an agent is found
+    /// in the pane, so a pane that was a shell a second ago cannot show a
+    /// stale command list beside a live agent's reply.
+    private func clearShellState() {
+        guard isShellPane || !shellCommands.isEmpty || !shellScrollback.isEmpty else { return }
+        isShellPane = false
+        shellCommands = []
+        shellScrollback = ""
+        lastShellReadAt = nil
+        lastShellViewportHash = nil
     }
 
     /// What to say about a remote session that has produced no transcript.

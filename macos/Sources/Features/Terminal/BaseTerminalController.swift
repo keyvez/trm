@@ -1696,59 +1696,6 @@ class BaseTerminalController: NSWindowController,
         return agentOverviewPanes.contains { $0.surface === surface }
     }
 
-    /// Whether a pane is running an agent, cheaply enough to ask on a tap.
-    ///
-    /// A remote pane is taken at its word when trm recorded a session for it:
-    /// asking properly costs an SSH round trip, and the overview makes that
-    /// call itself and shows whatever it finds. A local pane is checked
-    /// against its process tree — the same test the Command Center uses to
-    /// decide whether a pane belongs on the board.
-    /// What is known about whether a pane is running an agent.
-    ///
-    /// Three answers, not two. A remote pane nobody has probed yet is not the
-    /// same as one probed and found to be a plain shell, and collapsing those
-    /// into "no" is what left agent panes without an overview: the evidence a
-    /// mirrored transcript provides only exists *after* something has looked,
-    /// and peeking a pane for the first time is exactly the case where nothing
-    /// has.
-    enum AgentEvidence {
-        /// A probe found an agent here.
-        case present
-        /// Asked, and there is nothing to find.
-        case absent
-        /// Nobody has asked. Only reachable for remote panes — a local one is
-        /// answered outright by its process tree.
-        case unknown
-    }
-
-    func agentEvidence(_ surface: Ghostty.SurfaceView) -> AgentEvidence {
-        if let host = surface.remoteHost {
-            // No session recorded means there is nothing to ask the far side
-            // *about*, so this really is a settled no.
-            guard let session = surface.remoteZmxSession else { return .absent }
-            return RemoteAgentTranscriptMirror.hasMirroredTranscript(
-                host: host, remoteSession: session) ? .present : .unknown
-        }
-        return paneHasAgent(surface) ? .present : .absent
-    }
-
-    func paneHasAgent(_ surface: Ghostty.SurfaceView) -> Bool {
-        if let host = surface.remoteHost {
-            guard let session = surface.remoteZmxSession else { return false }
-            return RemoteAgentTranscriptMirror.hasMirroredTranscript(
-                host: host, remoteSession: session)
-        }
-        var shellPid: pid_t = 0
-        if let session = surface.zmxSessionName,
-           let serverShell = ZmxSessionManager.cachedServerShellPid(session: session) {
-            shellPid = serverShell
-        } else if let paneId = surface.paneId {
-            shellPid = Trm.shared.paneChildPid(paneId: UInt32(paneId))
-        }
-        guard shellPid > 0 else { return false }
-        return AgentSessionLocator.agentProcess(underShell: shellPid) != nil
-    }
-
     /// Open (or focus) the agent overview for a terminal pane.
     ///
     /// The view is inserted immediately to the right of its terminal pane,
@@ -2065,58 +2012,6 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
-    /// Find out whether a peeked pane has an agent, and open its overview if
-    /// it does.
-    ///
-    /// Nothing is shown while asking. A pane with no agent therefore never
-    /// gets an overview at all, and one with an agent gets it a beat late —
-    /// which is the right way round: a panel that appears slightly late is a
-    /// smaller cost than one that appears when it shouldn't.
-    ///
-    /// The monitor already keeps a headless overview for every pane and drives
-    /// its probe, so this subscribes to that rather than opening something
-    /// visible to make the question get asked.
-    private func confirmAgentThenOpenOverview(
-        for pane: GridPane, surface: Ghostty.SurfaceView
-    ) {
-        guard let paneId = surface.paneId else { return }
-        let peekAtStart = peekedPane
-        CommandCenterMonitor.shared.subscribe()
-        Task { @MainActor [weak self, weak surface] in
-            defer { CommandCenterMonitor.shared.unsubscribe() }
-            // Bounded: a host that never answers must not keep this alive.
-            for _ in 0..<20 {
-                try? await Task.sleep(for: .milliseconds(750))
-                guard let self, let surface,
-                      // The peek moved on, or was dismissed: no longer ours.
-                      self.peekedPane == peekAtStart, self.peekedPane != nil
-                else { return }
-                // The board's own list is the confirmation, because it is
-                // computed the same way for local and remote panes.
-                //
-                // This used to wait on `agentTranscriptLocated`, which is a
-                // remote *mirror* flag: nil mirror, no confirmation, ever. On
-                // a machine that works through remote panes — where every pane
-                // is one, and a single slow probe leaves its mirror unlocated
-                // — that meant peek never opened an overview at all.
-                let onBoard = CommandCenterMonitor.shared.entries
-                    .contains { $0.paneId == paneId }
-                let overview = CommandCenterMonitor.shared.overviewPane(forPaneId: paneId)
-
-                if onBoard || overview?.agentTranscriptLocated == true {
-                    guard !self.hasAgentOverview(for: pane) else { return }
-                    self.showAgentOverview(for: pane)
-                    self.overviewOpenedForPeek =
-                        self.agentOverviewPanes.last { $0.surface === surface }
-                    return
-                }
-                // Settled with nothing found: this pane is a shell, and the
-                // answer is no rather than not-yet.
-                if overview?.remoteProbeConcluded == true { return }
-            }
-        }
-    }
-
     /// Close the overview a peek opened, if it is still there.
     ///
     /// Called before a new peek as well as on dismissal: peeking a second pane
@@ -2143,9 +2038,9 @@ class BaseTerminalController: NSWindowController,
     /// already draws a terminal together with its bound overview, in either
     /// direction, so nothing about the peek itself has to change.
     ///
-    /// Gated on there actually being an agent. An overview of a plain shell
-    /// has nothing to show and still costs a grid cell, which is a worse
-    /// trade than the one keystroke it saves.
+    /// Every terminal pane gets one, agent or not: a shell's overview reads
+    /// its scrollback back into commands, so there is something to show for
+    /// any pane you can peek.
     /// - Parameter transientOverview: an overview the *caller* opened purely to
     ///   have something to peek — ⌘-clicking a Command Center card, say. It is
     ///   closed with the peek for the same reason peek's own is: nobody asked
@@ -2158,24 +2053,17 @@ class BaseTerminalController: NSWindowController,
            case .terminal(let surface) = pane,
            !isLayoutEditingDisabled,
            !hasAgentOverview(for: pane) {
-            switch agentEvidence(surface) {
-            case .present:
-                showAgentOverview(for: pane)
-                opened = agentOverviewPanes.last { $0.surface === surface }
-            case .unknown:
-                // Ask, and open only if the answer is yes.
-                //
-                // This used to open on spec and take the overview back if the
-                // probe found nothing. Two things were wrong with that. A pane
-                // that is plainly a shell got an overview it never should have
-                // had, which is jarring on every peek. And the retraction
-                // often never ran: a pane whose probe never starts has no
-                // mirror, "still resolving" is indistinguishable from that,
-                // and the overview stayed for good.
-                confirmAgentThenOpenOverview(for: pane, surface: surface)
-            case .absent:
-                break
-            }
+            // Opened for every terminal pane, agent or not.
+            //
+            // This used to be gated on evidence of an agent, because an
+            // overview of a plain shell showed nothing and still took a grid
+            // cell. It shows the shell's own commands now — what ran, what it
+            // printed, what failed — so the gate was withholding a panel that
+            // has something to say, and the three-way "is there an agent
+            // here yet" dance it needed (which a slow remote probe could
+            // never settle) went with it.
+            showAgentOverview(for: pane)
+            opened = agentOverviewPanes.last { $0.surface === surface }
         }
         overviewOpenedForPeek = opened
 

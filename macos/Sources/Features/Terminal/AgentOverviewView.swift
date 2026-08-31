@@ -101,7 +101,7 @@ struct AgentOverviewView: View {
     /// with a pasted line (slash commands included) still works.
     private var composer: some View {
         HStack(spacing: 8) {
-            TextField(didSend ? "Sent" : "Reply to the agent…", text: $draft, axis: .vertical)
+            TextField(composerPlaceholder, text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...5)
                 .font(readingFont(12.5))
@@ -143,6 +143,13 @@ struct AgentOverviewView: View {
         .padding(.vertical, 8)
     }
 
+    /// The composer types into the pane's terminal either way; what lands
+    /// there is a message for an agent and a command line for a shell.
+    private var composerPlaceholder: String {
+        if didSend { return "Sent" }
+        return pane.isShellPane ? "Run in this pane…" : "Reply to the agent…"
+    }
+
     private var draftIsEmpty: Bool {
         draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -180,9 +187,14 @@ struct AgentOverviewView: View {
                     if pane.turnOffset > 0 {
                         earlierTurnBanner
                     }
+                    if pane.isShellPane, let command = pane.displayedShellCommand {
+                        shellCopyBar(command)
+                    }
                     if sections.contains(.errors) {
                         if errors.isEmpty {
-                            Text("No failed tool calls in this turn.")
+                            Text(pane.isShellPane
+                                 ? "Nothing in this command failed."
+                                 : "No failed tool calls in this turn.")
                                 .font(.system(size: scaled(12), weight: .light))
                                 .foregroundStyle(.secondary)
                         } else {
@@ -248,6 +260,11 @@ struct AgentOverviewView: View {
                 .allowsHitTesting(false)
             }
         }
+    }
+
+    static func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     private func copyLink(_ url: URL) {
@@ -350,6 +367,28 @@ struct AgentOverviewView: View {
         }
     }
 
+    /// What the activity strip is called. An agent's activity is a list of
+    /// tool calls; a shell's is the one command it ran, so calling it "recent
+    /// activity" would be a list of one thing under a plural heading.
+    static func activityLabel(isShell: Bool, isWorking: Bool) -> String {
+        if isShell { return isWorking ? "Running" : "Command" }
+        return isWorking ? "Working on" : "Recent activity"
+    }
+
+    /// The three things you want off a terminal pane without touching it.
+    ///
+    /// Selecting text in a scrolling column is fiddly, and selecting it in the
+    /// *terminal* means scrolling the terminal back and losing your place. The
+    /// error excerpt is the one that earns its keep: an error line on its own
+    /// rarely says which file or target it came from, so it comes with the
+    /// lines around it.
+    private func shellCopyBar(_ command: ShellCommand) -> some View {
+        ShellCopyBar(
+            command: command,
+            fullLog: pane.shellScrollback,
+            fontScale: activeFontScale)
+    }
+
     // MARK: - Header
 
     /// Below this the header can't hold its controls without pushing the
@@ -384,7 +423,7 @@ struct AgentOverviewView: View {
                             pane.sections = next
                         }
                     )) {
-                        Text(section.menuTitle)
+                        Text(section.menuTitle(isShell: pane.isShellPane))
                     }
                 }
                 Button("Show Everything") { pane.sections = .all }
@@ -413,6 +452,24 @@ struct AgentOverviewView: View {
                 }
             }
 
+            if pane.isShellPane, let command = pane.displayedShellCommand {
+                Section("Copy") {
+                    Button("Full Log") {
+                        Self.copyToPasteboard(
+                            pane.shellScrollback.isEmpty ? command.fullLog : pane.shellScrollback)
+                    }
+                    Button("This Command and Its Output") {
+                        Self.copyToPasteboard(command.fullLog)
+                    }
+                    if let excerpt = command.errorExcerpt() {
+                        Button("Error With Context") { Self.copyToPasteboard(excerpt) }
+                    }
+                    Button("Last \(ShellCopyBar.tailLines) Lines") {
+                        Self.copyToPasteboard(command.tail(lines: ShellCopyBar.tailLines))
+                    }
+                }
+            }
+
             Divider()
             Button("Refresh") { pane.refresh() }
             if let onClose {
@@ -436,7 +493,9 @@ struct AgentOverviewView: View {
             // No grab bar here: every pane cell now carries the shared
             // drag/peek bar above its content, so a second handle inside the
             // overview's own header was redundant.
-            Image(systemName: "sparkle")
+            // A shell overview is the same panel doing the same job, but it
+            // is not an agent and should not wear an agent's mark.
+            Image(systemName: pane.isShellPane ? "terminal" : "sparkle")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
 
@@ -479,7 +538,7 @@ struct AgentOverviewView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!pane.canShowPreviousTurn)
-                .help("Previous agent turn")
+                .help(pane.isShellPane ? "Previous command" : "Previous agent turn")
 
                 if let position = pane.turnPositionLabel {
                     Text(position)
@@ -495,7 +554,7 @@ struct AgentOverviewView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!pane.canShowNextTurn)
-                .help("Next agent turn")
+                .help(pane.isShellPane ? "Next command" : "Next agent turn")
             }
             .foregroundStyle(.secondary)
 
@@ -521,7 +580,8 @@ struct AgentOverviewView: View {
                                 pane.sections = next
                             }
                         )) {
-                            Text("\(section.menuTitle) — \(section.menuSubtitle)")
+                            Text("\(section.menuTitle(isShell: pane.isShellPane)) — "
+                                 + section.menuSubtitle(isShell: pane.isShellPane))
                         }
                     }
                     Divider()
@@ -530,7 +590,7 @@ struct AgentOverviewView: View {
                     HStack(spacing: 3) {
                         Image(systemName: pane.sections.symbolName)
                             .font(.system(size: 10))
-                        Text(pane.sections.barLabel)
+                        Text(pane.sections.barLabel(isShell: pane.isShellPane))
                             .font(.system(size: 10))
                             .lineLimit(1)
                         Image(systemName: "chevron.down")
@@ -690,7 +750,8 @@ struct AgentOverviewView: View {
         HStack(spacing: 6) {
             Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 10))
-            Text("Turn \(pane.turnCount - pane.turnOffset) of \(pane.turnCount)")
+            Text("\(pane.isShellPane ? "Command" : "Turn") "
+                 + "\(pane.turnCount - pane.turnOffset) of \(pane.turnCount)")
                 .font(.system(size: scaled(11), weight: .medium))
             Spacer(minLength: 0)
             Button(action: { pane.goToLatestTurn() }) {
@@ -711,7 +772,7 @@ struct AgentOverviewView: View {
 
     private func promptSection(_ prompt: String, blocks promptBlocks: [AgentTranscript.Block]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            copyableSectionLabel("You asked") { prompt }
+            copyableSectionLabel(pane.isShellPane ? "You ran" : "You asked") { prompt }
             HStack(alignment: .top, spacing: 0) {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(Color.accentColor.opacity(0.55))
@@ -875,9 +936,10 @@ struct AgentOverviewView: View {
 
     private var activitySection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            copyableSectionLabel(
-                pane.displayedTranscript.isWorking ? "Working on" : "Recent activity"
-            ) {
+            copyableSectionLabel(Self.activityLabel(
+                isShell: pane.isShellPane,
+                isWorking: pane.displayedTranscript.isWorking
+            )) {
                 pane.displayedTranscript.activity
                     .map { [$0.name, $0.detail].compactMap { $0 }.joined(separator: " ") }
                     .joined(separator: "\n")
@@ -915,7 +977,7 @@ struct AgentOverviewView: View {
 
     private func messageSection(_ blocks: [AgentTranscript.Block]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            copyableSectionLabel("\(pane.agentDisplayName) said") {
+            copyableSectionLabel(pane.isShellPane ? "Output" : "\(pane.agentDisplayName) said") {
                 pane.displayedTranscript.blocks.map { block in
                     switch block {
                     case .paragraph(let text): return text
@@ -949,6 +1011,35 @@ struct AgentOverviewView: View {
     /// Nothing already on screen is rebuilt because a later message landed.
     @ViewBuilder
     private var cardsView: some View {
+        if pane.isShellPane {
+            shellCardsView
+        } else {
+            agentCardsView
+        }
+    }
+
+    /// A command as cards: what was run and what kind of work it is, how it
+    /// went, what failed, and the output itself. The agent card taxonomy —
+    /// "what was wrong", "how it checked", "asking you" — describes prose an
+    /// agent wrote about its work, and none of it fits a log.
+    @ViewBuilder
+    private var shellCardsView: some View {
+        if let command = pane.displayedShellCommand {
+            let cards = ShellCardBuilder.cards(for: command)
+            LazyVStack(alignment: .leading, spacing: 8) {
+                ForEach(cards) { card in
+                    ShellCardView(
+                        card: card,
+                        fontScale: activeFontScale,
+                        fontDesign: pane.fontFamily.design,
+                        allowsTextSelection: allowsTextSelection)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var agentCardsView: some View {
         let cards = AgentCardSplitter.cards(for: pane.displayedTranscript)
         if cards.isEmpty {
             ForEach(pane.displayedTranscript.blocks) { block in
@@ -1220,6 +1311,67 @@ struct AgentOverviewView: View {
         CopyableSectionLabel(title: text, content: content) {
             sectionLabel(text)
         }
+    }
+}
+
+/// Copy buttons for a shell pane's log.
+///
+/// Its own view so the "copied" flash belongs to the button that was pressed,
+/// and so the overview's already-deep body does not grow another branch.
+private struct ShellCopyBar: View {
+    let command: ShellCommand
+    let fullLog: String
+    let fontScale: CGFloat
+
+    @State private var copied: String? = nil
+
+    var body: some View {
+        HStack(spacing: 6) {
+            button("Full log", copying: fullLog.isEmpty ? command.fullLog : fullLog)
+            button("This command", copying: command.fullLog)
+            if let excerpt = command.errorExcerpt() {
+                button("Error + context", copying: excerpt, tint: .orange)
+            }
+            button("Last \(ShellCopyBar.tailLines) lines",
+                   copying: command.tail(lines: ShellCopyBar.tailLines))
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Enough to hold a failing command's parting words and the line that
+    /// explains them, and short enough to paste into a message.
+    static let tailLines = 20
+
+    private func button(
+        _ title: String, copying content: String, tint: Color = .secondary
+    ) -> some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(content, forType: .string)
+            withAnimation(.easeOut(duration: 0.12)) { copied = title }
+            Task {
+                try? await Task.sleep(for: .milliseconds(1200))
+                withAnimation(.easeOut(duration: 0.2)) {
+                    if copied == title { copied = nil }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: copied == title ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 8, weight: .semibold))
+                Text(title)
+                    .font(.system(size: min(10.5 * fontScale, 13), weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(copied == title ? Color.green : tint)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                Capsule().fill(Color.primary.opacity(0.06))
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Copy \(title.lowercased())")
     }
 }
 
