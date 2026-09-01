@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import trm
 
@@ -303,6 +304,25 @@ struct ShellTranscriptTests {
             index: 0, command: "pwd", output: ["/Users/g/dev/trm"], finished: true)
         let cards = ShellCardBuilder.cards(for: command)
         #expect(cards.map(\.kind) == [.command, .output])
+    }
+
+    // MARK: - Card layout
+
+    @Test func cardsFillTheWidthTheyAreGiven() {
+        func columns(_ width: CGFloat) -> Int {
+            OverviewCardColumns<ShellCard, EmptyView>.columnCount(
+                forWidth: width, minimumCardWidth: 300, spacing: 8, maximum: 3)
+        }
+        // A narrow grid cell keeps the single column it has always had.
+        #expect(columns(320) == 1)
+        #expect(columns(600) == 1)
+        // A peek is wide enough to read two, then three, side by side.
+        #expect(columns(608) == 2)
+        #expect(columns(900) == 2)
+        #expect(columns(924) == 3)
+        #expect(columns(2400) == 3)
+        // No width measured yet: one column, never zero.
+        #expect(columns(0) == 1)
     }
 
     // MARK: - Transcript shape

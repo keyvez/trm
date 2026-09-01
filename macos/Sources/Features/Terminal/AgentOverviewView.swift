@@ -1025,15 +1025,12 @@ struct AgentOverviewView: View {
     @ViewBuilder
     private var shellCardsView: some View {
         if let command = pane.displayedShellCommand {
-            let cards = ShellCardBuilder.cards(for: command)
-            LazyVStack(alignment: .leading, spacing: 8) {
-                ForEach(cards) { card in
-                    ShellCardView(
-                        card: card,
-                        fontScale: activeFontScale,
-                        fontDesign: pane.fontFamily.design,
-                        allowsTextSelection: allowsTextSelection)
-                }
+            OverviewCardColumns(items: ShellCardBuilder.cards(for: command)) { card in
+                ShellCardView(
+                    card: card,
+                    fontScale: activeFontScale,
+                    fontDesign: pane.fontFamily.design,
+                    allowsTextSelection: allowsTextSelection)
             }
         }
     }
@@ -1050,11 +1047,9 @@ struct AgentOverviewView: View {
                 }
             }
         } else {
-            LazyVStack(alignment: .leading, spacing: 8) {
-                ForEach(cards) { card in
-                    AgentCardView(card: card, pane: pane) { block in
-                        AnyView(self.markdownBlockView(block))
-                    }
+            OverviewCardColumns(items: cards) { card in
+                AgentCardView(card: card, pane: pane) { block in
+                    AnyView(self.markdownBlockView(block))
                 }
             }
         }
@@ -1311,6 +1306,93 @@ struct AgentOverviewView: View {
         CopyableSectionLabel(title: text, content: content) {
             sectionLabel(text)
         }
+    }
+}
+
+/// Lays cards out in as many columns as the pane is wide enough for.
+///
+/// One column in a narrow grid cell, two or three in a peek — the overview is
+/// the same view at 300 points and at 1,000, and a single column of cards
+/// across a wide peek wastes most of it while pushing the last card off the
+/// bottom. Cards are dealt across the columns in order (first card top-left,
+/// second to its right), so reading left-to-right still reads them in the
+/// order they were built: for an agent that is the order a reply is written
+/// in, and for a shell it is command, summary, failure, output.
+///
+/// Columns are independent stacks rather than grid rows, because card heights
+/// differ by an order of magnitude — a three-line command card beside a
+/// forty-line output card would otherwise leave a hole the size of the taller
+/// one. And it is deliberately not a `LazyVGrid`: the note on `scrollBody`
+/// explains what lazy containers inside this ScrollView cost, and a handful
+/// of cards is cheap to size eagerly.
+struct OverviewCardColumns<Item: Identifiable, Content: View>: View {
+    let items: [Item]
+    /// Narrower than this and a card stops being worth reading — code blocks
+    /// wrap to nothing and prose becomes a ribbon.
+    var minimumCardWidth: CGFloat = 300
+    /// Three is the most a reading surface benefits from; past that the eye
+    /// has to hunt for where the next card starts.
+    var maximumColumns: Int = 3
+    var spacing: CGFloat = 8
+    @ViewBuilder let content: (Item) -> Content
+
+    @State private var availableWidth: CGFloat = 0
+
+    /// How many columns fit. Pure, so the rule is testable without a view.
+    static func columnCount(
+        forWidth width: CGFloat, minimumCardWidth: CGFloat,
+        spacing: CGFloat, maximum: Int
+    ) -> Int {
+        guard width > 0, minimumCardWidth > 0, maximum > 0 else { return 1 }
+        let fits = Int((width + spacing) / (minimumCardWidth + spacing))
+        return max(1, min(maximum, fits))
+    }
+
+    private var columns: Int {
+        Self.columnCount(
+            forWidth: availableWidth,
+            minimumCardWidth: minimumCardWidth,
+            spacing: spacing,
+            maximum: maximumColumns)
+    }
+
+    var body: some View {
+        let count = columns
+        HStack(alignment: .top, spacing: spacing) {
+            ForEach(Array(0..<count), id: \.self) { column in
+                VStack(alignment: .leading, spacing: spacing) {
+                    ForEach(cards(inColumn: column, of: count)) { item in
+                        content(item)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .top)
+            }
+        }
+        // Read in the background so measuring cannot change the layout it is
+        // measuring — a GeometryReader in the stack itself would claim the
+        // width and report nothing useful about the content.
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: OverviewCardWidthKey.self, value: proxy.size.width)
+            }
+        )
+        .onPreferenceChange(OverviewCardWidthKey.self) { width in
+            if abs(width - availableWidth) > 0.5 { availableWidth = width }
+        }
+    }
+
+    private func cards(inColumn column: Int, of count: Int) -> [Item] {
+        items.enumerated().compactMap { index, item in
+            index % count == column ? item : nil
+        }
+    }
+}
+
+private struct OverviewCardWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
