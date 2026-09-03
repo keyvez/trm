@@ -1529,6 +1529,12 @@ struct TrmGridView: View {
             forPaneId: surface.paneId ?? 0,
             forceHighlight: isPeekNavigationAnimating
         ))
+        // A dead remote pane needs its Reconnect button here too. Peeking is
+        // what you do when a pane looks wrong, so the expanded view was the
+        // one place the button was missing and the one place it was wanted:
+        // the grid cell behind the peek has it, but it is covered by the
+        // peek's own scrim.
+        .overlay(reconnectOverlay(for: .terminal(surface)))
         .contextMenu { putBackMenuItem }
         .cornerRadius(TrmBorder.radius)
         .overlay(peekBorder)

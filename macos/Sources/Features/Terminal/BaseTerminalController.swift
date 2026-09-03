@@ -5389,6 +5389,12 @@ class BaseTerminalController: NSWindowController,
         if let idx = paneDisplayOrder.firstIndex(of: oldId) {
             paneDisplayOrder[idx] = newId
         }
+        // A peek follows the swap too. Reconnecting a dead remote pane from
+        // inside its own peek replaces the surface underneath it, and a peek
+        // pointing at the old one resolves to no pane at all — leaving the
+        // reader looking at a bare scrim over the reconnected terminal they
+        // asked to keep reading.
+        if peekedPane == oldId { peekedPane = newId }
         if let children = paneStacks.removeValue(forKey: oldId) {
             paneStacks[newId] = children
         }
