@@ -33,6 +33,17 @@ struct CommandCenterView: View {
     /// Local key monitor, live only while a reply box has focus.
     @State private var keyMonitor: Any?
 
+    /// Rows whose reply box has been opened into a full editor.
+    ///
+    /// The inline box is one to four lines and Return sends it, which is the
+    /// right shape for "yes, go ahead" and the wrong one for a paragraph with
+    /// a list in it — where Return means "next line" and pressing it fires off
+    /// half an instruction. Expanded, the box becomes an editor: Return breaks
+    /// the line, and sending is ⌘↩ or the button, so nothing leaves until you
+    /// say so. Per row, because you can be answering one agent at length while
+    /// firing one-liners at another.
+    @State private var expandedComposers: Set<ObjectIdentifier> = []
+
     /// What each pane's box is doing about an attachment right now: copying
     /// it, or why it couldn't.
     @State private var attachmentStatus: [ObjectIdentifier: String] = [:]
@@ -75,7 +86,8 @@ struct CommandCenterView: View {
                         // laying every row out eagerly is cheap.
                         if briefingMode, columns > 1 {
                             gridRows(columns: columns) { entry in
-                                AnyView(briefingRow(entry, fixedHeight: Self.briefingTileHeight))
+                                AnyView(briefingRow(
+                                    entry, fixedHeight: cardHeight(for: entry, Self.briefingTileHeight)))
                             }
                         } else if briefingMode {
                             VStack(spacing: 8) {
@@ -94,7 +106,8 @@ struct CommandCenterView: View {
                         } else {
                             gridRows(columns: columns) { entry in
                                 AnyView(
-                                    card(entry, fixedHeight: Self.gridCardHeight)
+                                    card(entry,
+                                         fixedHeight: cardHeight(for: entry, Self.gridCardHeight))
                                         .background(
                                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                                 .fill(Color.primary.opacity(0.04))
@@ -545,7 +558,38 @@ struct CommandCenterView: View {
                 drafts[entry.id] = newValue
             }
         )
-        return HStack(spacing: 6) {
+        return Group {
+            if expandedComposers.contains(entry.id) {
+                expandedComposer(entry, text: binding)
+            } else {
+                inlineComposer(entry, text: binding, large: large)
+            }
+        }
+        // Drop a screenshot, a log, a diff: it is staged where the agent can
+        // read it and its path goes in the message.
+        .onDrop(of: [.fileURL, .image], isTargeted: nil) { providers in
+            attach(providers: providers, to: entry)
+            return true
+        }
+        .overlay(alignment: .topLeading) {
+            if let status = attachmentStatus[entry.id] {
+                Text(status)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.regularMaterial, in: Capsule())
+                    .offset(y: -14)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    /// The everyday box: a few lines, Return sends.
+    private func inlineComposer(
+        _ entry: CommandCenterMonitor.Entry, text binding: Binding<String>, large: Bool
+    ) -> some View {
+        HStack(spacing: 6) {
             TextField("Reply…", text: binding, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(large ? 2...8 : 1...4)
@@ -574,6 +618,27 @@ struct CommandCenterView: View {
                         .stroke(Color.accentColor.opacity(focusedDraft == entry.id ? 0.55 : 0))
                 )
                 .onSubmit { send(entry) }
+                // ⌘-click opens the editor. The box already answers a plain
+                // click by putting a cursor in it, so the gesture that means
+                // "more of this" is the one the rest of trm uses for "show me
+                // this properly" — ⌘-click on a card opens its Overview, and
+                // on a pane it peeks.
+                .simultaneousGesture(TapGesture().onEnded {
+                    guard NSEvent.modifierFlags.contains(.command),
+                          NSEvent.modifierFlags.isDisjoint(with: [.shift, .control, .option])
+                    else { return }
+                    expand(entry)
+                })
+
+            Button {
+                expand(entry)
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: large ? 13 : 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Write a longer message (⌘-click the box)")
 
             Button {
                 send(entry)
@@ -584,24 +649,91 @@ struct CommandCenterView: View {
             .buttonStyle(.plain)
             .disabled(binding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
-        // Drop a screenshot, a log, a diff: it is staged where the agent can
-        // read it and its path goes in the message.
-        .onDrop(of: [.fileURL, .image], isTargeted: nil) { providers in
-            attach(providers: providers, to: entry)
-            return true
-        }
-        .overlay(alignment: .topLeading) {
-            if let status = attachmentStatus[entry.id] {
-                Text(status)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.regularMaterial, in: Capsule())
-                    .offset(y: -14)
-                    .transition(.opacity)
+    }
+
+    /// The editor: as many lines as you like, and Return is one of them.
+    private func expandedComposer(
+        _ entry: CommandCenterMonitor.Entry, text binding: Binding<String>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "text.alignleft")
+                    .font(.system(size: 9, weight: .semibold))
+                Text("Message to \(entry.watermark)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text("⌘↩ send · esc close")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                Button {
+                    collapse(entry)
+                } label: {
+                    Image(systemName: "arrow.down.right.and.arrow.up.left")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .help("Back to the one-line box")
+            }
+            .foregroundStyle(.secondary)
+
+            TextEditor(text: binding)
+                .font(.system(size: 12.5, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .focused($focusedDraft, equals: entry.id)
+                .frame(minHeight: 150, maxHeight: 340)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.primary.opacity(0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color.accentColor.opacity(focusedDraft == entry.id ? 0.55 : 0.15))
+                )
+
+            HStack(spacing: 8) {
+                // Said plainly, because it is the one thing about this box
+                // that is not obvious and cannot be undone after sending: an
+                // agent's input box submits on Return, so the message goes as
+                // one line however many you wrote it on.
+                Text("Line breaks become spaces when sent")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
+                Button {
+                    send(entry)
+                } label: {
+                    Label("Send", systemImage: "arrow.up.circle.fill")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .disabled(binding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
+    }
+
+    /// A card's fixed height in the layouts that use one — except while its
+    /// editor is open, when the card grows to hold it. Every card being the
+    /// same height is what makes the board scannable; a card with an editor
+    /// in it is the one you are working in, and cropping it to keep the row
+    /// tidy would hide the thing you are typing.
+    private func cardHeight(
+        for entry: CommandCenterMonitor.Entry, _ height: CGFloat
+    ) -> CGFloat? {
+        expandedComposers.contains(entry.id) ? nil : height
+    }
+
+    /// Open a row's editor and put the keyboard in it.
+    private func expand(_ entry: CommandCenterMonitor.Entry) {
+        expandedComposers.insert(entry.id)
+        focusedDraft = entry.id
+    }
+
+    /// Close it, keeping whatever is written.
+    private func collapse(_ entry: CommandCenterMonitor.Entry) {
+        expandedComposers.remove(entry.id)
     }
 
     /// Links the agent printed, whole and tappable.
@@ -778,10 +910,34 @@ struct CommandCenterView: View {
                 return nil
             }
 
+            // ⌘↩ sends from the expanded editor, where Return is a line
+            // break. Checked before the relay, which has its own opinion
+            // about Return with modifiers.
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if expandedComposers.contains(id),
+               event.keyCode == 36 || event.keyCode == 76,
+               flags == .command {
+                send(entry)
+                return nil
+            }
+
+            // Escape closes the editor rather than the panel. One level at a
+            // time: a second Escape does whatever it did before.
+            if event.keyCode == 53, expandedComposers.contains(id) {
+                collapse(entry)
+                return nil
+            }
+
             // The terminal beside this box answers ⌘C and ⌘V for the whole
             // window, so without this the reply box could be typed into but
             // never copied from or pasted into.
             if TextFieldKeyRelay.handle(event) { return nil }
+
+            // History walking is for the one-line box. In an editor the
+            // arrows have an obvious job — moving through what you are
+            // writing — and replacing that with someone else's sentence
+            // mid-paragraph would be indefensible.
+            guard !expandedComposers.contains(id) else { return event }
 
             guard event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
                   event.keyCode == 126 || event.keyCode == 125
