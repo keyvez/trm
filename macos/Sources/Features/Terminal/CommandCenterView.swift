@@ -44,6 +44,11 @@ struct CommandCenterView: View {
     /// firing one-liners at another.
     @State private var expandedComposers: Set<ObjectIdentifier> = []
 
+    /// A row to bring into view on the next layout pass, set when its editor
+    /// opens. Cleared as soon as it is used, so it is a request rather than
+    /// a position the board has to keep honouring.
+    @State private var scrollTarget: ObjectIdentifier?
+
     /// What each pane's box is doing about an attachment right now: copying
     /// it, or why it couldn't.
     @State private var attachmentStatus: [ObjectIdentifier: String] = [:]
@@ -68,6 +73,28 @@ struct CommandCenterView: View {
     /// wordiest agent would jump every time any of them spoke.
     private static let gridCardHeight: CGFloat = 260
 
+    /// How tall the board is right now, so an opened editor can take a real
+    /// share of it. A fixed number cannot: the panel is a narrow strip on one
+    /// window and half a 6K display on another, and 150 points of editor is
+    /// tiny in the second and most of the panel in the first.
+    @State private var boardHeight: CGFloat = 0
+
+    /// The share of the board an open editor takes, and the bounds it stays
+    /// inside. Most of the panel, because an editor you opened on purpose is
+    /// the thing you are doing — but never the whole of it: the agent's
+    /// message is what you are answering and it has to stay in sight.
+    private static let editorHeightFraction: CGFloat = 0.62
+    private static let editorMinimumHeight: CGFloat = 260
+    private static let editorMaximumHeight: CGFloat = 900
+
+    /// The height an open editor gets.
+    private var editorHeight: CGFloat {
+        let available = boardHeight > 0 ? boardHeight : 520
+        return min(
+            max(available * Self.editorHeightFraction, Self.editorMinimumHeight),
+            Self.editorMaximumHeight)
+    }
+
     var body: some View {
         Group {
             if monitor.entries.isEmpty {
@@ -75,6 +102,7 @@ struct CommandCenterView: View {
             } else {
                 GeometryReader { geo in
                     let columns = Self.columnCount(for: geo.size.width)
+                    ScrollViewReader { proxy in
                     ScrollView {
                         // Plain stacks, not a LazyVGrid: a lazy grid inside a
                         // ScrollView has to estimate the size of cells it has
@@ -115,6 +143,24 @@ struct CommandCenterView: View {
                                 )
                             }
                         }
+                    }
+                    // The board's own height, for sizing an opened editor.
+                    // Read from the reader that is already here for the
+                    // column count rather than adding a second one.
+                    .onAppear { boardHeight = geo.size.height }
+                    .onChange(of: geo.size.height) { height in boardHeight = height }
+                    // An editor that opens to most of the panel's height will
+                    // often open below the fold — you clicked a box near the
+                    // bottom and it grew by several hundred points. Bring the
+                    // row it belongs to into view so the thing that just took
+                    // the keyboard is the thing you can see.
+                    .onChange(of: scrollTarget) { target in
+                        guard let target else { return }
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo(target, anchor: .center)
+                        }
+                        scrollTarget = nil
+                    }
                     }
                 }
             }
@@ -681,7 +727,7 @@ struct CommandCenterView: View {
                 .font(.system(size: 12.5, design: .monospaced))
                 .scrollContentBackground(.hidden)
                 .focused($focusedDraft, equals: entry.id)
-                .frame(minHeight: 150, maxHeight: 340)
+                .frame(height: editorHeight)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 6)
                 .background(
@@ -729,6 +775,7 @@ struct CommandCenterView: View {
     private func expand(_ entry: CommandCenterMonitor.Entry) {
         expandedComposers.insert(entry.id)
         focusedDraft = entry.id
+        scrollTarget = entry.id
     }
 
     /// Close it, keeping whatever is written.
