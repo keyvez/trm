@@ -33,21 +33,29 @@ struct CommandCenterView: View {
     /// Local key monitor, live only while a reply box has focus.
     @State private var keyMonitor: Any?
 
-    /// Rows whose reply box has been opened into a full editor.
+    /// The row whose reply box has been opened into a full editor, if any.
     ///
     /// The inline box is one to four lines and Return sends it, which is the
     /// right shape for "yes, go ahead" and the wrong one for a paragraph with
     /// a list in it — where Return means "next line" and pressing it fires off
     /// half an instruction. Expanded, the box becomes an editor: Return breaks
     /// the line, and sending is ⌘↩ or the button, so nothing leaves until you
-    /// say so. Per row, because you can be answering one agent at length while
-    /// firing one-liners at another.
-    @State private var expandedComposers: Set<ObjectIdentifier> = []
+    /// say so.
+    ///
+    /// One at a time, because an open editor takes the whole panel. Writing a
+    /// paragraph to one agent is not a thing you do out of the corner of your
+    /// eye, and the board's other rows are a live feed that moves while you
+    /// type — the version that kept them on screen was a card growing inside
+    /// a list that rearranged itself underneath it.
+    @State private var focusedComposerID: ObjectIdentifier?
 
-    /// A row to bring into view on the next layout pass, set when its editor
-    /// opens. Cleared as soon as it is used, so it is a request rather than
-    /// a position the board has to keep honouring.
-    @State private var scrollTarget: ObjectIdentifier?
+    /// The entry the editor is open on, if it is still on the board. A pane
+    /// that closes while you are writing to it drops you back to the board
+    /// rather than leaving an editor addressed to nothing.
+    private var focusedComposerEntry: CommandCenterMonitor.Entry? {
+        guard let focusedComposerID else { return nil }
+        return monitor.entries.first { $0.id == focusedComposerID }
+    }
 
     /// What each pane's box is doing about an attachment right now: copying
     /// it, or why it couldn't.
@@ -73,36 +81,20 @@ struct CommandCenterView: View {
     /// wordiest agent would jump every time any of them spoke.
     private static let gridCardHeight: CGFloat = 260
 
-    /// How tall the board is right now, so an opened editor can take a real
-    /// share of it. A fixed number cannot: the panel is a narrow strip on one
-    /// window and half a 6K display on another, and 150 points of editor is
-    /// tiny in the second and most of the panel in the first.
-    @State private var boardHeight: CGFloat = 0
-
-    /// The share of the board an open editor takes, and the bounds it stays
-    /// inside. Most of the panel, because an editor you opened on purpose is
-    /// the thing you are doing — but never the whole of it: the agent's
-    /// message is what you are answering and it has to stay in sight.
-    private static let editorHeightFraction: CGFloat = 0.62
-    private static let editorMinimumHeight: CGFloat = 260
-    private static let editorMaximumHeight: CGFloat = 900
-
-    /// The height an open editor gets.
-    private var editorHeight: CGFloat {
-        let available = boardHeight > 0 ? boardHeight : 520
-        return min(
-            max(available * Self.editorHeightFraction, Self.editorMinimumHeight),
-            Self.editorMaximumHeight)
-    }
+    /// How much of the panel the agent's own message may take while you write
+    /// back to it. It is the thing you are answering, so it stays on screen —
+    /// but the editor is what you opened, so it gets the rest.
+    private static let focusedMessageHeight: CGFloat = 200
 
     var body: some View {
         Group {
-            if monitor.entries.isEmpty {
+            if let entry = focusedComposerEntry {
+                focusedComposerView(entry)
+            } else if monitor.entries.isEmpty {
                 if monitor.hasSettled { empty } else { checking }
             } else {
                 GeometryReader { geo in
                     let columns = Self.columnCount(for: geo.size.width)
-                    ScrollViewReader { proxy in
                     ScrollView {
                         // Plain stacks, not a LazyVGrid: a lazy grid inside a
                         // ScrollView has to estimate the size of cells it has
@@ -114,8 +106,7 @@ struct CommandCenterView: View {
                         // laying every row out eagerly is cheap.
                         if briefingMode, columns > 1 {
                             gridRows(columns: columns) { entry in
-                                AnyView(briefingRow(
-                                    entry, fixedHeight: cardHeight(for: entry, Self.briefingTileHeight)))
+                                AnyView(briefingRow(entry, fixedHeight: Self.briefingTileHeight))
                             }
                         } else if briefingMode {
                             VStack(spacing: 8) {
@@ -134,8 +125,7 @@ struct CommandCenterView: View {
                         } else {
                             gridRows(columns: columns) { entry in
                                 AnyView(
-                                    card(entry,
-                                         fixedHeight: cardHeight(for: entry, Self.gridCardHeight))
+                                    card(entry, fixedHeight: Self.gridCardHeight)
                                         .background(
                                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                                 .fill(Color.primary.opacity(0.04))
@@ -143,24 +133,6 @@ struct CommandCenterView: View {
                                 )
                             }
                         }
-                    }
-                    // The board's own height, for sizing an opened editor.
-                    // Read from the reader that is already here for the
-                    // column count rather than adding a second one.
-                    .onAppear { boardHeight = geo.size.height }
-                    .onChange(of: geo.size.height) { height in boardHeight = height }
-                    // An editor that opens to most of the panel's height will
-                    // often open below the fold — you clicked a box near the
-                    // bottom and it grew by several hundred points. Bring the
-                    // row it belongs to into view so the thing that just took
-                    // the keyboard is the thing you can see.
-                    .onChange(of: scrollTarget) { target in
-                        guard let target else { return }
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(target, anchor: .center)
-                        }
-                        scrollTarget = nil
-                    }
                     }
                 }
             }
@@ -261,6 +233,64 @@ struct CommandCenterView: View {
         .padding(20)
     }
 
+    /// Who this row is: state, watermark, agent, where it runs, how long ago
+    /// it spoke. Shared by the board's cards and the focused editor, so the
+    /// row you were reading and the row you are writing to are labelled the
+    /// same way.
+    @ViewBuilder
+    private func cardHeader(_ entry: CommandCenterMonitor.Entry) -> some View {
+        HStack(spacing: 8) {
+            statusDot(entry)
+
+            // The watermark is how the pane labels itself on screen, so
+            // it's the fastest way to map a row back to a cell.
+            Button {
+                monitor.reveal(entry)
+            } label: {
+                Text(entry.watermark)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule().fill(Color.accentColor.opacity(0.16))
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Go to this pane")
+
+            Text(entry.kind?.displayName ?? "Agent")
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .overlay(
+                    Capsule().stroke(Color.secondary.opacity(0.35), lineWidth: 0.8)
+                )
+
+            if let location = entry.location {
+                Text(location)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if let host = entry.host {
+                Label(host, systemImage: "network")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            if let updated = entry.updatedAt {
+                Text(updated, style: .relative)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
     /// One agent's card. `fixedHeight` is set in grid mode, where every card
     /// is the same size and the message truncates to fit rather than the card
     /// growing to hold it.
@@ -268,56 +298,7 @@ struct CommandCenterView: View {
         _ entry: CommandCenterMonitor.Entry, fixedHeight: CGFloat?
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                statusDot(entry)
-
-                // The watermark is how the pane labels itself on screen, so
-                // it's the fastest way to map a row back to a cell.
-                Button {
-                    monitor.reveal(entry)
-                } label: {
-                    Text(entry.watermark)
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule().fill(Color.accentColor.opacity(0.16))
-                        )
-                }
-                .buttonStyle(.plain)
-                .help("Go to this pane")
-
-                Text(entry.kind?.displayName ?? "Agent")
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .overlay(
-                        Capsule().stroke(Color.secondary.opacity(0.35), lineWidth: 0.8)
-                    )
-
-                if let location = entry.location {
-                    Text(location)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                if let host = entry.host {
-                    Label(host, systemImage: "network")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 4)
-
-                if let updated = entry.updatedAt {
-                    Text(updated, style: .relative)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-            }
+            cardHeader(entry)
 
             if let prompt = entry.prompt, !prompt.isEmpty {
                 Text(prompt)
@@ -590,27 +571,7 @@ struct CommandCenterView: View {
     /// decision to act on and the reply is the action — a one-line field you
     /// have to squint at is the wrong shape for that.
     private func composer(_ entry: CommandCenterMonitor.Entry, large: Bool = false) -> some View {
-        let binding = Binding(
-            get: { drafts[entry.id] ?? "" },
-            set: { newValue in
-                // Editing means you have left the history and are writing
-                // again; the next Up starts from the newest message. A write
-                // that matches what history just put there is our own echo,
-                // not the user, and must not reset anything.
-                if newValue != drafts[entry.id], newValue != historyEcho[entry.id] {
-                    historyIndex[entry.id] = -1
-                    draftBeforeHistory[entry.id] = nil
-                }
-                drafts[entry.id] = newValue
-            }
-        )
-        return Group {
-            if expandedComposers.contains(entry.id) {
-                expandedComposer(entry, text: binding)
-            } else {
-                inlineComposer(entry, text: binding, large: large)
-            }
-        }
+        inlineComposer(entry, text: draftBinding(entry), large: large)
         // Drop a screenshot, a log, a diff: it is staged where the agent can
         // read it and its path goes in the message.
         .onDrop(of: [.fileURL, .image], isTargeted: nil) { providers in
@@ -629,6 +590,25 @@ struct CommandCenterView: View {
                     .transition(.opacity)
             }
         }
+    }
+
+    /// A row's draft, shared by its one-line box and its editor — open the
+    /// editor mid-sentence and the sentence is there.
+    private func draftBinding(_ entry: CommandCenterMonitor.Entry) -> Binding<String> {
+        Binding(
+            get: { drafts[entry.id] ?? "" },
+            set: { newValue in
+                // Editing means you have left the history and are writing
+                // again; the next Up starts from the newest message. A write
+                // that matches what history just put there is our own echo,
+                // not the user, and must not reset anything.
+                if newValue != drafts[entry.id], newValue != historyEcho[entry.id] {
+                    historyIndex[entry.id] = -1
+                    draftBeforeHistory[entry.id] = nil
+                }
+                drafts[entry.id] = newValue
+            }
+        )
     }
 
     /// The everyday box: a few lines, Return sends.
@@ -697,37 +677,89 @@ struct CommandCenterView: View {
         }
     }
 
+    /// One agent, alone, with the editor.
+    ///
+    /// The board is a live feed — rows move as agents speak — and writing a
+    /// paragraph inside something that rearranges itself is unpleasant in a
+    /// way that a bigger box does not fix. So the editor takes the panel: the
+    /// row you are writing to at the top, what it said under that, and the
+    /// rest is yours. Escape puts the board back.
+    private func focusedComposerView(_ entry: CommandCenterMonitor.Entry) -> some View {
+        let binding = draftBinding(entry)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    collapse(entry)
+                } label: {
+                    Label("Board", systemImage: "chevron.left")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .help("Back to the board (esc)")
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.secondary)
+
+            cardHeader(entry)
+
+            if let prompt = entry.prompt, !prompt.isEmpty {
+                Text(prompt)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            // Bounded, and scrollable inside those bounds: the message is
+            // context for what you are writing, and an agent that has just
+            // written six paragraphs must not push the editor off the panel.
+            ScrollView {
+                Text(entry.message)
+                    .font(.system(size: 12, design: .monospaced))
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: Self.focusedMessageHeight)
+
+            links(entry)
+
+            expandedComposer(entry, text: binding)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // The keyboard belongs in the editor the moment the panel becomes
+        // one. `expand` sets this too, but the view it applies to is built
+        // after that, and a focus request that lands before its field exists
+        // is a focus request that quietly does nothing.
+        .onAppear { focusedDraft = entry.id }
+        // Same as the board's cards: drop a screenshot, a log, a diff.
+        .onDrop(of: [.fileURL, .image, .png, .tiff], isTargeted: nil) { providers in
+            attach(providers: providers, to: entry)
+            return true
+        }
+    }
+
     /// The editor: as many lines as you like, and Return is one of them.
     private func expandedComposer(
         _ entry: CommandCenterMonitor.Entry, text binding: Binding<String>
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            // No title and no close button: the row above already says who
+            // this is going to, and the way out is the Board button in the
+            // corner. Only the two keys are worth saying, because neither is
+            // guessable from a box.
             HStack(spacing: 6) {
-                Image(systemName: "text.alignleft")
-                    .font(.system(size: 9, weight: .semibold))
-                Text("Message to \(entry.watermark)")
-                    .font(.system(size: 10, weight: .semibold))
-                    .lineLimit(1)
                 Spacer(minLength: 0)
-                Text("⌘↩ send · esc close")
+                Text("⌘↩ send · esc back to the board")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
-                Button {
-                    collapse(entry)
-                } label: {
-                    Image(systemName: "arrow.down.right.and.arrow.up.left")
-                        .font(.system(size: 10, weight: .medium))
-                }
-                .buttonStyle(.plain)
-                .help("Back to the one-line box")
             }
-            .foregroundStyle(.secondary)
 
             TextEditor(text: binding)
                 .font(.system(size: 12.5, design: .monospaced))
                 .scrollContentBackground(.hidden)
                 .focused($focusedDraft, equals: entry.id)
-                .frame(height: editorHeight)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 6)
                 .background(
@@ -760,27 +792,16 @@ struct CommandCenterView: View {
         }
     }
 
-    /// A card's fixed height in the layouts that use one — except while its
-    /// editor is open, when the card grows to hold it. Every card being the
-    /// same height is what makes the board scannable; a card with an editor
-    /// in it is the one you are working in, and cropping it to keep the row
-    /// tidy would hide the thing you are typing.
-    private func cardHeight(
-        for entry: CommandCenterMonitor.Entry, _ height: CGFloat
-    ) -> CGFloat? {
-        expandedComposers.contains(entry.id) ? nil : height
-    }
-
-    /// Open a row's editor and put the keyboard in it.
+    /// Give the panel over to one row's editor, and put the keyboard in it.
     private func expand(_ entry: CommandCenterMonitor.Entry) {
-        expandedComposers.insert(entry.id)
+        focusedComposerID = entry.id
         focusedDraft = entry.id
-        scrollTarget = entry.id
     }
 
-    /// Close it, keeping whatever is written.
+    /// Put the board back, keeping whatever is written.
     private func collapse(_ entry: CommandCenterMonitor.Entry) {
-        expandedComposers.remove(entry.id)
+        focusedComposerID = nil
+        focusedDraft = entry.id
     }
 
     /// Links the agent printed, whole and tappable.
@@ -961,7 +982,7 @@ struct CommandCenterView: View {
             // break. Checked before the relay, which has its own opinion
             // about Return with modifiers.
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if expandedComposers.contains(id),
+            if focusedComposerID == id,
                event.keyCode == 36 || event.keyCode == 76,
                flags == .command {
                 send(entry)
@@ -970,7 +991,7 @@ struct CommandCenterView: View {
 
             // Escape closes the editor rather than the panel. One level at a
             // time: a second Escape does whatever it did before.
-            if event.keyCode == 53, expandedComposers.contains(id) {
+            if event.keyCode == 53, focusedComposerID == id {
                 collapse(entry)
                 return nil
             }
@@ -984,7 +1005,7 @@ struct CommandCenterView: View {
             // arrows have an obvious job — moving through what you are
             // writing — and replacing that with someone else's sentence
             // mid-paragraph would be indefensible.
-            guard !expandedComposers.contains(id) else { return event }
+            guard focusedComposerID != id else { return event }
 
             guard event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
                   event.keyCode == 126 || event.keyCode == 125
