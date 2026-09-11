@@ -131,6 +131,54 @@ struct OverviewSpeechTests {
         #expect(calm == OverviewSpeaker.baseVoice)
         #expect(stuck != calm)
     }
+    // MARK: - Segmenting a reading
+
+    @Test func segmentsGroupSentencesUpToTheLimit() {
+        let text = "One. Two. Three."
+        let reading = OverviewSpeaker.reading(of: text, direction: nil)
+        // Short sentences ride together: a generate() call per "Two." would
+        // spend more time starting than speaking.
+        #expect(reading.segments.count == 1)
+        #expect(reading.segments[0].text == text)
+    }
+
+    @Test func segmentRangesPointAtTheOriginalText() {
+        let text = String(repeating: "This sentence is a reasonable length. ", count: 8)
+        let reading = OverviewSpeaker.reading(of: text, direction: nil)
+        #expect(reading.segments.count > 1)
+        for segment in reading.segments {
+            // The range is what the highlight uses; if it does not match the
+            // segment's own text it is pointing somewhere else on screen.
+            #expect(String(text[segment.range]) == segment.text)
+        }
+    }
+
+    @Test func segmentsStayUnderTheLimitAndLoseNothing() {
+        let text = String(repeating: "A moderately long sentence about the build. ", count: 10)
+        let reading = OverviewSpeaker.reading(of: text, direction: nil)
+        for segment in reading.segments {
+            #expect(segment.text.count <= OverviewSpeaker.segmentLimit + 60)
+        }
+        let rejoined = reading.segments.map(\.text).joined()
+        #expect(rejoined.replacingOccurrences(of: " ", with: "")
+                == text.replacingOccurrences(of: " ", with: ""))
+    }
+
+    @Test func aReadingWithOneSentenceIsStillASegment() {
+        let reading = OverviewSpeaker.reading(of: "Done.", direction: nil)
+        #expect(reading.segments.count == 1)
+        #expect(reading.segments[0].text == "Done.")
+    }
+
+    @Test func sentenceRangesSubdivideASegmentForTheHighlight() {
+        let text = "The build failed. I am looking at the log now. It was a missing import."
+        let ranges = OverviewSpeaker.speechSentenceRanges(in: text)
+        #expect(ranges.count == 3)
+        #expect(String(text[ranges[0]]).trimmingCharacters(in: .whitespaces)
+                == "The build failed.")
+        #expect(String(text[ranges[2]]).trimmingCharacters(in: .whitespaces)
+                == "It was a missing import.")
+    }
 }
 
 /// GFM pipe tables parsed into real table blocks.

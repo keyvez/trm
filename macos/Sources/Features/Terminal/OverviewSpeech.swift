@@ -13,6 +13,9 @@ final class LocalNeuralSpeechEngine: @unchecked Sendable {
     struct Chunk: Sendable {
         let pcm16: Data
         let sampleRate: Double
+        /// Index into the segments the request asked for. Which words are
+        /// sounding right now is not recoverable from elapsed time alone.
+        let segment: Int
     }
 
     enum SpeechError: LocalizedError {
@@ -53,8 +56,15 @@ final class LocalNeuralSpeechEngine: @unchecked Sendable {
     }
 
     /// PCM arrives as Qwen generates it; callers never wait for a complete file.
+    /// Render `segments` in order, streaming audio as it is made.
+    ///
+    /// Segmentation belongs to the app rather than the worker now. The worker
+    /// could split the text itself and did, but then only the worker knew
+    /// where the seams were — and the app is the side that has to say which
+    /// sentence is sounding, and which sentences a resumed reading has
+    /// already been through.
     func stream(
-        _ text: String, direction: String? = nil
+        segments: [String], direction: String? = nil
     ) -> AsyncThrowingStream<Chunk, Error> {
         let id = UUID().uuidString
         return AsyncThrowingStream { continuation in
@@ -80,7 +90,12 @@ final class LocalNeuralSpeechEngine: @unchecked Sendable {
                 do {
                     try self.ensureProcess()
                     self.streams[id] = continuation
-                    var request: [String: Any] = ["id": id, "text": text]
+                    var request: [String: Any] = [
+                        "id": id,
+                        // `text` stays for a worker that predates segments.
+                        "text": segments.joined(separator: " "),
+                        "segments": segments,
+                    ]
                     if let direction, !direction.isEmpty {
                         request["instruct"] = direction
                     }
@@ -171,7 +186,9 @@ final class LocalNeuralSpeechEngine: @unchecked Sendable {
                       let encoded = object["pcm"] as? String,
                       let pcm = Data(base64Encoded: encoded),
                       let rate = (object["sampleRate"] as? NSNumber)?.doubleValue else { continue }
-                continuation.yield(Chunk(pcm16: pcm, sampleRate: rate))
+                let segment = (object["segment"] as? NSNumber)?.intValue ?? 0
+                continuation.yield(
+                    Chunk(pcm16: pcm, sampleRate: rate, segment: segment))
             case "end":
                 streams.removeValue(forKey: id)?.finish()
             case "error":
@@ -292,7 +309,51 @@ final class OverviewSpeaker: NSObject, ObservableObject {
     /// is still growing and the end of the scrubber is not the end of the text.
     @Published private(set) var isComplete = false
 
+    /// The stretch of the reading being spoken right now, as a range into the
+    /// reading text — what the view underlines so you can follow along.
+    ///
+    /// Nil when nothing is playing, and nil rather than stale when playback
+    /// has run past what has been rendered.
+    @Published private(set) var spokenRange: Range<String.Index>?
+
+    /// The reading this speaker is part-way through, kept while paused.
+    ///
+    /// Stopping used to throw the reading away, so pressing play again started
+    /// the whole reply from the top — which for a four-minute reply means
+    /// hearing three minutes you have already heard to get back to where you
+    /// were. Stop is a pause now: the text, the audio already made, and the
+    /// position in it are all still here.
+    private(set) var reading: Reading?
+
+    /// A reading, cut into the pieces the worker renders one at a time.
+    struct Reading: Equatable {
+        let text: String
+        let direction: String?
+        /// Each segment's text, and where it sits in `text`, so the spoken
+        /// segment can be pointed at in the original.
+        let segments: [Segment]
+
+        struct Segment: Equatable {
+            let text: String
+            let range: Range<String.Index>
+        }
+    }
+
     var isActive: Bool { isSpeaking || isPreparing }
+
+    /// The words being spoken right now, for the view to find and mark.
+    ///
+    /// The text rather than the range, because the view is not showing the
+    /// reading — it is showing the reply the reading was made from, styled,
+    /// with the markdown taken off. Both sides have had the markers stripped,
+    /// so the sentence can be looked up in what is on screen; an offset into
+    /// the reading would point at the wrong characters entirely.
+    var spokenText: String? {
+        guard let reading, let spokenRange else { return nil }
+        let text = String(reading.text[spokenRange])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
     var canSeek: Bool { !buffers.isEmpty }
 
     /// What to call this reading where it is offered without its overview —
@@ -332,6 +393,17 @@ final class OverviewSpeaker: NSObject, ObservableObject {
     /// clock — which resets on every reschedule.
     private var playedSeconds: TimeInterval = 0
 
+    /// Which segment each buffer came from, parallel to `buffers`. Elapsed
+    /// time says how far in you are; this says what you are hearing.
+    private var bufferSegments: [Int] = []
+
+    /// How many of the reading's segments the worker has finished. A resumed
+    /// reading asks only for the ones after this.
+    private var renderedSegments = 0
+
+    /// Where a paused reading left off, in seconds.
+    private var pausedAt: TimeInterval = 0
+
     override init() {
         super.init()
         LocalNeuralSpeechEngine.shared.prewarm()
@@ -339,11 +411,80 @@ final class OverviewSpeaker: NSObject, ObservableObject {
 
     func toggle(_ text: String, direction: String? = nil) {
         if isActive {
-            stop()
+            pause()
             return
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+
+        // Same words as the reading we paused? Then this is "carry on", not
+        // "read it to me again". A reply that has changed underneath us is a
+        // different reading and starts from the top.
+        if let reading, reading.text == trimmed, !buffers.isEmpty {
+            resume()
+            return
+        }
+        start(Self.reading(of: trimmed, direction: direction))
+    }
+
+    /// Cut a reading into segments the worker renders one at a time.
+    ///
+    /// Sentences grouped up to a limit, which is what the worker used to do
+    /// for itself — a call has fixed overhead, and one per "Yes." would spend
+    /// more time starting than speaking. The limit is smaller than the
+    /// worker's old 320 because a segment is also the unit that gets
+    /// highlighted, and three sentences lighting up at once is not following
+    /// along. It is not one sentence either: sentences synthesised entirely
+    /// alone lose the prosody that carries across a full stop.
+    static func reading(of text: String, direction: String?) -> Reading {
+        var segments: [Reading.Segment] = []
+        var current: Range<String.Index>?
+
+        for sentence in speechSentenceRanges(in: text) {
+            guard let open = current else { current = sentence; continue }
+            let joined = open.lowerBound..<sentence.upperBound
+            if text.distance(from: joined.lowerBound, to: joined.upperBound) <= segmentLimit {
+                current = joined
+            } else {
+                segments.append(.init(text: String(text[open]), range: open))
+                current = sentence
+            }
+        }
+        if let open = current {
+            segments.append(.init(text: String(text[open]), range: open))
+        }
+        if segments.isEmpty {
+            segments = [.init(text: text, range: text.startIndex..<text.endIndex)]
+        }
+        return Reading(text: text, direction: direction, segments: segments)
+    }
+
+    /// Characters per segment. Roughly a sentence or two of ordinary prose.
+    static let segmentLimit = 160
+
+    private func start(_ reading: Reading) {
+        self.reading = reading
+        renderedSegments = 0
+        buffers = []
+        bufferSegments = []
+        cursor = 0
+        playedSeconds = 0
+        pausedAt = 0
+        elapsed = 0
+        rendered = 0
+        spokenRange = nil
+        render(from: 0)
+    }
+
+    /// Ask the worker for the reading from `segment` on, and play what comes.
+    private func render(from segment: Int) {
+        guard let reading, segment < reading.segments.count else {
+            // Nothing left to make: what is already here is the whole thing.
+            streamEnded = true
+            isComplete = true
+            finishIfDrained()
+            return
+        }
 
         let id = UUID()
         requestID = id
@@ -351,26 +492,25 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         lastError = nil
         streamEnded = false
         pendingBuffers = 0
-        buffers = []
-        cursor = 0
-        playedSeconds = 0
-        elapsed = 0
-        rendered = 0
         isComplete = false
+        let wanted = Array(reading.segments[segment...]).map(\.text)
         // Held for as long as it plays, so closing the overview that started
         // it — Escape on a peek, most often — does not deallocate the voice.
         SpeechNowPlaying.shared.begin(self, label: sourceLabel, paneId: sourcePaneId)
         generationTask = Task { [weak self] in
             do {
                 for try await chunk in LocalNeuralSpeechEngine.shared.stream(
-                    trimmed, direction: direction) {
+                    segments: wanted, direction: reading.direction) {
                     try Task.checkCancellation()
                     guard let self, self.requestID == id else { return }
-                    try self.schedule(chunk)
+                    // The worker numbers from the start of what it was asked
+                    // for; a resumed reading asked for a tail of the whole.
+                    try self.schedule(chunk, segment: segment + chunk.segment)
                 }
                 guard let self, self.requestID == id else { return }
                 self.streamEnded = true
                 self.isComplete = true
+                self.renderedSegments = self.reading?.segments.count ?? self.renderedSegments
                 self.finishIfDrained()
             } catch is CancellationError {
                 // The stop button is not an error.
@@ -386,20 +526,103 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         }
     }
 
+    /// Stop speaking, and remember where.
+    ///
+    /// The audio already made is kept, along with the position in it, so
+    /// pressing play again carries on rather than reading the whole reply
+    /// from the top. The worker is still told to stop — there is no point
+    /// synthesising into a void — and what it had not reached yet is asked
+    /// for again on resume.
+    func pause() {
+        requestID = nil
+        generationTask?.cancel()
+        generationTask = nil
+        pausedAt = playedSeconds
+        // Only the engine goes; the buffers are the reading.
+        releaseEngine()
+        dropUnfinishedSegment()
+        isPreparing = false
+        isSpeaking = false
+        spokenRange = nil
+        SpeechNowPlaying.shared.end(self)
+    }
+
+    /// Throw away the audio of a segment the worker was cut off partway
+    /// through.
+    ///
+    /// Cancelling stops the render mid-segment, so the last segment's audio is
+    /// a fragment. Resuming asks for that segment again — whole — and without
+    /// this the fragment would still be sitting in front of it and you would
+    /// hear the first half of the sentence twice. Dropping it also puts the
+    /// resume point on a sentence boundary, which is where you want to be
+    /// picked up anyway.
+    private func dropUnfinishedSegment() {
+        guard !isComplete, let last = bufferSegments.last else { return }
+        while let owner = bufferSegments.last, owner == last {
+            let dropped = buffers.removeLast()
+            bufferSegments.removeLast()
+            rendered -= Double(dropped.frameLength) / dropped.format.sampleRate
+        }
+        renderedSegments = last
+        rendered = max(0, rendered)
+        pausedAt = min(pausedAt, rendered)
+        cursor = min(cursor, buffers.count)
+    }
+
+    /// Pick a paused reading back up where it left off.
+    private func resume() {
+        guard reading != nil else { return }
+        let target = min(pausedAt, rendered)
+        var index = 0
+        var seconds: TimeInterval = 0
+        while index < buffers.count {
+            let length = Double(buffers[index].frameLength) / buffers[index].format.sampleRate
+            if seconds + length > target { break }
+            seconds += length
+            index += 1
+        }
+        cursor = index
+        playedSeconds = seconds
+        elapsed = seconds
+        updateSpokenRange()
+        // Everything up to here is already in hand; ask only for the rest.
+        render(from: renderedSegments)
+    }
+
+    /// Throw the reading away as well as the audio. The reading is finished,
+    /// or is being replaced, and there is nothing to come back to.
     func stop() {
         requestID = nil
         generationTask?.cancel()
         generationTask = nil
         stopAudio()
+        reading = nil
+        renderedSegments = 0
+        pausedAt = 0
         isPreparing = false
         isSpeaking = false
         SpeechNowPlaying.shared.end(self)
     }
 
-    private func schedule(_ chunk: LocalNeuralSpeechEngine.Chunk) throws {
+    private func schedule(
+        _ chunk: LocalNeuralSpeechEngine.Chunk, segment: Int
+    ) throws {
         if sampleRate != chunk.sampleRate || audioEngine == nil {
+            // A resumed reading needs an engine again, and its buffers are
+            // the point — building one must not throw them away.
+            let keep = buffers.isEmpty ? nil : (buffers, bufferSegments, cursor, playedSeconds)
             stopAudio()
             try configureAudio(sampleRate: chunk.sampleRate)
+            if let (saved, owners, at, played) = keep {
+                buffers = saved
+                bufferSegments = owners
+                cursor = at
+                playedSeconds = played
+                elapsed = played
+                rendered = saved.reduce(0) {
+                    $0 + Double($1.frameLength) / $1.format.sampleRate
+                }
+            }
         }
         guard let playerNode,
               let format = AVAudioFormat(
@@ -422,6 +645,10 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         }
 
         buffers.append(buffer)
+        bufferSegments.append(segment)
+        // The worker only moves to the next segment once this one is done, so
+        // seeing a chunk of segment N means every segment before it is made.
+        renderedSegments = max(renderedSegments, segment)
         rendered += Double(frames) / chunk.sampleRate
         // Only schedule what the cursor has reached. After a skip back the
         // cursor trails the newest buffer, and freshly arriving audio must
@@ -447,6 +674,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
                 self.pendingBuffers = max(0, self.pendingBuffers - 1)
                 self.playedSeconds += seconds
                 self.elapsed = self.playedSeconds
+                self.updateSpokenRange()
                 // A skip back leaves the cursor behind the rendered end;
                 // keep feeding it as the node drains.
                 if self.cursor < self.buffers.count {
@@ -493,6 +721,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         cursor = index
         playedSeconds = seconds
         elapsed = seconds
+        updateSpokenRange()
         // Prime a few so playback resumes without waiting on the generator.
         let priming = min(buffers.count, index + 8)
         while cursor < priming {
@@ -538,7 +767,9 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         SpeechNowPlaying.shared.end(self)
     }
 
-    private func stopAudio() {
+    /// Tear down the engine but keep the audio. Pausing wants this: the
+    /// buffers are the reading, and rebuilding them costs a re-render.
+    private func releaseEngine() {
         playerNode?.stop()
         audioEngine?.stop()
         playerNode = nil
@@ -546,11 +777,72 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         timePitch = nil
         sampleRate = nil
         pendingBuffers = 0
+    }
+
+    private func stopAudio() {
+        releaseEngine()
         buffers = []
+        bufferSegments = []
         cursor = 0
         playedSeconds = 0
         elapsed = 0
         rendered = 0
+        spokenRange = nil
+    }
+
+    /// The stretch of the reading being spoken at `playedSeconds`.
+    ///
+    /// The segment is known exactly — every buffer is stamped with the one it
+    /// came from. Where inside the segment is an estimate: speech takes about
+    /// as long as its characters are many, so the elapsed fraction of the
+    /// segment's audio picks the sentence at that fraction of its text. Good
+    /// to well within a sentence, which is all the eye needs to follow along.
+    private func updateSpokenRange() {
+        guard let reading, !buffers.isEmpty, !bufferSegments.isEmpty else {
+            spokenRange = nil
+            return
+        }
+        // Which buffer is sounding. Not `cursor` — that is the next buffer to
+        // hand to the node, and it runs ahead of the speaker by whatever is
+        // queued.
+        var index = 0
+        var start: TimeInterval = 0
+        while index < buffers.count - 1 {
+            let length = Double(buffers[index].frameLength) / buffers[index].format.sampleRate
+            if start + length > elapsed { break }
+            start += length
+            index += 1
+        }
+        guard index < bufferSegments.count else { spokenRange = nil; return }
+        let segment = bufferSegments[index]
+        guard segment < reading.segments.count else { spokenRange = nil; return }
+
+        // Where this segment's audio begins, and how long it runs.
+        var segmentStart: TimeInterval = 0
+        var segmentLength: TimeInterval = 0
+        for (position, owner) in bufferSegments.enumerated() {
+            let length = Double(buffers[position].frameLength)
+                / buffers[position].format.sampleRate
+            if owner < segment {
+                segmentStart += length
+            } else if owner == segment {
+                segmentLength += length
+            }
+        }
+
+        let whole = reading.segments[segment].range
+        let sentences = Self.speechSentenceRanges(in: reading.text, within: whole)
+        guard sentences.count > 1, segmentLength > 0 else {
+            spokenRange = whole
+            return
+        }
+        let fraction = min(max((elapsed - segmentStart) / segmentLength, 0), 1)
+        let span = reading.text.distance(from: whole.lowerBound, to: whole.upperBound)
+        let mark = reading.text.index(
+            whole.lowerBound,
+            offsetBy: Int((Double(span) * fraction).rounded(.down)),
+            limitedBy: whole.upperBound) ?? whole.upperBound
+        spokenRange = sentences.first { $0.upperBound > mark } ?? sentences.last
     }
 
     // MARK: - How it should sound
@@ -756,6 +1048,25 @@ final class OverviewSpeaker: NSObject, ObservableObject {
             "i'm going to ", "i am going to ", "i'm checking ", "i am checking ",
         ].contains(where: { lower.hasPrefix($0) }) { score -= 6 }
         return score
+    }
+
+    /// Sentence ranges, into the string they came from.
+    ///
+    /// The by-string version above copies what it finds, which is fine for
+    /// choosing what to say and useless for pointing at it: a highlight needs
+    /// to know where in the original the sentence sits, not what it said.
+    static func speechSentenceRanges(
+        in text: String, within bounds: Range<String.Index>? = nil
+    ) -> [Range<String.Index>] {
+        let scope = bounds ?? text.startIndex..<text.endIndex
+        guard !text.isEmpty, scope.lowerBound < scope.upperBound else { return [] }
+        var ranges: [Range<String.Index>] = []
+        text.enumerateSubstrings(
+            in: scope, options: [.bySentences, .localized]
+        ) { _, range, _, _ in
+            ranges.append(range)
+        }
+        return ranges.isEmpty ? [scope] : ranges
     }
 
     private static func speechSentences(_ text: String) -> [String] {

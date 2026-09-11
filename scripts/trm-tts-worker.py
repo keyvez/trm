@@ -123,7 +123,18 @@ def render(model: object, request: dict[str, object]) -> None:
     # few hundred characters, well inside the ceiling, and their boundaries are
     # what playback seeks to when you skip back.
     instruct = str(request.get("instruct") or DEFAULT_INSTRUCT)
-    for index, segment in enumerate(segments(text)):
+
+    # The app usually says where the seams go, because it is the side that has
+    # to highlight the sentence being spoken and to resume a reading from the
+    # part it had not reached. Splitting here is the fallback for a caller that
+    # sends only `text`.
+    given = request.get("segments")
+    if isinstance(given, list) and given:
+        pieces = [str(s) for s in given if str(s).strip()]
+    else:
+        pieces = segments(text)
+
+    for index, segment in enumerate(pieces):
         if cancelled(request_id):
             break
         for result in model.generate(

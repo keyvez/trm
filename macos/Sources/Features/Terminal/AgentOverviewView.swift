@@ -1119,13 +1119,54 @@ struct AgentOverviewView: View {
     /// markdown (bold, italics, `code`) rendered instead of shown raw.
     @ViewBuilder
     private func bodyText(_ text: String) -> some View {
-        let styled = Self.linkified(overviewStyledMarkdown(
+        SpokenProse(
+            speaker: pane.speaker,
+            build: { spoken in self.styledBody(text, marking: spoken) },
+            render: { styled in self.renderBody(styled) }
+        )
+    }
+
+    /// Prose that follows the voice.
+    ///
+    /// Its own small view, and observing the speaker itself, for the same
+    /// reason the speak button is: the pane owns the speaker but does not
+    /// forward a nested object's changes, so a paragraph that did not watch
+    /// it would keep whatever highlight it had when it was last built.
+    private struct SpokenProse: View {
+        @ObservedObject var speaker: OverviewSpeaker
+        let build: (String?) -> AttributedString
+        let render: (AttributedString) -> AnyView
+
+        var body: some View {
+            render(build(speaker.spokenText))
+        }
+    }
+
+    /// The paragraph, with the sentence being read marked if it is in here.
+    private func styledBody(_ text: String, marking spoken: String?) -> AttributedString {
+        var styled = Self.linkified(overviewStyledMarkdown(
             text,
             size: scaled(13.5),
             weight: .light,
             design: pane.fontFamily.design,
             bionic: pane.bionicEnabled
         ))
+        // Looked up rather than computed: the reading is a rewrite of the
+        // reply — code blocks named instead of read, markers stripped — so
+        // there is no offset that maps one onto the other. A sentence either
+        // appears in this paragraph or belongs to another one.
+        if let spoken, let found = styled.range(of: spoken) {
+            styled[found].backgroundColor = Color.accentColor.opacity(0.22)
+        }
+        return styled
+    }
+
+    private func renderBody(_ styled: AttributedString) -> AnyView {
+        AnyView(bodyTextBody(styled))
+    }
+
+    @ViewBuilder
+    private func bodyTextBody(_ styled: AttributedString) -> some View {
         Group {
             if Self.hasLink(styled) {
                 // NSTextView-backed so the cursor becomes a pointing hand
@@ -2226,9 +2267,8 @@ struct OverviewPlaybackControls: View {
         HStack(spacing: 7) {
             control("backward.end.fill", "Start again") { speaker.restart() }
                 .disabled(!speaker.canSeek)
-            control("gobackward.10", "Back 10 seconds") { speaker.seek(by: -10) }
-                .disabled(!speaker.canSeek)
-            control("goforward.10", "Forward 10 seconds") { speaker.seek(by: 10) }
+            skip(-Self.skipSeconds).disabled(!speaker.canSeek)
+            skip(Self.skipSeconds)
                 .disabled(!speaker.canSeek || speaker.elapsed >= speaker.rendered - 0.5)
 
             Button {
@@ -2256,6 +2296,39 @@ struct OverviewPlaybackControls: View {
                 .foregroundStyle(.tertiary)
                 .monospacedDigit()
         }
+    }
+
+    /// How far a skip goes.
+    ///
+    /// Ten was a music player's number. What you skip back for here is a
+    /// sentence you did not catch, and a sentence is about seven seconds —
+    /// ten put you a sentence and a half back, which means listening again to
+    /// something you already heard to reach the bit you missed.
+    static let skipSeconds: TimeInterval = 7
+
+    /// Skip buttons have to be drawn rather than named: SF Symbols ships
+    /// `gobackward` for 5, 10, 15, 30 and up, and no 7. The bare arrow with
+    /// the number set inside it is what those symbols are, so this is the
+    /// same drawing with a different digit.
+    private func skip(_ offset: TimeInterval) -> some View {
+        let back = offset < 0
+        let seconds = Int(abs(offset))
+        return Button {
+            speaker.seek(by: offset)
+        } label: {
+            Image(systemName: back ? "gobackward" : "goforward")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.secondary)
+                .overlay(
+                    Text("\(seconds)")
+                        .font(.system(size: 5.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.secondary)
+                        .offset(y: 0.5)
+                )
+                .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.plain)
+        .help(back ? "Back \(seconds) seconds" : "Forward \(seconds) seconds")
     }
 
     private func control(
