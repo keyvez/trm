@@ -179,6 +179,48 @@ struct OverviewSpeechTests {
         #expect(String(text[ranges[2]]).trimmingCharacters(in: .whitespaces)
                 == "It was a missing import.")
     }
+    // MARK: - Saying numbers
+
+    @Test func aMoneyRangeIsSaidAsARange() {
+        // The reported case: a symbol spoken after the number, a dash meaning
+        // "to", and a magnitude letter that governs both ends.
+        #expect(OverviewSpeaker.spokenNumbers("It costs $15-45k a year.")
+                == "It costs 15 to 45 thousand dollars a year.")
+    }
+
+    @Test func bothEndsKeepTheirOwnMagnitudeWhenTheyDiffer() {
+        #expect(OverviewSpeaker.spokenNumbers("$900k-2M")
+                == "900 thousand to 2 million dollars")
+    }
+
+    @Test func aSingleAmountMovesItsSymbolAfterTheNumber() {
+        #expect(OverviewSpeaker.spokenNumbers("about $1.5M") == "about 1.5 million dollars")
+        #expect(OverviewSpeaker.spokenNumbers("£200 each") == "200 pounds each")
+    }
+
+    @Test func thousandsSeparatorsGoSoTheNumberIsNotReadInHalves() {
+        #expect(OverviewSpeaker.spokenNumbers("$15,000") == "15000 dollars")
+    }
+
+    @Test func percentRangesGetTheirDashSpokenToo() {
+        #expect(OverviewSpeaker.spokenNumbers("10-20% slower")
+                == "10 to 20 percent slower")
+    }
+
+    @Test func plainNumbersAndDatesAreLeftAlone() {
+        // Only money and percentages are rewritten. A version, a date or a
+        // hyphenated range of ordinary numbers has no symbol to move, and
+        // guessing at those breaks more than it fixes.
+        #expect(OverviewSpeaker.spokenNumbers("on 2026-09-11") == "on 2026-09-11")
+        #expect(OverviewSpeaker.spokenNumbers("takes 3-4 minutes") == "takes 3-4 minutes")
+        #expect(OverviewSpeaker.spokenNumbers("version 1.7") == "version 1.7")
+    }
+
+    @Test func moneyIsNormalisedOnTheWayIntoSpeech() {
+        // Not just the helper: the text the speaker actually sends.
+        #expect(OverviewSpeaker.plainProse("Budget is **$15-45k**.")
+                == "Budget is 15 to 45 thousand dollars.")
+    }
 }
 
 /// GFM pipe tables parsed into real table blocks.

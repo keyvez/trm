@@ -1235,6 +1235,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
             with: "a commit", options: .regularExpression)
         value = value.replacingOccurrences(
             of: #"\S{32,}"#, with: "", options: .regularExpression)
+        value = spokenNumbers(value)
         value = value.replacingOccurrences(
             of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
         return value
@@ -1243,6 +1244,93 @@ final class OverviewSpeaker: NSObject, ObservableObject {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Money, magnitudes and ranges, put the way a person says them.
+    ///
+    /// "$15-45k" is four problems in seven characters: a symbol spoken *after*
+    /// the number it sits before, a dash that means "to" and not "minus", a
+    /// magnitude letter belonging to both numbers rather than the one it
+    /// touches, and an order that has to be rebuilt instead of read left to
+    /// right. Synthesisers guess at it, and guess differently each time — the
+    /// reason a figure in a reply came out as noise exactly when it was the
+    /// part you were listening for.
+    ///
+    /// Digits are left as digits, which every voice reads correctly. Only the
+    /// symbols and the shape are rewritten.
+    static func spokenNumbers(_ text: String) -> String {
+        var value = text
+        // Ranges first: "$15-45k" has to be seen whole, or the single-amount
+        // rule below would take "$15" and leave "-45k" stranded behind it.
+        value = rewrite(value, #"([$£€])\s*(\d[\d,]*(?:\.\d+)?)(?:\s*([kKmMbB])\b)?\s*(?:[-–—]|\s+to\s+)\s*[$£€]?\s*(\d[\d,]*(?:\.\d+)?)(?:\s*([kKmMbB])\b)?"#) { g in
+            let currency = currencyWord(g[1])
+            let first = number(g[2]), second = number(g[4])
+            // A magnitude written once governs both ends: in "$15-45k" the
+            // fifteen is fifteen thousand, not fifteen.
+            let firstUnit = magnitudeWord(g[3]) ?? magnitudeWord(g[5])
+            let secondUnit = magnitudeWord(g[5]) ?? magnitudeWord(g[3])
+            if firstUnit == secondUnit {
+                return [first, "to", second, firstUnit, currency]
+                    .compactMap { $0 }.joined(separator: " ")
+            }
+            return [first, firstUnit, "to", second, secondUnit, currency]
+                .compactMap { $0 }.joined(separator: " ")
+        }
+        // A single amount: "$15k", "£200".
+        value = rewrite(value, #"([$£€])\s*(\d[\d,]*(?:\.\d+)?)(?:\s*([kKmMbB])\b)?"#) { g in
+            [number(g[2]), magnitudeWord(g[3]), currencyWord(g[1])]
+                .compactMap { $0 }.joined(separator: " ")
+        }
+        // "10-20%" has the same dash-means-to problem without the symbol.
+        value = rewrite(value, #"(\d[\d,]*(?:\.\d+)?)\s*[-–—]\s*(\d[\d,]*(?:\.\d+)?)\s*%"#) { g in
+            "\(number(g[1]) ?? "") to \(number(g[2]) ?? "") percent"
+        }
+        return value
+    }
+
+    /// Replace every match, newest first so earlier ranges stay valid, handing
+    /// the capture groups to `body` as strings (nil where the group is absent).
+    private static func rewrite(
+        _ text: String, _ pattern: String, _ body: ([Int: String]) -> String
+    ) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        var value = text
+        let whole = NSRange(value.startIndex..., in: value)
+        for match in regex.matches(in: value, range: whole).reversed() {
+            var groups: [Int: String] = [:]
+            for index in 1..<match.numberOfRanges {
+                if let range = Range(match.range(at: index), in: value) {
+                    groups[index] = String(value[range])
+                }
+            }
+            guard let range = Range(match.range, in: value) else { continue }
+            value.replaceSubrange(range, with: body(groups))
+        }
+        return value
+    }
+
+    private static func number(_ raw: String?) -> String? {
+        // Thousands separators are for the eye. "15,000" spoken as written
+        // invites a pause in the middle of one number.
+        raw?.replacingOccurrences(of: ",", with: "")
+    }
+
+    private static func currencyWord(_ symbol: String?) -> String? {
+        switch symbol {
+        case "$": return "dollars"
+        case "£": return "pounds"
+        case "€": return "euros"
+        default: return nil
+        }
+    }
+
+    private static func magnitudeWord(_ letter: String?) -> String? {
+        switch letter?.lowercased() {
+        case "k": return "thousand"
+        case "m": return "million"
+        case "b": return "billion"
+        default: return nil
+        }
     }
 
     private static func tablePhrase(rows: Int) -> String {
@@ -1318,6 +1406,6 @@ final class OverviewSpeaker: NSObject, ObservableObject {
             of: #"(?m)^\s*(#{1,6}\s+|[-+•]\s+|>\s+|\d+\.\s+)"#,
             with: "", options: .regularExpression
         )
-        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return spokenNumbers(value).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
