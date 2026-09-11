@@ -221,6 +221,29 @@ struct OverviewSpeechTests {
         #expect(OverviewSpeaker.plainProse("Budget is **$15-45k**.")
                 == "Budget is 15 to 45 thousand dollars.")
     }
+    @Test func aFigureInBackticksIsSpokenNotCalledAValue() {
+        // The reported bug: `$15-45k` in a reply reached the "is this a word
+        // or a machine" test, had a symbol in it, and came out as "a value".
+        #expect(OverviewSpeaker.spokenForm(of: "$15-45k")
+                == "15 to 45 thousand dollars")
+        #expect(OverviewSpeaker.spokenForm(of: "$1.5M") == "1.5 million dollars")
+        #expect(OverviewSpeaker.spokenForm(of: "45k") == "45 thousand")
+        #expect(OverviewSpeaker.spokenForm(of: "10-20%") == "10 to 20 percent")
+    }
+
+    @Test func backtickedMachineryIsStillNamedRatherThanRead() {
+        // The figure rule must not swallow the spans the old behaviour was
+        // right about.
+        #expect(OverviewSpeaker.spokenForm(of: "git rebase -i") == "a git command")
+        #expect(OverviewSpeaker.spokenForm(of: "a1b2c3d4e5f6") == "a commit")
+        #expect(OverviewSpeaker.spokenForm(of: "{\"a\":1,\"b\":[2,3],\"c\":\"x/y\"}") == "a value")
+    }
+
+    @Test func moneyInBacktickedProseSurvivesTheWholePipeline() {
+        let spoken = OverviewSpeaker.speakableProse("The budget is `$15-45k` for now.")
+        #expect(spoken == "The budget is 15 to 45 thousand dollars for now.")
+        #expect(!spoken.contains("value"))
+    }
 }
 
 /// GFM pipe tables parsed into real table blocks.

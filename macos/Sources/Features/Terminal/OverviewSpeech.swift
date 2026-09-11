@@ -1258,7 +1258,11 @@ final class OverviewSpeaker: NSObject, ObservableObject {
     ///
     /// Digits are left as digits, which every voice reads correctly. Only the
     /// symbols and the shape are rewritten.
-    static func spokenNumbers(_ text: String) -> String {
+    /// - Parameter bareMagnitudes: also expand a magnitude letter with no
+    ///   currency in front of it, as in "45k". Only safe where the span is
+    ///   known to be a figure and nothing else — in running prose "3M" is as
+    ///   likely to be three megabytes as three million.
+    static func spokenNumbers(_ text: String, bareMagnitudes: Bool = false) -> String {
         var value = text
         // Ranges first: "$15-45k" has to be seen whole, or the single-amount
         // rule below would take "$15" and leave "-45k" stranded behind it.
@@ -1280,6 +1284,11 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         value = rewrite(value, #"([$£€])\s*(\d[\d,]*(?:\.\d+)?)(?:\s*([kKmMbB])\b)?"#) { g in
             [number(g[2]), magnitudeWord(g[3]), currencyWord(g[1])]
                 .compactMap { $0 }.joined(separator: " ")
+        }
+        if bareMagnitudes {
+            value = rewrite(value, #"(\d[\d,]*(?:\.\d+)?)\s*([kKmMbB])\b"#) { g in
+                [number(g[1]), magnitudeWord(g[2])].compactMap { $0 }.joined(separator: " ")
+            }
         }
         // "10-20%" has the same dash-means-to problem without the symbol.
         value = rewrite(value, #"(\d[\d,]*(?:\.\d+)?)\s*[-–—]\s*(\d[\d,]*(?:\.\d+)?)\s*%"#) { g in
@@ -1361,6 +1370,16 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         guard !value.isEmpty else { return "" }
         let words = value.split(separator: " ")
         let head = String(words.first ?? "")
+
+        // A figure in backticks is a figure, not a machine. Agents write
+        // amounts in code spans constantly, and every one of them used to
+        // fall all the way through to "a value" — the least useful thing
+        // that can be said about the number you are being asked to react to.
+        if value.range(
+            of: #"^[$£€]?\d[\d,]*(?:\.\d+)?\s*[kKmMbB]?(?:\s*(?:[-–—]|to)\s*[$£€]?\d[\d,]*(?:\.\d+)?\s*[kKmMbB]?)?%?$"#,
+            options: .regularExpression) != nil {
+            return spokenNumbers(value, bareMagnitudes: true)
+        }
 
         if head == "git" { return "a git command" }
         if shellVerbs.contains(head) { return "a command" }
