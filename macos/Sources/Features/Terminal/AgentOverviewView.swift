@@ -990,14 +990,17 @@ struct AgentOverviewView: View {
                 cardsView
             } else {
                 ForEach(pane.displayedTranscript.blocks) { block in
-                    switch block {
-                    case .paragraph(let text):
-                        paragraphView(text)
-                    case .code(let language, let text):
-                        codeBlock(language: language, text: text)
-                    case .image(let data):
-                        inlineImage(data)
+                    Group {
+                        switch block {
+                        case .paragraph(let text):
+                            paragraphView(text)
+                        case .code(let language, let text):
+                            codeBlock(language: language, text: text)
+                        case .image(let data):
+                            inlineImage(data)
+                        }
                     }
+                    .modifier(SpokenBlockMark(speaker: pane.speaker, blockID: block.id))
                 }
             }
         }
@@ -1040,11 +1043,14 @@ struct AgentOverviewView: View {
         let cards = AgentCardSplitter.cards(for: pane.displayedTranscript)
         if cards.isEmpty {
             ForEach(pane.displayedTranscript.blocks) { block in
-                switch block {
-                case .paragraph(let text): paragraphView(text)
-                case .code(let language, let text): codeBlock(language: language, text: text)
-                case .image(let data): inlineImage(data)
+                Group {
+                    switch block {
+                    case .paragraph(let text): paragraphView(text)
+                    case .code(let language, let text): codeBlock(language: language, text: text)
+                    case .image(let data): inlineImage(data)
+                    }
                 }
+                .modifier(SpokenBlockMark(speaker: pane.speaker, blockID: block.id))
             }
         } else {
             OverviewCardColumns(items: cards) { card in
@@ -1124,6 +1130,31 @@ struct AgentOverviewView: View {
             build: { spoken in self.styledBody(text, marking: spoken) },
             render: { styled in self.renderBody(styled) }
         )
+    }
+
+    /// Mark the block being read aloud.
+    ///
+    /// Structural rather than textual: the speaker says which block is
+    /// sounding, so there is nothing to search for and nothing to fail to
+    /// find. A tinted panel behind the whole block, which is coarse on
+    /// purpose — the point is to see at a glance where the voice is, and a
+    /// mark that arrives late or not at all is worse than one that covers a
+    /// paragraph.
+    private struct SpokenBlockMark: ViewModifier {
+        @ObservedObject var speaker: OverviewSpeaker
+        let blockID: String
+
+        func body(content: Content) -> some View {
+            let lit = speaker.spokenBlockID == blockID
+            return content
+                .padding(.horizontal, lit ? 6 : 0)
+                .padding(.vertical, lit ? 3 : 0)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.accentColor.opacity(lit ? 0.14 : 0))
+                )
+                .animation(.easeOut(duration: 0.18), value: lit)
+        }
     }
 
     /// Prose that follows the voice.
@@ -2223,14 +2254,21 @@ private struct OverviewSpeakButton: View {
     var body: some View {
         Button {
             let summarize = NSEvent.modifierFlags.contains(.option)
-            let reading = summarize
-                ? OverviewSpeaker.developerBriefing(for: transcript)
-                : OverviewSpeaker.fullReading(for: transcript)
             // The transcript, not just the words: being stuck is a fact about
-            // the session that no single sentence of the reply contains.
-            speaker.toggle(
-                reading,
-                direction: OverviewSpeaker.direction(for: transcript, reading: reading))
+            // the session that no single sentence of the reply contains, and
+            // which block each sentence came from is how the page follows
+            // along.
+            if summarize {
+                let brief = OverviewSpeaker.developerBriefing(for: transcript)
+                speaker.toggle(
+                    brief,
+                    direction: OverviewSpeaker.direction(for: transcript, reading: brief))
+            } else {
+                let whole = OverviewSpeaker.fullReading(for: transcript)
+                speaker.toggle(OverviewSpeaker.reading(
+                    for: transcript,
+                    direction: OverviewSpeaker.direction(for: transcript, reading: whole)))
+            }
         } label: {
             Image(systemName: speaker.isActive ? "stop.fill" : "speaker.wave.2")
                 .font(.system(size: 10))

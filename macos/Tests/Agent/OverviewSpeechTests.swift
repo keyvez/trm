@@ -244,6 +244,65 @@ struct OverviewSpeechTests {
         #expect(spoken == "The budget is 15 to 45 thousand dollars for now.")
         #expect(!spoken.contains("value"))
     }
+    // MARK: - Following the reading on the page
+
+    @Test func everySpokenSegmentKnowsWhichBlockItCameFrom() {
+        var transcript = AgentTranscript()
+        transcript.blocks = [
+            .paragraph("The build failed on the first attempt."),
+            .code(language: "swift", text: "let x = 1"),
+            .paragraph("I fixed the missing import and it passes now."),
+        ]
+        let reading = OverviewSpeaker.reading(for: transcript, direction: nil)
+        let first = transcript.blocks[0].id
+        let last = transcript.blocks[2].id
+        let ids = reading.segments.map(\.blockID)
+        #expect(ids.contains(first))
+        #expect(ids.contains(last))
+        // The code block is named rather than read, so the phrase standing in
+        // for it belongs to nothing on the page and marks nothing.
+        #expect(!ids.contains(transcript.blocks[1].id))
+    }
+
+    @Test func aRewrittenSentenceStillMarksItsBlock() {
+        // The failure that made the first attempt invisible: the reading says
+        // "15 to 45 thousand dollars" and the page says "$15-45k", so
+        // searching the page for the spoken words finds nothing. The block is
+        // recorded instead, and is still right.
+        var transcript = AgentTranscript()
+        transcript.blocks = [.paragraph("The budget is `$15-45k` for now.")]
+        let reading = OverviewSpeaker.reading(for: transcript, direction: nil)
+        #expect(reading.text.contains("15 to 45 thousand dollars"))
+        #expect(!reading.text.contains(transcript.blocks[0].id))
+        #expect(reading.segments.allSatisfy { $0.blockID == transcript.blocks[0].id })
+    }
+
+    @Test func noSegmentStraddlesTwoBlocks() {
+        // The bug this caught: a short reply fits under the segment limit
+        // whole, so it became one segment covering three paragraphs and
+        // marked only the first — the highlight sat on paragraph one while
+        // paragraph three was being read.
+        var transcript = AgentTranscript()
+        transcript.blocks = [
+            .paragraph("Short one."),
+            .paragraph("Short two."),
+            .paragraph("Short three."),
+        ]
+        let reading = OverviewSpeaker.reading(for: transcript, direction: nil)
+        #expect(reading.segments.count == 3)
+        #expect(Set(reading.segments.compactMap(\.blockID)).count == 3)
+    }
+
+    @Test func theReadingSaysTheSameWordsEitherWayItIsBuilt() {
+        var transcript = AgentTranscript()
+        transcript.blocks = [
+            .paragraph("First thing."),
+            .paragraph("Second thing."),
+        ]
+        // Labelling the pieces must not change what gets said.
+        #expect(OverviewSpeaker.reading(for: transcript, direction: nil).text
+                == OverviewSpeaker.fullReading(for: transcript))
+    }
 }
 
 /// GFM pipe tables parsed into real table blocks.

@@ -336,10 +336,24 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         struct Segment: Equatable {
             let text: String
             let range: Range<String.Index>
+            /// The transcript block this came from, so the view can mark it
+            /// without having to find the words again. Matching spoken text
+            /// against what is on screen is the fragile way round: the
+            /// reading is a rewrite — amounts respelled, code spans named,
+            /// links replaced — and any of those rewrites leaves a sentence
+            /// that appears nowhere on the page. The block always exists.
+            var blockID: String?
         }
     }
 
     var isActive: Bool { isSpeaking || isPreparing }
+
+    /// The transcript block being read right now.
+    ///
+    /// This is what the page highlights. It is derived from which segment is
+    /// sounding, not from searching the page for words, so it cannot fail to
+    /// find a match — the common reason nothing lit up at all.
+    @Published private(set) var spokenBlockID: String?
 
     /// The words being spoken right now, for the view to find and mark.
     ///
@@ -410,21 +424,26 @@ final class OverviewSpeaker: NSObject, ObservableObject {
     }
 
     func toggle(_ text: String, direction: String? = nil) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || isActive else { return }
+        toggle(Self.reading(of: trimmed, direction: direction))
+    }
+
+    func toggle(_ next: Reading) {
         if isActive {
             pause()
             return
         }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !next.text.isEmpty else { return }
 
         // Same words as the reading we paused? Then this is "carry on", not
         // "read it to me again". A reply that has changed underneath us is a
         // different reading and starts from the top.
-        if let reading, reading.text == trimmed, !buffers.isEmpty {
+        if let reading, reading.text == next.text, !buffers.isEmpty {
             resume()
             return
         }
-        start(Self.reading(of: trimmed, direction: direction))
+        start(next)
     }
 
     /// Cut a reading into segments the worker renders one at a time.
@@ -437,26 +456,33 @@ final class OverviewSpeaker: NSObject, ObservableObject {
     /// along. It is not one sentence either: sentences synthesised entirely
     /// alone lose the prosody that carries across a full stop.
     static func reading(of text: String, direction: String?) -> Reading {
-        var segments: [Reading.Segment] = []
+        let segments = segmentRanges(in: text).map {
+            Reading.Segment(text: String(text[$0]), range: $0)
+        }
+        return Reading(text: text, direction: direction, segments: segments)
+    }
+
+    /// Sentences grouped into segments, over all of `text` or one span of it.
+    static func segmentRanges(
+        in text: String, within bounds: Range<String.Index>? = nil
+    ) -> [Range<String.Index>] {
+        let scope = bounds ?? text.startIndex..<text.endIndex
+        guard scope.lowerBound < scope.upperBound else { return [] }
+        var segments: [Range<String.Index>] = []
         var current: Range<String.Index>?
 
-        for sentence in speechSentenceRanges(in: text) {
+        for sentence in speechSentenceRanges(in: text, within: scope) {
             guard let open = current else { current = sentence; continue }
             let joined = open.lowerBound..<sentence.upperBound
             if text.distance(from: joined.lowerBound, to: joined.upperBound) <= segmentLimit {
                 current = joined
             } else {
-                segments.append(.init(text: String(text[open]), range: open))
+                segments.append(open)
                 current = sentence
             }
         }
-        if let open = current {
-            segments.append(.init(text: String(text[open]), range: open))
-        }
-        if segments.isEmpty {
-            segments = [.init(text: text, range: text.startIndex..<text.endIndex)]
-        }
-        return Reading(text: text, direction: direction, segments: segments)
+        if let open = current { segments.append(open) }
+        return segments.isEmpty ? [scope] : segments
     }
 
     /// Characters per segment. Roughly a sentence or two of ordinary prose.
@@ -473,6 +499,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         elapsed = 0
         rendered = 0
         spokenRange = nil
+        spokenBlockID = nil
         render(from: 0)
     }
 
@@ -544,6 +571,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         isPreparing = false
         isSpeaking = false
         spokenRange = nil
+        spokenBlockID = nil
         SpeechNowPlaying.shared.end(self)
     }
 
@@ -660,6 +688,9 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         if !playerNode.isPlaying { playerNode.play() }
         isPreparing = false
         isSpeaking = true
+        // The first mark should land with the first sound. Waiting for a
+        // buffer to drain means half a second of speech with nothing lit.
+        if spokenBlockID == nil, let reading { mark(segment: segment, of: reading) }
     }
 
     /// Hand one buffer to the node and count it as in flight.
@@ -788,6 +819,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         elapsed = 0
         rendered = 0
         spokenRange = nil
+        spokenBlockID = nil
     }
 
     /// The stretch of the reading being spoken at `playedSeconds`.
@@ -800,6 +832,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
     private func updateSpokenRange() {
         guard let reading, !buffers.isEmpty, !bufferSegments.isEmpty else {
             spokenRange = nil
+            spokenBlockID = nil
             return
         }
         // Which buffer is sounding. Not `cursor` — that is the next buffer to
@@ -813,9 +846,18 @@ final class OverviewSpeaker: NSObject, ObservableObject {
             start += length
             index += 1
         }
-        guard index < bufferSegments.count else { spokenRange = nil; return }
+        guard index < bufferSegments.count else {
+            spokenRange = nil
+            spokenBlockID = nil
+            return
+        }
         let segment = bufferSegments[index]
-        guard segment < reading.segments.count else { spokenRange = nil; return }
+        guard segment < reading.segments.count else {
+            spokenRange = nil
+            spokenBlockID = nil
+            return
+        }
+        mark(segment: segment, of: reading)
 
         // Where this segment's audio begins, and how long it runs.
         var segmentStart: TimeInterval = 0
@@ -843,6 +885,16 @@ final class OverviewSpeaker: NSObject, ObservableObject {
             offsetBy: Int((Double(span) * fraction).rounded(.down)),
             limitedBy: whole.upperBound) ?? whole.upperBound
         spokenRange = sentences.first { $0.upperBound > mark } ?? sentences.last
+    }
+
+    /// Set both the block and the sentence from the segment now sounding.
+    private func mark(segment: Int, of reading: Reading) {
+        guard segment < reading.segments.count else {
+            spokenBlockID = nil
+            spokenRange = nil
+            return
+        }
+        spokenBlockID = reading.segments[segment].blockID
     }
 
     // MARK: - How it should sound
@@ -1112,6 +1164,78 @@ final class OverviewSpeaker: NSObject, ObservableObject {
     /// *literally*: a diff, a table, a git invocation and a forty-character
     /// hash are all things a person skips or names rather than pronounces, and
     /// a synthesiser that spells them out is worse than one that stays quiet.
+    /// The reading, in pieces, each knowing which block it came from.
+    ///
+    /// `fullReading` returns the words; this returns the words *and* where
+    /// they came from, which is what following along on the page needs.
+    static func reading(for transcript: AgentTranscript, direction: String?) -> Reading {
+        let parts = readingParts(for: transcript)
+        let text = parts.map(\.text).joined(separator: " ")
+
+        // Each part is cut up on its own rather than the joined text being cut
+        // up afterwards. A segment that straddled two parts would belong to
+        // two blocks and could only mark one of them — which is how a whole
+        // short reply came out as a single segment sitting on its first
+        // paragraph while the third was being read. Character offsets rather
+        // than indices held across the build: appending to a String may move
+        // its storage and invalidate them.
+        var offset = 0
+        var segments: [Reading.Segment] = []
+        for part in parts {
+            let start = text.index(text.startIndex, offsetBy: offset)
+            let end = text.index(start, offsetBy: part.text.count)
+            for range in segmentRanges(in: text, within: start..<end) {
+                segments.append(.init(
+                    text: String(text[range]), range: range, blockID: part.blockID))
+            }
+            offset += part.text.count + 1  // + the joining space
+        }
+        return Reading(text: text, direction: direction, segments: segments)
+    }
+
+    private struct ReadingPart {
+        let text: String
+        let blockID: String?
+    }
+
+    private static func readingParts(for transcript: AgentTranscript) -> [ReadingPart] {
+        var parts: [ReadingPart] = []
+        var pendingCode: [String] = []
+
+        func flushCode() {
+            guard !pendingCode.isEmpty else { return }
+            let kinds = Set(pendingCode)
+            let noun: String
+            if kinds.count == 1, let only = kinds.first {
+                noun = pendingCode.count == 1
+                    ? "a \(only)" : "\(spelled(pendingCode.count)) \(only)s"
+            } else {
+                noun = "\(spelled(pendingCode.count)) code blocks"
+            }
+            // Named, not read, so it belongs to no block on the page.
+            parts.append(ReadingPart(text: "Then \(noun).", blockID: nil))
+            pendingCode = []
+        }
+
+        for block in transcript.blocks {
+            switch block {
+            case .paragraph(let text):
+                let spoken = speakableProse(text)
+                if !spoken.isEmpty {
+                    flushCode()
+                    parts.append(ReadingPart(text: spoken, blockID: block.id))
+                }
+            case .code(let language, let text):
+                pendingCode.append(codeNoun(language: language, text: text))
+            case .image:
+                flushCode()
+                parts.append(ReadingPart(text: "Then an image.", blockID: nil))
+            }
+        }
+        flushCode()
+        return parts
+    }
+
     static func fullReading(for transcript: AgentTranscript) -> String {
         var parts: [String] = []
         var pendingCode: [String] = []
