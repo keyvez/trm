@@ -2208,14 +2208,23 @@ class BaseTerminalController: NSWindowController,
         // actually owns this surface should respond.
         guard surfaceTree.contains(surface) else { return }
 
-        let id = ObjectIdentifier(surface)
-        let pairedOverviewIsPeeked = agentOverviewPanes.contains { overview in
-            ObjectIdentifier(overview) == peekedPane && overview.surface === surface
-        }
-        if peekedPane == id || pairedOverviewIsPeeked {
+        if isPeeked(surface) {
             dismissPeek()
         } else {
             peekPane(.terminal(surface))
+        }
+    }
+
+    /// Whether the expanded peek is showing this surface.
+    ///
+    /// Either the pane itself, or the overview bound to it — an overview peeks
+    /// together with its terminal, so the pair is one thing on screen and has
+    /// to answer as one thing here.
+    func isPeeked(_ surface: Ghostty.SurfaceView) -> Bool {
+        guard let peekedPane else { return false }
+        if peekedPane == ObjectIdentifier(surface) { return true }
+        return agentOverviewPanes.contains { overview in
+            ObjectIdentifier(overview) == peekedPane && overview.surface === surface
         }
     }
 

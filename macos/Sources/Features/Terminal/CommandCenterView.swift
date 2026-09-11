@@ -73,6 +73,16 @@ struct CommandCenterView: View {
     /// you read to decide where to go should take you there.
     @FocusState private var focusedDraft: ObjectIdentifier?
 
+    /// The row whose watermark is being renamed, if any.
+    ///
+    /// A watermark is the name a pane wears, and the board is where you read
+    /// those names — so it is also where you notice one is wrong. Double-click
+    /// turns the chip into a field rather than opening the pane's own rename
+    /// sheet: the whole point of the row is that you did not have to go there.
+    @State private var renamingID: ObjectIdentifier?
+    @State private var renameText: String = ""
+    @FocusState private var renameField: Bool
+
     /// Below this, one card per row reads better than a cramped two-up.
     private static let minimumCardWidth: CGFloat = 340
 
@@ -244,19 +254,7 @@ struct CommandCenterView: View {
 
             // The watermark is how the pane labels itself on screen, so
             // it's the fastest way to map a row back to a cell.
-            Button {
-                monitor.reveal(entry)
-            } label: {
-                Text(entry.watermark)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule().fill(Color.accentColor.opacity(0.16))
-                    )
-            }
-            .buttonStyle(.plain)
-            .help("Go to this pane")
+            watermarkChip(entry, style: .card)
 
             Text(entry.kind?.displayName ?? "Agent")
                 .font(.system(size: 10, weight: .medium, design: .rounded))
@@ -289,6 +287,134 @@ struct CommandCenterView: View {
                     .lineLimit(1)
             }
         }
+        // The header is the row's nameplate, so double-clicking it does what
+        // double-clicking a nameplate does everywhere else in trm: goes to the
+        // thing it names. A single click still belongs to the card underneath
+        // — repeated here because a gesture on a child otherwise swallows the
+        // taps the card was listening for.
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { monitor.reveal(entry) }
+        .onTapGesture { rowTap(entry) }
+        .help("Double-click to go to this pane · double-click the watermark to rename it")
+    }
+
+    /// How a watermark chip is drawn where it sits.
+    private enum WatermarkStyle {
+        /// The board's cards: an accent capsule.
+        case card
+        /// Briefing rows: bare, in the row's status colour.
+        case briefing(Color)
+    }
+
+    /// The pane's name, and the place you change it.
+    ///
+    /// One click goes to the pane; two turn the chip into a field. The field
+    /// is seeded with the pane's own watermark rather than the row label,
+    /// because the label can carry the worktree insignia or fall back to
+    /// "pane 3" — neither is text anyone typed or wants to edit around.
+    @ViewBuilder
+    private func watermarkChip(
+        _ entry: CommandCenterMonitor.Entry, style: WatermarkStyle
+    ) -> some View {
+        if renamingID == entry.id {
+            TextField("Watermark", text: $renameText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .focused($renameField)
+                .frame(maxWidth: 160)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.accentColor.opacity(0.16)))
+                .overlay(Capsule().stroke(Color.accentColor.opacity(0.7), lineWidth: 1))
+                .onSubmit { commitRename(entry) }
+                .onExitCommand { cancelRename() }
+                // Clicking away is "done", not "discard": this is a field in a
+                // list that moves under you, and losing the name to a stray
+                // click elsewhere on the board would be its own bug report.
+                .onChange(of: renameField) { focused in
+                    if !focused { commitRename(entry) }
+                }
+                .help("Return to rename · esc to leave it alone · blank clears it")
+        } else {
+            Group {
+                switch style {
+                case .card:
+                    Text(entry.watermark)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule().fill(Color.accentColor.opacity(0.16))
+                        )
+                case .briefing(let color):
+                    Text(entry.watermark)
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(color)
+                }
+            }
+            // Double before single: the second click of a rename must not send
+            // you to the pane on its way.
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { beginRename(entry) }
+            .onTapGesture { monitor.reveal(entry) }
+            .help("Click to go to this pane · double-click to rename it")
+        }
+    }
+
+    /// The row's right-click menu.
+    ///
+    /// One item, and it is the one thing the board could not do: end a pane.
+    /// Reading the board is how you find out an agent has finished, or wedged,
+    /// or was never worth starting, and until now noticing that and acting on
+    /// it happened in two different places. The row goes when the pane does.
+    @ViewBuilder
+    private func rowMenu(_ entry: CommandCenterMonitor.Entry) -> some View {
+        Button(role: .destructive) {
+            monitor.closePane(entry)
+        } label: {
+            Label("Exit Pane", systemImage: "xmark")
+        }
+    }
+
+    /// What a plain click on a row does, wherever on the row it lands.
+    private func rowTap(_ entry: CommandCenterMonitor.Entry) {
+        if NSEvent.modifierFlags.contains(.command) {
+            monitor.revealOverview(entry)
+        } else {
+            focusedDraft = entry.id
+        }
+    }
+
+    /// Open the rename field on a row.
+    ///
+    /// Only for panes that are actually here: a remote agent's row has no
+    /// local pane id to stamp, and renaming pane 0 by accident would put
+    /// someone else's name on the first cell in the grid.
+    private func beginRename(_ entry: CommandCenterMonitor.Entry) {
+        guard let paneId = entry.surface?.paneId else { return }
+        renameText = Trm.shared.watermark(forPaneId: UInt32(paneId)) ?? ""
+        renamingID = entry.id
+        // A field that appears without the keyboard is a field you click
+        // twice to use; the hop lets it exist before it is asked to focus.
+        DispatchQueue.main.async { renameField = true }
+    }
+
+    private func commitRename(_ entry: CommandCenterMonitor.Entry) {
+        guard renamingID == entry.id else { return }
+        renamingID = nil
+        renameField = false
+        guard let paneId = entry.surface?.paneId else { return }
+        let text = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text != (Trm.shared.watermark(forPaneId: UInt32(paneId)) ?? "") else { return }
+        Trm.shared.setWatermark(forPaneId: UInt32(paneId), text: text)
+        // The row's label comes from the last scan, so ask for a new one
+        // rather than leaving the old name sitting there for two seconds.
+        monitor.refresh()
+    }
+
+    private func cancelRename() {
+        renamingID = nil
+        renameField = false
     }
 
     /// One agent's card. `fixedHeight` is set in grid mode, where every card
@@ -327,20 +453,15 @@ struct CommandCenterView: View {
         // at the moment of the tap — the pattern TrmGridView already uses for
         // ⌘-click peek.
         .contentShape(Rectangle())
-        .onTapGesture {
-            if NSEvent.modifierFlags.contains(.command) {
-                monitor.revealOverview(entry)
-            } else {
-                focusedDraft = entry.id
-            }
-        }
+        .onTapGesture { rowTap(entry) }
         // The whole card takes a drop: aiming a dragged screenshot at a
         // reply box a few points tall is a game nobody wants to play.
         .onDrop(of: [.fileURL, .image, .png, .tiff], isTargeted: nil) { providers in
             attach(providers: providers, to: entry)
             return true
         }
-        .help("Click to reply · ⌘-click for the Agent Overview · watermark to go to the pane")
+        .contextMenu { rowMenu(entry) }
+        .help("Click to reply · ⌘-click for the Agent Overview · double-click the header for the pane · double-click the watermark to rename")
     }
 
     /// Card padding and the reply box, kept out of the card's tap gesture so
@@ -384,15 +505,7 @@ struct CommandCenterView: View {
             VStack(alignment: .leading, spacing: 5) {
                 VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
-                    Button {
-                        monitor.reveal(entry)
-                    } label: {
-                        Text(entry.watermark)
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
-                            .foregroundStyle(status.color)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Go to this pane")
+                    watermarkChip(entry, style: .briefing(status.color))
                     Text(status.label.uppercased())
                         .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                         .tracking(0.8)
@@ -413,6 +526,11 @@ struct CommandCenterView: View {
                             .foregroundStyle(.tertiary)
                     }
                 }
+                // Same as a card's header: two clicks on the nameplate go to
+                // the pane it names, one click stays with the row.
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { monitor.reveal(entry) }
+                .onTapGesture { rowTap(entry) }
 
                 // What was done, above the conclusion it led to: read down
                 // the bullets to judge whether the sentence is the whole
@@ -481,20 +599,15 @@ struct CommandCenterView: View {
         // aims at when they mean "this one". The text field and the send
         // button consume their own clicks, so the composer still behaves.
         .contentShape(Rectangle())
-        .onTapGesture {
-            if NSEvent.modifierFlags.contains(.command) {
-                monitor.revealOverview(entry)
-            } else {
-                focusedDraft = entry.id
-            }
-        }
+        .onTapGesture { rowTap(entry) }
         // The whole card takes a drop: aiming a dragged screenshot at a
         // reply box a few points tall is a game nobody wants to play.
         .onDrop(of: [.fileURL, .image, .png, .tiff], isTargeted: nil) { providers in
             attach(providers: providers, to: entry)
             return true
         }
-        .help("Click to reply · ⌘-click for the Agent Overview · watermark to go to the pane")
+        .contextMenu { rowMenu(entry) }
+        .help("Click to reply · ⌘-click for the Agent Overview · double-click the header for the pane · double-click the watermark to rename")
     }
 
     /// Briefing tiles: a few bullets, one sentence, one escalation line, and a

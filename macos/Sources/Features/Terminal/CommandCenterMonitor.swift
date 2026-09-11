@@ -830,7 +830,58 @@ final class CommandCenterMonitor: ObservableObject {
         if controller.sidebarPanes.contains(id) {
             controller.restorePaneFromSidebar(id)
         }
+        // A peek covers the grid, so focusing a cell underneath one changes
+        // nothing you can see: the pane you asked for stays hidden behind the
+        // one you were already reading, and the tap looks like it did nothing.
+        // Put the peek away and show the pane itself.
+        //
+        // Moving the peek to the new pane was the first answer and it was the
+        // wrong one. A row names a terminal, and peeking a terminal brings its
+        // overview along — so asking for a pane got you a wall of text beside
+        // it, or, when the pair could not be resolved, the overview alone and
+        // no terminal at all. The tap means "show me that pane", so it shows
+        // that pane. A row that is already the peeked one keeps its peek and
+        // just takes focus: you are looking at it already.
+        if controller.peekedPane != nil, !controller.isPeeked(surface) {
+            controller.dismissPeek()
+        }
         Ghostty.moveFocus(to: surface)
+    }
+
+    /// Close a row's pane for good, the way the grid's own menu closes it.
+    ///
+    /// The board is where you are standing when you notice a pane is finished,
+    /// or wedged, or was never worth starting — and until now the only thing
+    /// you could do about it from here was go to the pane and close it there.
+    /// It goes through `closePane`, so an agent's terminal still asks before
+    /// it is killed: a right-click and a slip must not end a running process.
+    func closePane(_ entry: Entry) {
+        guard let surface = entry.surface,
+              let controller = Self.controller(owning: surface) else { return }
+        controller.closePane(.terminal(surface))
+        watchForClose(of: surface)
+    }
+
+    /// Drop the row once its pane is actually gone.
+    ///
+    /// The board cannot simply remove the row itself, because the confirmation
+    /// may still come back "no" — and it should not have to wait out the 2.5 s
+    /// scan either, because a row you just closed lingering on screen reads as
+    /// a close that did not work. So it looks more often, briefly, and stops
+    /// as soon as the pane has left its window. Ten seconds is the whole
+    /// budget: a confirmation left sitting open falls back to the ordinary
+    /// scan, which gets there in the end.
+    private func watchForClose(of surface: Ghostty.SurfaceView, attempts: Int = 40) {
+        guard attempts > 0 else { return }
+        Task { @MainActor [weak self, weak surface] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let self else { return }
+            guard let surface, Self.controller(owning: surface) != nil else {
+                self.refresh()
+                return
+            }
+            self.watchForClose(of: surface, attempts: attempts - 1)
+        }
     }
 
     /// Open the row's Agent Overview and peek it — the full reading view of
