@@ -6344,6 +6344,12 @@ class BaseTerminalController: NSWindowController,
                 if let watermark, !watermark.isEmpty {
                     lines.append("watermark = \(tomlQuote(watermark))")
                 }
+                // Webview and plugin panes have always round-tripped their
+                // title; terminal panes silently did not, so a title set in
+                // trm.toml was lost on every restore.
+                if let title = surface.configuredTitle, !title.isEmpty {
+                    lines.append("title = \(tomlQuote(title))")
+                }
                 if !surface.initialCommands.isEmpty {
                     let quoted = surface.initialCommands
                         .map { tomlQuote($0) }
@@ -7697,6 +7703,11 @@ class BaseTerminalController: NSWindowController,
             // through session save/restore.
             if !paneConfig.initialCommands.isEmpty {
                 surface.initialCommands = paneConfig.initialCommands
+            }
+
+            // Same for the configured pane title, so it survives the next save.
+            if let title = paneConfig.title, !title.isEmpty {
+                surface.configuredTitle = title
             }
 
             // A pane that reattached to a live zmx session already has its

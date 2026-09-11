@@ -271,14 +271,20 @@ enum SessionManager {
         // primary process's files with the mirror's state.
         let controllers = TerminalController.all.filter { $0.sessionRole == .primary }
         guard !controllers.isEmpty else {
-            // Zero primary windows: an ordinary process should still wipe
-            // stale autosaves (the user closed everything — nothing should
-            // resurrect on relaunch), but a process that has hosted a mirror
-            // shares the sessions directory with the primary process and
-            // must never touch its files.
-            if !BaseTerminalController.processHostedMirrorWindow {
-                clearAutoSaves()
-            }
+            // Zero primary windows. This used to wipe the autosave outright,
+            // reading "no windows" as "the user closed everything, nothing
+            // should resurrect". But this runs on a 30-second checkpoint timer
+            // and again on applicationWillTerminate, and both routinely observe
+            // zero windows for reasons that are not a decision: the last window
+            // was closed a moment before quitting, or the timer ticked between
+            // windows. The snapshot — layout, watermarks, pane titles and the
+            // window frame — was destroyed either way, which is why reopening
+            // came back blank.
+            //
+            // A checkpoint that finds nothing to record now records nothing,
+            // and leaves the last good snapshot alone. Wiping stays an explicit
+            // gesture: "Terminate All & Quit" clears it deliberately, and
+            // skipAutoSaveOnQuit suppresses the save on that path.
             return
         }
 

@@ -154,6 +154,13 @@ extension Ghostty {
         /// Stored so they can be round-tripped through session save/restore.
         var initialCommands: [String] = []
 
+        /// The pane title declared in the session config (`title` in a
+        /// [[panes]] block), as opposed to `title`, which tracks whatever the
+        /// shell is currently reporting. Stored so restore can put the
+        /// configured name back; persisting the live title instead would
+        /// write "zsh" over the user's chosen label.
+        var configuredTitle: String?
+
         /// The zmx session name backing this pane when session persistence
         /// is enabled. Persisted in TOML so restore can reattach.
         var zmxSessionName: String?
