@@ -268,7 +268,31 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             // Only cascade if we aren't fullscreen.
             if let window = c.window {
                 if (!window.styleMask.contains(.fullScreen)) {
-                    Self.lastCascadePoint = window.cascadeTopLeft(from: Self.lastCascadePoint)
+                    // A session that carries its own geometry wins: this is
+                    // the single point every restore path funnels through, so
+                    // named sessions, _autosave_last.toml and the manifest all
+                    // get their frame back here rather than in three places.
+                    //
+                    // Falling back to the last size the user chose keeps a
+                    // brand-new window from opening at the small default.
+                    // Position still cascades in that case — inheriting the
+                    // previous window's exact origin would stack them.
+                    if let size = gridConfig?.windowSize {
+                        var frame = NSRect(origin: window.frame.origin, size: size)
+                        if let origin = gridConfig?.windowOrigin {
+                            frame.origin = origin
+                        }
+                        window.setFrame(SessionManager.frameVisible(frame), display: true)
+                        if gridConfig?.windowOrigin == nil {
+                            Self.lastCascadePoint = window.cascadeTopLeft(from: Self.lastCascadePoint)
+                        }
+                    } else if let remembered = SessionManager.lastWindowFrame {
+                        let frame = NSRect(origin: window.frame.origin, size: remembered.size)
+                        window.setFrame(SessionManager.frameVisible(frame), display: true)
+                        Self.lastCascadePoint = window.cascadeTopLeft(from: Self.lastCascadePoint)
+                    } else {
+                        Self.lastCascadePoint = window.cascadeTopLeft(from: Self.lastCascadePoint)
+                    }
                 }
             }
 

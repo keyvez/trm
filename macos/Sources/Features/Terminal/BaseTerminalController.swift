@@ -3489,6 +3489,14 @@ class BaseTerminalController: NSWindowController,
         savedFrame = nil
         guard let window, let screen = window.screen else { return }
         savedFrame = .init(window: window.frame, screen: screen.visibleFrame)
+
+        // Remember the size the user actually works at, so the next window
+        // opened without a session doesn't come up at the tiny default.
+        // Fullscreen and miniaturized frames describe the screen, not a
+        // choice, so they are not worth remembering.
+        if !window.styleMask.contains(.fullScreen) && !window.isMiniaturized {
+            SessionManager.lastWindowFrame = window.frame
+        }
     }
 
     func confirmClose(
@@ -6248,6 +6256,22 @@ class BaseTerminalController: NSWindowController,
             // restore (a 3-across window saved from a rows=3/cols=1 launch
             // config came back as a 3-tall column).
             saveRowCols = Self.reconcileRowCols(saveRowCols, toTotal: visualPaneCount)
+        }
+
+        // [window] section — the window's own size and position. Without
+        // this a restored session landed at the default size every time: the
+        // frame lived only in _autosave_manifest.json, which named sessions
+        // and the single-window fallback never wrote.
+        if let window, !window.styleMask.contains(.fullScreen) {
+            let f = window.frame
+            if f.width > 0 && f.height > 0 {
+                lines.append("[window]")
+                lines.append("x = \(Int(f.origin.x.rounded()))")
+                lines.append("y = \(Int(f.origin.y.rounded()))")
+                lines.append("width = \(Int(f.size.width.rounded()))")
+                lines.append("height = \(Int(f.size.height.rounded()))")
+                lines.append("")
+            }
         }
 
         // [grid] section

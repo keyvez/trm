@@ -219,6 +219,50 @@ enum SessionManager {
         return try? String(contentsOf: fileURL, encoding: .utf8)
     }
 
+    // MARK: - Last-Used Window Frame
+
+    /// The frame of the most recently resized or moved terminal window.
+    ///
+    /// A brand-new window had nothing to size itself from: the frame was only
+    /// ever stored per-session, so the very first window of a launch — and any
+    /// window opened without a session — came up at the built-in default,
+    /// which is small enough that a 2x2 grid renders four unusably tiny panes.
+    /// Remembering the last size the user actually chose makes a new window
+    /// open at the size they work at.
+    private static let lastFrameKey = "TrmLastWindowFrame"
+
+    static var lastWindowFrame: NSRect? {
+        get {
+            guard let s = UserDefaults.standard.string(forKey: lastFrameKey) else { return nil }
+            let r = NSRectFromString(s)
+            guard r.width > 0, r.height > 0 else { return nil }
+            return r
+        }
+        set {
+            guard let newValue, newValue.width > 0, newValue.height > 0 else { return }
+            UserDefaults.standard.set(NSStringFromRect(newValue), forKey: lastFrameKey)
+        }
+    }
+
+    /// Clamp a remembered frame to a screen that still exists. A frame saved
+    /// on a monitor that is now disconnected would otherwise place the window
+    /// off-screen, which looks identical to the app failing to launch.
+    static func frameVisible(_ frame: NSRect) -> NSRect {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return frame }
+        // Intersecting any screen means at least part of the titlebar is
+        // reachable, which is all that is needed to drag it back.
+        if screens.contains(where: { $0.visibleFrame.intersects(frame) }) { return frame }
+
+        let visible = (NSScreen.main ?? screens[0]).visibleFrame
+        var f = frame
+        f.size.width = min(f.size.width, visible.size.width)
+        f.size.height = min(f.size.height, visible.size.height)
+        f.origin.x = visible.midX - f.size.width / 2
+        f.origin.y = visible.midY - f.size.height / 2
+        return f
+    }
+
     // MARK: - Auto-Save
 
     static func autoSaveAllWindows() {

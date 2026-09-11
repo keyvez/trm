@@ -866,6 +866,12 @@ final class Trm {
         var sidebarWidth: Double?
         /// Whether the sidebar shelf was open when the layout was saved.
         var sidebarOpen: Bool = false
+        /// Window size from the `[window]` section. Size and origin are
+        /// separate so a hand-written project trm.toml can ask for a size
+        /// without pinning the window to one spot on one display.
+        var windowSize: CGSize?
+        /// Window origin (bottom-left, screen coordinates) from `[window]`.
+        var windowOrigin: CGPoint?
     }
 
     /// Read grid/session config from a specific config file path.
@@ -932,6 +938,8 @@ final class Trm {
         config.colFractions = layoutExtras.colFractions
         config.sidebarWidth = layoutExtras.sidebarWidth
         config.sidebarOpen = layoutExtras.sidebarOpen
+        config.windowSize = layoutExtras.windowSize
+        config.windowOrigin = layoutExtras.windowOrigin
 
         return config
     }
@@ -945,6 +953,8 @@ final class Trm {
         var colFractions: [[Double]] = []
         var sidebarWidth: Double?
         var sidebarOpen: Bool = false
+        var windowSize: CGSize?
+        var windowOrigin: CGPoint?
     }
 
     /// Parse top-level layout-sync keys (window_id, text_tap_socket,
@@ -954,6 +964,10 @@ final class Trm {
     static func parseLayoutExtras(fromToml content: String) -> LayoutExtras {
         var extras = LayoutExtras()
         var section: String? = nil // nil = top level
+        var windowWidth: Double?
+        var windowHeight: Double?
+        var windowX: Double?
+        var windowY: Double?
 
         for line in content.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -994,6 +1008,36 @@ final class Trm {
                             .trimmingCharacters(in: .whitespaces) == "true"
                     }
                 }
+            } else if section == "window" {
+                // The C API exposes [window] width/height to the Zig/GTK path
+                // only; the macOS app never read them, so a window's size was
+                // not part of a saved session at all. Parse them here, plus
+                // x/y, which the Zig config has no field for.
+                func number(_ line: String) -> Double? {
+                    guard let eqIdx = line.firstIndex(of: "=") else { return nil }
+                    return Double(line[line.index(after: eqIdx)...]
+                        .trimmingCharacters(in: .whitespaces))
+                }
+                if trimmed.hasPrefix("width") {
+                    windowWidth = number(trimmed)
+                } else if trimmed.hasPrefix("height") {
+                    windowHeight = number(trimmed)
+                } else if trimmed.hasPrefix("x") {
+                    windowX = number(trimmed)
+                } else if trimmed.hasPrefix("y") {
+                    windowY = number(trimmed)
+                }
+            }
+        }
+
+        // A zero or missing dimension is not a window; leave the size nil so
+        // callers fall back to their own default rather than collapsing.
+        if let w = windowWidth, let h = windowHeight, w > 0, h > 0 {
+            extras.windowSize = CGSize(width: w, height: h)
+            // An origin without a size is meaningless to restore, so it is
+            // only honored alongside one.
+            if let x = windowX, let y = windowY {
+                extras.windowOrigin = CGPoint(x: x, y: y)
             }
         }
         return extras
