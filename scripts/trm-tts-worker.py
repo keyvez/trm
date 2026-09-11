@@ -11,7 +11,9 @@ import base64
 import re
 import json
 import os
+import queue
 import sys
+import threading
 
 import mlx.core as mx
 import numpy as np
@@ -24,8 +26,52 @@ MODEL = os.environ.get(
 VOICE = os.environ.get("TRM_TTS_VOICE", "Ryan")
 
 
+_cancel_lock = threading.Lock()
+_cancelled: set[str] = set()
+
+
 def emit(payload: dict[str, object]) -> None:
     print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+def cancelled(request_id: str) -> bool:
+    with _cancel_lock:
+        return request_id in _cancelled
+
+
+def forget(request_id: str) -> None:
+    """Drop a request from the cancel set once it can no longer be running."""
+    with _cancel_lock:
+        _cancelled.discard(request_id)
+
+
+def read_stdin(requests: "queue.Queue[dict | None]") -> None:
+    """Read requests on their own thread so a cancel can land mid-render.
+
+    Rendering blocks: one generate() call per segment, each taking about as
+    long as the audio it makes. A worker that only looked at stdin between
+    requests therefore could not be interrupted at all — stopping playback
+    left the whole reply still being synthesised, and the next request sat
+    unread in the pipe behind it. Press play again and nothing happened until
+    the reading you had already abandoned had finished in full.
+
+    A cancel is `{"id": ..., "cancel": true}`. It never joins the queue: it is
+    a note about a request that is already in it, or already running.
+    """
+    for raw_line in sys.stdin:
+        try:
+            request = json.loads(raw_line)
+        except Exception:
+            continue
+        if not isinstance(request, dict):
+            continue
+        if request.get("cancel"):
+            with _cancel_lock:
+                _cancelled.add(str(request.get("id", "")))
+            continue
+        requests.put(request)
+    # stdin closed: the app has gone.
+    requests.put(None)
 
 
 def pcm16(audio: mx.array) -> bytes:
@@ -50,6 +96,11 @@ def render(model: object, request: dict[str, object]) -> None:
             }
         )
         return
+    # Cancelled while it waited its turn: never start it.
+    if cancelled(request_id):
+        forget(request_id)
+        emit({"type": "end", "id": request_id, "cancelled": True})
+        return
 
     # One generate() call per segment.
     #
@@ -61,6 +112,8 @@ def render(model: object, request: dict[str, object]) -> None:
     # few hundred characters, well inside the ceiling, and their boundaries are
     # what playback seeks to when you skip back.
     for index, segment in enumerate(segments(text)):
+        if cancelled(request_id):
+            break
         for result in model.generate(
             text=segment,
             voice=VOICE,
@@ -71,6 +124,13 @@ def render(model: object, request: dict[str, object]) -> None:
             max_tokens=1200,
             verbose=False,
         ):
+            # Checked per chunk, not per segment: a segment is a few hundred
+            # characters and someone who has stopped listening should not wait
+            # out the rest of it. Breaking stops pulling from the generator,
+            # so the cost of a cancel is the chunk already in flight — about
+            # half a second of audio.
+            if cancelled(request_id):
+                break
             audio = pcm16(result.audio)
             emit(
                 {
@@ -81,7 +141,9 @@ def render(model: object, request: dict[str, object]) -> None:
                     "pcm": base64.b64encode(audio).decode("ascii"),
                 }
             )
-    emit({"type": "end", "id": request_id})
+    was_cancelled = cancelled(request_id)
+    forget(request_id)
+    emit({"type": "end", "id": request_id, "cancelled": was_cancelled})
 
 
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
@@ -121,12 +183,19 @@ def segments(text, limit=320):
 
 
 def main() -> int:
+    # Started before the model loads, so a cancel sent during those several
+    # seconds is already recorded when the request it belongs to comes up.
+    requests: "queue.Queue[dict | None]" = queue.Queue()
+    threading.Thread(target=read_stdin, args=(requests,), daemon=True).start()
+
     model = load_model(MODEL)
     emit({"type": "ready", "backend": "mlx-qwen-0.6b", "voice": VOICE})
 
-    for raw_line in sys.stdin:
+    while True:
+        request = requests.get()
+        if request is None:
+            return 0
         try:
-            request = json.loads(raw_line)
             render(model, request)
         except Exception as error:
             request_id = ""
@@ -134,8 +203,8 @@ def main() -> int:
                 request_id = str(request.get("id", ""))
             except Exception:
                 pass
+            forget(request_id)
             emit({"type": "error", "id": request_id, "message": str(error)})
-    return 0
 
 
 if __name__ == "__main__":

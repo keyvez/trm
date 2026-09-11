@@ -56,8 +56,19 @@ final class LocalNeuralSpeechEngine: @unchecked Sendable {
     func stream(_ text: String) -> AsyncThrowingStream<Chunk, Error> {
         let id = UUID().uuidString
         return AsyncThrowingStream { continuation in
-            continuation.onTermination = { [weak self] _ in
-                self?.queue.async { self?.streams.removeValue(forKey: id) }
+            continuation.onTermination = { [weak self] reason in
+                self?.queue.async {
+                    // Already gone means the worker finished this request and
+                    // said so; there is nothing left to call off.
+                    guard self?.streams.removeValue(forKey: id) != nil else { return }
+                    guard case .cancelled = reason else { return }
+                    // Dropping our end of the stream is not enough. The worker
+                    // renders one request at a time and does not look at the
+                    // next one until the current one is done, so a reading
+                    // nobody is listening to still has to finish before the
+                    // next press of play is even read. Tell it to stop.
+                    try? self?.send(["id": id, "cancel": true])
+                }
             }
             queue.async { [weak self] in
                 guard let self else {
@@ -130,7 +141,7 @@ final class LocalNeuralSpeechEngine: @unchecked Sendable {
         stderrTail = ""
     }
 
-    private func send(_ object: [String: String]) throws {
+    private func send(_ object: [String: Any]) throws {
         guard let input else { throw SpeechError.render("Speech worker has no input pipe.") }
         var data = try JSONSerialization.data(withJSONObject: object)
         data.append(0x0a)
