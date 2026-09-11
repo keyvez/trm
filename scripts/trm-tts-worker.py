@@ -25,6 +25,17 @@ MODEL = os.environ.get(
 )
 VOICE = os.environ.get("TRM_TTS_VOICE", "Ryan")
 
+# How the reading should sound when the app does not say. The app sends its own
+# `instruct` per request — a voice description plus a mood earned from the
+# transcript — so this is only the floor.
+#
+# Note that a *CustomVoice* checkpoint ignores this entirely: it clones the
+# speaker named by `voice` and takes no direction. Mood needs a VoiceDesign
+# model, selected with TRM_TTS_MODEL.
+DEFAULT_INSTRUCT = os.environ.get(
+    "TRM_TTS_INSTRUCT", "Calm, natural, concise engineering update."
+)
+
 
 _cancel_lock = threading.Lock()
 _cancelled: set[str] = set()
@@ -111,6 +122,7 @@ def render(model: object, request: dict[str, object]) -> None:
     # button started reading everything. Segments are sentences grouped to a
     # few hundred characters, well inside the ceiling, and their boundaries are
     # what playback seeks to when you skip back.
+    instruct = str(request.get("instruct") or DEFAULT_INSTRUCT)
     for index, segment in enumerate(segments(text)):
         if cancelled(request_id):
             break
@@ -118,7 +130,7 @@ def render(model: object, request: dict[str, object]) -> None:
             text=segment,
             voice=VOICE,
             lang_code="English",
-            instruct="Calm, natural, concise engineering update.",
+            instruct=instruct,
             stream=True,
             streaming_interval=0.5,
             max_tokens=1200,

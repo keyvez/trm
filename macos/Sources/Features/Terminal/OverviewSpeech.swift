@@ -53,7 +53,9 @@ final class LocalNeuralSpeechEngine: @unchecked Sendable {
     }
 
     /// PCM arrives as Qwen generates it; callers never wait for a complete file.
-    func stream(_ text: String) -> AsyncThrowingStream<Chunk, Error> {
+    func stream(
+        _ text: String, direction: String? = nil
+    ) -> AsyncThrowingStream<Chunk, Error> {
         let id = UUID().uuidString
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { [weak self] reason in
@@ -78,7 +80,11 @@ final class LocalNeuralSpeechEngine: @unchecked Sendable {
                 do {
                     try self.ensureProcess()
                     self.streams[id] = continuation
-                    try self.send(["id": id, "text": text])
+                    var request: [String: Any] = ["id": id, "text": text]
+                    if let direction, !direction.isEmpty {
+                        request["instruct"] = direction
+                    }
+                    try self.send(request)
                 } catch {
                     self.streams.removeValue(forKey: id)
                     continuation.finish(throwing: error)
@@ -331,7 +337,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         LocalNeuralSpeechEngine.shared.prewarm()
     }
 
-    func toggle(_ text: String) {
+    func toggle(_ text: String, direction: String? = nil) {
         if isActive {
             stop()
             return
@@ -356,7 +362,8 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         SpeechNowPlaying.shared.begin(self, label: sourceLabel, paneId: sourcePaneId)
         generationTask = Task { [weak self] in
             do {
-                for try await chunk in LocalNeuralSpeechEngine.shared.stream(trimmed) {
+                for try await chunk in LocalNeuralSpeechEngine.shared.stream(
+                    trimmed, direction: direction) {
                     try Task.checkCancellation()
                     guard let self, self.requestID == id else { return }
                     try self.schedule(chunk)
@@ -545,6 +552,125 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         elapsed = 0
         rendered = 0
     }
+
+    // MARK: - How it should sound
+
+    /// The mood a reading is delivered in, and what earns it.
+    ///
+    /// A reader that says "the test failed for the fourth time" in the same
+    /// bright tone it used for "every test passes" is reading words rather
+    /// than telling you something. The point of hearing a reply instead of
+    /// reading it is that you are doing something else — so the tone has to
+    /// carry the part you would have seen at a glance.
+    ///
+    /// Deliberately a small vocabulary, and deliberately *slight*. An agent
+    /// that sounds distraught about a lint warning is worse than a flat one:
+    /// you stop believing the tone, and then it carries nothing.
+    enum Mood: String, CaseIterable {
+        case neutral
+        /// The same thing has failed again, and again. This is the one the
+        /// tone is really for — repetition is invisible in any single
+        /// sentence and obvious across a session.
+        case frustrated
+        case concerned
+        case pleased
+        case asking
+
+        /// Appended to the voice description. The description itself never
+        /// changes, so the speaker stays the same person and only the
+        /// delivery moves.
+        var direction: String {
+            switch self {
+            case .neutral: return ""
+            case .frustrated:
+                return " Sounding a little tired and frustrated — this has gone wrong before."
+            case .concerned:
+                return " Sounding mildly concerned, careful about what it found."
+            case .pleased:
+                return " Sounding quietly pleased and relieved."
+            case .asking:
+                return " Sounding like someone putting a question to you and waiting."
+            }
+        }
+    }
+
+    /// How many times one thing has to fail before it stops being bad luck.
+    ///
+    /// Two is a retry. Three is a pattern, and the point at which a person
+    /// reading this out would start to sound like they had had enough.
+    private static let repetitionThreshold = 3
+
+    /// The complete direction for a reading: a fixed voice plus a mood.
+    static func direction(for transcript: AgentTranscript, reading: String) -> String {
+        baseVoice + mood(for: transcript, reading: reading).direction
+    }
+
+    /// The voice itself, which never varies. Kept apart from the mood so that
+    /// a change of mood cannot turn into a change of speaker.
+    static let baseVoice =
+        "A calm, clear voice giving a concise engineering update. Natural, measured delivery."
+
+    /// Pick the mood for a reading.
+    ///
+    /// Ordered by what a person would react to most strongly, and the first
+    /// match wins: being stuck beats a single failure, a single failure beats
+    /// good news, and a question you are being asked outranks all of it
+    /// because it is the only one that is about *you*.
+    static func mood(for transcript: AgentTranscript, reading: String) -> Mood {
+        if transcript.questions.contains(where: { !$0.finished }) { return .asking }
+        if isStuck(transcript) { return .frustrated }
+
+        let text = reading.lowercased()
+        if transcript.activity.contains(where: \.isError) || mentions(text, failureWords) {
+            return .concerned
+        }
+        if mentions(text, successWords) { return .pleased }
+        return .neutral
+    }
+
+    /// Is the agent going round in circles?
+    ///
+    /// Counting errors is not enough — five different failures is a bad
+    /// afternoon, but the *same* failure five times is being stuck, and only
+    /// the second one is worth a change of tone. So failures are grouped by
+    /// the tool and the shape of the error rather than counted in bulk.
+    static func isStuck(_ transcript: AgentTranscript) -> Bool {
+        var counts: [String: Int] = [:]
+        for call in transcript.activity where call.isError {
+            let key = call.name + "\u{1}" + errorShape(call.errorText ?? call.detail ?? "")
+            counts[key, default: 0] += 1
+            if counts[key]! >= repetitionThreshold { return true }
+        }
+        return false
+    }
+
+    /// Reduce an error to the part that repeats.
+    ///
+    /// The same failure rarely arrives as the same string: line numbers,
+    /// paths, durations and pids move between attempts. Stripping digits and
+    /// keeping the opening words leaves what actually recurs, so "3 tests
+    /// failed in 4.1s" and "3 tests failed in 3.8s" count as one thing.
+    private static func errorShape(_ text: String) -> String {
+        let lowered = text.lowercased()
+        let letters = lowered.map { $0.isNumber ? "#" : $0 }
+        return String(String(letters).prefix(60))
+    }
+
+    private static func mentions(_ text: String, _ words: [String]) -> Bool {
+        words.contains { text.contains($0) }
+    }
+
+    /// Words that mean something went wrong, in the vocabulary agents
+    /// actually use. Present tense only: "fixing the error" is not an error.
+    private static let failureWords = [
+        "failed", "failing", "error", "errors", "exception", "crash",
+        "broken", "cannot ", "could not", "timed out", "rejected", "denied",
+    ]
+
+    private static let successWords = [
+        "passes", "passed", "fixed", "works", "working now", "succeeded",
+        "all green", "landed", "no errors", "builds clean", "done",
+    ]
 
     /// Questions, failures, outcomes, tests, deploy state, and decisions make
     /// the cut. Tool-by-tool narration and "let me inspect that" chatter do not.

@@ -2182,9 +2182,14 @@ private struct OverviewSpeakButton: View {
     var body: some View {
         Button {
             let summarize = NSEvent.modifierFlags.contains(.option)
-            speaker.toggle(summarize
+            let reading = summarize
                 ? OverviewSpeaker.developerBriefing(for: transcript)
-                : OverviewSpeaker.fullReading(for: transcript))
+                : OverviewSpeaker.fullReading(for: transcript)
+            // The transcript, not just the words: being stuck is a fact about
+            // the session that no single sentence of the reply contains.
+            speaker.toggle(
+                reading,
+                direction: OverviewSpeaker.direction(for: transcript, reading: reading))
         } label: {
             Image(systemName: speaker.isActive ? "stop.fill" : "speaker.wave.2")
                 .font(.system(size: 10))
