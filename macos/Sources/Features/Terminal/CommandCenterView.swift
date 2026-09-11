@@ -91,10 +91,13 @@ struct CommandCenterView: View {
     /// wordiest agent would jump every time any of them spoke.
     private static let gridCardHeight: CGFloat = 260
 
-    /// How much of the panel the agent's own message may take while you write
-    /// back to it. It is the thing you are answering, so it stays on screen —
-    /// but the editor is what you opened, so it gets the rest.
-    private static let focusedMessageHeight: CGFloat = 200
+    /// The gap between the expanded view's two halves.
+    private static let focusedSectionGap: CGFloat = 10
+
+    /// The shortest either half is allowed to get. Below this the panel is
+    /// too short to divide usefully, and half of nothing is worse than a
+    /// section you can scroll.
+    private static let minimumFocusedSection: CGFloat = 170
 
     var body: some View {
         Group {
@@ -799,7 +802,51 @@ struct CommandCenterView: View {
     /// rest is yours. Escape puts the board back.
     private func focusedComposerView(_ entry: CommandCenterMonitor.Entry) -> some View {
         let binding = draftBinding(entry)
-        return VStack(alignment: .leading, spacing: 8) {
+        return GeometryReader { geo in
+            // Half the panel each, measured rather than negotiated. Reading
+            // what the agent said and writing back to it are the two halves
+            // of this screen and neither is the junior partner: an editor
+            // given the lion's share leaves the message it is answering in a
+            // letterbox, and a message given it puts the cursor at the foot
+            // of the panel. Below a certain height there is no useful split
+            // to make, so the sections keep a floor and the panel scrolls
+            // them instead.
+            let split = max(
+                Self.minimumFocusedSection,
+                (geo.size.height - Self.focusedSectionGap) / 2)
+            VStack(spacing: Self.focusedSectionGap) {
+                focusedSummary(entry)
+                    .frame(height: split, alignment: .top)
+                expandedComposer(entry, text: binding)
+                    .frame(height: split, alignment: .top)
+            }
+        }
+        .padding(12)
+        // The keyboard belongs in the editor the moment the panel becomes
+        // one. `expand` sets this too, but the view it applies to is built
+        // after that, and a focus request that lands before its field exists
+        // is a focus request that quietly does nothing.
+        .onAppear { focusedDraft = entry.id }
+        // Same as the board's cards: drop a screenshot, a log, a diff.
+        .onDrop(of: [.fileURL, .image, .png, .tiff], isTargeted: nil) { providers in
+            attach(providers: providers, to: entry)
+            return true
+        }
+    }
+
+    /// The top half: everything known about the row you are answering.
+    ///
+    /// The board's card shows one paragraph because it is one of many on a
+    /// wall. Here there is only this agent, and half a panel to say it in, so
+    /// the things a card leaves out are worth having: what state it is in and
+    /// whether it is waiting on you, what you last asked it, what it actually
+    /// did this turn, what went wrong if anything did, and the reply in full
+    /// rather than clipped. It scrolls within its half — an agent that has
+    /// just written six paragraphs must not push the editor off the panel.
+    @ViewBuilder
+    private func focusedSummary(_ entry: CommandCenterMonitor.Entry) -> some View {
+        let status = Self.status(for: entry)
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Button {
                     collapse(entry)
@@ -810,45 +857,94 @@ struct CommandCenterView: View {
                 .buttonStyle(.plain)
                 .help("Back to the board (esc)")
                 Spacer(minLength: 0)
+                Text(status.label.uppercased())
+                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(status.color)
             }
             .foregroundStyle(.secondary)
 
             cardHeader(entry)
 
-            if let prompt = entry.prompt, !prompt.isEmpty {
-                Text(prompt)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            // Bounded, and scrollable inside those bounds: the message is
-            // context for what you are writing, and an agent that has just
-            // written six paragraphs must not push the editor off the panel.
             ScrollView {
-                Text(entry.message)
-                    .font(.system(size: 12, design: .monospaced))
-                    .lineSpacing(3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 10) {
+                    // The line that says something wants a decision. Only
+                    // drawn when there is one, so its presence is the signal.
+                    if let escalation = Self.escalation(for: entry) {
+                        Text(escalation)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(status.color)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    // What you last asked, whole. It was two lines before,
+                    // which is enough to recognise a question and not enough
+                    // to re-read one — and re-reading it is the reason you
+                    // are looking at this panel.
+                    if let prompt = entry.prompt, !prompt.isEmpty {
+                        labelled("You asked") {
+                            Text(prompt)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineSpacing(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
+                    // What it did to get here: the turn's tool calls, newest
+                    // last. This is the difference between "it says it fixed
+                    // the test" and seeing that it edited one file and ran
+                    // nothing.
+                    if !entry.activity.isEmpty {
+                        labelled("This turn") {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(entry.activity, id: \.self) { line in
+                                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                        Text("•")
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(.tertiary)
+                                        Text(line)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                            .truncationMode(.middle)
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
+                    labelled("Said") {
+                        Text(entry.message)
+                            .font(.system(size: 12, design: .monospaced))
+                            .lineSpacing(3)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    links(entry)
+                }
+                .padding(.bottom, 2)
             }
-            .frame(maxHeight: Self.focusedMessageHeight)
-
-            links(entry)
-
-            expandedComposer(entry, text: binding)
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // The keyboard belongs in the editor the moment the panel becomes
-        // one. `expand` sets this too, but the view it applies to is built
-        // after that, and a focus request that lands before its field exists
-        // is a focus request that quietly does nothing.
-        .onAppear { focusedDraft = entry.id }
-        // Same as the board's cards: drop a screenshot, a log, a diff.
-        .onDrop(of: [.fileURL, .image, .png, .tiff], isTargeted: nil) { providers in
-            attach(providers: providers, to: entry)
-            return true
+    }
+
+    /// A small caption over a block, so the halves read as sections rather
+    /// than as one run of grey monospace.
+    @ViewBuilder
+    private func labelled<Content: View>(
+        _ caption: String, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(caption.uppercased())
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .tracking(0.8)
+                .foregroundStyle(.tertiary)
+            content()
         }
     }
 
