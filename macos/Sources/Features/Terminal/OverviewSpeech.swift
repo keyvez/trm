@@ -200,6 +200,69 @@ final class LocalNeuralSpeechEngine: @unchecked Sendable {
     }
 }
 
+/// The one reading that is playing right now, wherever it started.
+///
+/// A reading outlives the panel it was started from. Peeking a terminal opens
+/// an overview to peek alongside it, and Escape closes that overview again —
+/// which used to take the voice with it, because the speaker was owned by the
+/// pane and nothing else held it. Pressing Escape means "put this view away",
+/// never "stop talking": you dismiss a peek to get back to your grid, often
+/// *because* you would rather listen than read.
+///
+/// So the reading is held here for as long as it lasts, and the Command
+/// Center draws the controls for it at the top of the board. The pane it came
+/// from may be gone; the voice, the scrubber and the speed are not.
+@MainActor
+final class SpeechNowPlaying: ObservableObject {
+    static let shared = SpeechNowPlaying()
+
+    /// The speaker currently reading, held strongly — this reference is what
+    /// keeps a reading alive once its overview has closed.
+    @Published private(set) var speaker: OverviewSpeaker?
+
+    /// What is being read, for the bar that offers to stop it. A reading with
+    /// no name attached to it is a mystery noise with a stop button.
+    @Published private(set) var label: String = ""
+
+    /// The pane whose overview started it, so reopening that overview adopts
+    /// the reading already in progress instead of showing a play button for
+    /// audio that is audibly already playing.
+    private(set) var paneId: Int?
+
+    private init() {}
+
+    func begin(_ speaker: OverviewSpeaker, label: String, paneId: Int?) {
+        self.speaker = speaker
+        self.label = label
+        self.paneId = paneId
+    }
+
+    /// Clear, but only if `speaker` is still the one playing. A reading that
+    /// ends after another has started must not silence the newer one's
+    /// controls.
+    func end(_ speaker: OverviewSpeaker) {
+        guard self.speaker === speaker else { return }
+        self.speaker = nil
+        self.label = ""
+        self.paneId = nil
+    }
+
+    /// The reading already running for this pane, if there is one.
+    func adopt(paneId: Int?) -> OverviewSpeaker? {
+        guard let paneId, self.paneId == paneId, let speaker, speaker.isActive else {
+            return nil
+        }
+        return speaker
+    }
+
+    /// Keep the name current: a pane renamed mid-reading should not leave a
+    /// stale label sitting over the controls.
+    func relabel(_ speaker: OverviewSpeaker, to label: String) {
+        guard self.speaker === speaker, !label.isEmpty, label != self.label else { return }
+        self.label = label
+    }
+}
+
 /// Speaks only the part of an overview worth interrupting a developer for.
 @MainActor
 final class OverviewSpeaker: NSObject, ObservableObject {
@@ -225,6 +288,17 @@ final class OverviewSpeaker: NSObject, ObservableObject {
 
     var isActive: Bool { isSpeaking || isPreparing }
     var canSeek: Bool { !buffers.isEmpty }
+
+    /// What to call this reading where it is offered without its overview —
+    /// the pane's watermark, kept current by the owning pane. Set before
+    /// `toggle`, so the reading is named the moment it starts.
+    var sourceLabel: String = "Agent Overview" {
+        didSet { SpeechNowPlaying.shared.relabel(self, to: sourceLabel) }
+    }
+
+    /// The pane this reading belongs to, so reopening that pane's overview
+    /// finds the reading rather than starting a second one.
+    var sourcePaneId: Int?
 
     private static let rateKey = "OverviewSpeaker.rate"
 
@@ -277,6 +351,9 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         elapsed = 0
         rendered = 0
         isComplete = false
+        // Held for as long as it plays, so closing the overview that started
+        // it — Escape on a peek, most often — does not deallocate the voice.
+        SpeechNowPlaying.shared.begin(self, label: sourceLabel, paneId: sourcePaneId)
         generationTask = Task { [weak self] in
             do {
                 for try await chunk in LocalNeuralSpeechEngine.shared.stream(trimmed) {
@@ -297,6 +374,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
                 self.isSpeaking = false
                 self.requestID = nil
                 self.lastError = error.localizedDescription
+                SpeechNowPlaying.shared.end(self)
             }
         }
     }
@@ -308,6 +386,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         stopAudio()
         isPreparing = false
         isSpeaking = false
+        SpeechNowPlaying.shared.end(self)
     }
 
     private func schedule(_ chunk: LocalNeuralSpeechEngine.Chunk) throws {
@@ -449,6 +528,7 @@ final class OverviewSpeaker: NSObject, ObservableObject {
         requestID = nil
         isPreparing = false
         isSpeaking = false
+        SpeechNowPlaying.shared.end(self)
     }
 
     private func stopAudio() {

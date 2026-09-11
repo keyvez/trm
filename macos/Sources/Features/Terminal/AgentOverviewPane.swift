@@ -264,7 +264,14 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// Reads the displayed reply aloud with the best installed system voice.
     /// Owned by the pane (not the view) so speech survives the view being
     /// rebuilt — peeking the pane mid-sentence must not cut the voice off.
-    let speaker = OverviewSpeaker()
+    ///
+    /// Assigned in `init` rather than here: a reading that is still playing for
+    /// this pane is adopted instead of replaced. Closing an overview no longer
+    /// stops the voice, so opening one again has to find the reading already in
+    /// progress — otherwise the pane would show a play button over audio that
+    /// is audibly playing, and pressing it would start a second reading on top
+    /// of the first.
+    let speaker: OverviewSpeaker
 
     @Published var fontFamily: AgentOverviewFontFamily = .regular {
         didSet {
@@ -280,6 +287,19 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     private static let fontScaleDefaultsKey = "AgentOverviewFontScale"
     private static let peekFontScaleDefaultsKey = "AgentOverviewPeekFontScale"
     private static let fontFamilyDefaultsKey = "AgentOverviewFontFamily"
+
+    /// What to call this pane where its reading is offered without it — the
+    /// watermark it wears on screen, which is how the pane is recognised
+    /// everywhere else, and the terminal's own title when it has no watermark.
+    private var speechSourceLabel: String {
+        if let paneId = boundPaneId,
+           let watermark = Trm.shared.watermark(forPaneId: UInt32(paneId)),
+           !watermark.isEmpty {
+            return watermark
+        }
+        let title = surface?.title ?? ""
+        return title.isEmpty ? "Agent Overview" : title
+    }
 
     func increaseFontSize() { fontScale += Self.fontScaleStep }
     func decreaseFontSize() { fontScale -= Self.fontScaleStep }
@@ -450,6 +470,9 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         self.surface = surface
         self.readsShellPanes = readsShellPanes
         self.boundPaneId = surface?.paneId
+        self.speaker = SpeechNowPlaying.shared.adopt(paneId: surface?.paneId)
+            ?? OverviewSpeaker()
+        self.speaker.sourcePaneId = surface?.paneId
         self.bionicEnabled = UserDefaults.standard.bool(forKey: Self.bionicDefaultsKey)
         self.cardsEnabled = UserDefaults.standard.bool(forKey: Self.cardsDefaultsKey)
         // `object(forKey:)` rather than `double(forKey:)`: an absent key
@@ -507,6 +530,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         bindingGeneration &+= 1
         parseInFlight = false
         speaker.stop()
+        speaker.sourcePaneId = newSurface.paneId
 
         if let mirror = remoteMirror {
             RemoteAgentTranscriptMirror.release(mirror)
@@ -547,6 +571,9 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             statusMessage = "The terminal pane this view was tracking has closed."
             return
         }
+        // Cheap, and the only place that sees a rename: the label the Command
+        // Center puts over the playback controls is this pane's watermark.
+        speaker.sourceLabel = speechSourceLabel
         let generation = bindingGeneration
 
         // A remote pane's agent process and transcript live on the other

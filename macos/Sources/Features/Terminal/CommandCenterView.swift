@@ -99,7 +99,58 @@ struct CommandCenterView: View {
     /// section you can scroll.
     private static let minimumFocusedSection: CGFloat = 170
 
+    /// The reading that is playing, wherever it was started from.
+    @ObservedObject private var nowPlaying = SpeechNowPlaying.shared
+
     var body: some View {
+        VStack(spacing: 0) {
+            nowPlayingBar
+            panel
+        }
+    }
+
+    /// Playback controls for a reading whose own panel has gone.
+    ///
+    /// Escape on a peek closes the overview it opened, which is where the play
+    /// button lived. The voice keeps going — dismissing a view is not a request
+    /// for silence — so the controls come here, to the top of the board, which
+    /// is the one panel that is about every pane rather than any one of them.
+    /// It is only drawn while something is actually playing.
+    @ViewBuilder
+    private var nowPlayingBar: some View {
+        if let speaker = nowPlaying.speaker {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.accentColor)
+                    Text(nowPlaying.label)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    Button {
+                        speaker.stop()
+                    } label: {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop reading")
+                }
+                OverviewPlaybackControls(speaker: speaker)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.accentColor.opacity(0.08))
+            Divider().opacity(0.35)
+        }
+    }
+
+    private var panel: some View {
         Group {
             if let entry = focusedComposerEntry {
                 focusedComposerView(entry)
