@@ -67,6 +67,13 @@ struct AgentOverviewView: View {
 
     var body: some View {
         content
+            // Which overview the arrow keys page is decided by where the
+            // pointer is: an overview cannot take keyboard focus, and the one
+            // pane that can — the terminal — must keep its own arrows.
+            .onHover { over in
+                pane.isPointerOver = over
+            }
+            .onDisappear { pane.isPointerOver = false }
     }
 
     private var content: some View {

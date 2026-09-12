@@ -152,6 +152,19 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         return value
     }
 
+    /// Whether the pointer is over this overview.
+    ///
+    /// Which overview the arrow keys page is decided by where you are
+    /// pointing, because an overview cannot hold keyboard focus — panes that
+    /// take focus are terminals, and peeking an overview deliberately focuses
+    /// the *terminal* beside it so you can type at the agent. Pointing at the
+    /// thing you want to move through is the signal left; it also means an
+    /// overview you are not pointing at never swallows a key.
+    ///
+    /// Not @Published: it changes on every pointer crossing and nothing on
+    /// screen draws from it.
+    var isPointerOver = false
+
     var canShowPreviousTurn: Bool { canGoOlderTurn }
     var canShowNextTurn: Bool { canGoNewerTurn }
     func showPreviousTurn() { goToOlderTurn() }

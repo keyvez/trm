@@ -4669,6 +4669,32 @@ class BaseTerminalController: NSWindowController,
             return nil
         }
 
+        // Left and right page through an overview's turns.
+        //
+        // Scoped to the overview under the pointer, because an overview has no
+        // way to hold the keyboard: the panes that take focus are terminals,
+        // and peeking an overview focuses the terminal beside it on purpose so
+        // the agent is ready to type at. Taking the arrows from whatever has
+        // focus would break line editing at that prompt, which is where those
+        // keys are used most.
+        //
+        // The key is only swallowed when that overview can actually move —
+        // at the newest turn, right goes back to the terminal untouched — so
+        // the cost of pointing at an overview by accident is nothing.
+        if window?.isKeyWindow == true,
+           event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
+           event.keyCode == 123 || event.keyCode == 124,
+           let overview = agentOverviewPanes.first(where: { $0.isPointerOver }) {
+            if event.keyCode == 123, overview.canShowPreviousTurn {
+                overview.showPreviousTurn()
+                return nil
+            }
+            if event.keyCode == 124, overview.canShowNextTurn {
+                overview.showNextTurn()
+                return nil
+            }
+        }
+
         // Escape closes a peeked pane and puts the grid back.
         //
         // Only for panes that don't want the key themselves: Escape belongs to
