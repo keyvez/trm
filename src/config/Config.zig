@@ -2533,8 +2533,10 @@ keybind: Keybinds = .{},
 /// On macOS, changing this configuration requires restarting Ghostty
 /// completely.
 ///
-/// Note: There is no default keybind for toggling the quick terminal.
-/// To enable this feature, bind the `toggle_quick_terminal` action to a key.
+/// The quick terminal is bound to `global:ctrl+backquote` by default. It is a
+/// global binding because a drop-down terminal you can only summon from the
+/// terminal is a window you already had. Rebind or remove it like any other:
+/// `keybind = global:ctrl+backquote=unbind`.
 @"quick-terminal-position": QuickTerminalPosition = .top,
 
 /// The size of the quick terminal.
@@ -6532,6 +6534,20 @@ pub const Keybinds = struct {
             alloc,
             .{ .key = .{ .unicode = 'p' }, .mods = inputpkg.ctrlOrSuper(.{ .shift = true }) },
             .toggle_command_palette,
+        );
+
+        // Summon the quick terminal. Global, because a drop-down terminal you
+        // can only reach from the terminal is a window you already had: the
+        // whole point is the thought that arrives while you are in a browser
+        // or an editor. Control+backquote rather than the documented
+        // cmd+backquote, which macOS spends on "next window in this app" in
+        // every application — taking that system-wide is a large thing for a
+        // default to do quietly.
+        try self.set.putFlags(
+            alloc,
+            .{ .key = .{ .unicode = '`' }, .mods = .{ .ctrl = true } },
+            .{ .toggle_quick_terminal = {} },
+            .{ .global = true },
         );
 
         // Mac-specific keyboard bindings.

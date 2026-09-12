@@ -342,7 +342,10 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
 
     /// The transcript path resolved on the previous poll. Cached so a pane
     /// whose cwd hasn't changed skips directory enumeration.
-    private var lastURL: URL?
+    /// The transcript this overview resolved to, by hook record or by
+    /// correlation. Readable so session save can record the conversation for
+    /// a reboot without resolving it a second time.
+    private(set) var lastURL: URL?
     private var lastCwd: String?
 
     /// The exact agent session located via the pane's process tree, plus the

@@ -6356,6 +6356,15 @@ class BaseTerminalController: NSWindowController,
                         .joined(separator: ", ")
                     lines.append("initial_commands = [\(quoted)]")
                 }
+                // The agent conversation this pane is having, so a reboot —
+                // the one event zmx cannot survive — can put it back. Local
+                // panes only: a remote pane's hook record lives on the other
+                // machine, and reading it would mean an SSH round trip per
+                // pane on the 30-second checkpoint.
+                if surface.remoteHost == nil, let resume = agentResume(for: surface) {
+                    lines.append("agent = \(tomlQuote(resume.kind.rawValue))")
+                    lines.append("agent_resume_id = \(tomlQuote(resume.id))")
+                }
                 if let sbFile = savedScrollbackFiles[ObjectIdentifier(surface)] {
                     lines.append("scrollback_file = \(tomlQuote(sbFile))")
                 }
@@ -7738,6 +7747,26 @@ class BaseTerminalController: NSWindowController,
 
             commands.append(contentsOf: paneConfig.initialCommands)
 
+            // Restart the agent on the conversation it was having.
+            //
+            // Only reached when the pane did *not* reattach — the session
+            // daemon is gone, which in practice means the machine restarted.
+            // A pane that reattached has the agent still running in it and
+            // must not be sent anything.
+            //
+            // This is the lighter restore: not the process back, but the
+            // conversation back, which is the part that took thirty turns to
+            // build. It is typed rather than made the pane's command so the
+            // shell is still yours when the agent exits, and so a resume that
+            // fails leaves you at a prompt rather than a dead pane.
+            if let agent = paneConfig.agent,
+               let kind = AgentKind(rawValue: agent),
+               let resumeID = paneConfig.agentResumeID,
+               AgentResume.isUUID(resumeID) {
+                commands.append(AgentResume.command(
+                    for: .init(kind: kind, id: resumeID)))
+            }
+
             // Send commands after a delay to let the shell start.
             // Stagger each pane by 50ms to avoid overwhelming the system
             // when many panes are created simultaneously.
@@ -7750,6 +7779,28 @@ class BaseTerminalController: NSWindowController,
 
             surfaceIndex += 1
         }
+    }
+
+    /// The agent conversation running in a pane, for the session file.
+    ///
+    /// The hook's record is the cheap and exact answer — one file read, keyed
+    /// by zmx session name — but it only exists once the hook has run for
+    /// that session, which is never for an agent that was already going when
+    /// the hook was installed, and not at all on a machine where it was never
+    /// set up. An open overview has already resolved the transcript, by hook
+    /// or by correlation, so asking it costs nothing and covers the gap.
+    ///
+    /// Neither path goes looking on its own: resolving a transcript from
+    /// scratch means scanning directories, and this runs for every pane on a
+    /// 30-second checkpoint.
+    private func agentResume(for surface: Ghostty.SurfaceView) -> AgentResume.Record? {
+        if let session = surface.zmxSessionName,
+           let record = AgentResume.record(forZmxSession: session) {
+            return record
+        }
+        guard let transcript = agentOverviewPanes
+            .first(where: { $0.surface === surface })?.lastURL else { return nil }
+        return AgentResume.record(forTranscript: transcript)
     }
 
     /// Adjust a live `row_cols` shape to hold exactly `total` visual panes,

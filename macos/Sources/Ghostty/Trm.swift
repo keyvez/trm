@@ -815,6 +815,11 @@ final class Trm {
         var remoteHost: String?
         /// The remote host's zmx session name for a remote pane.
         var remoteSession: String?
+        /// The AI agent that was running here ("claude", "codex") and the
+        /// conversation id to resume, recorded so a reboot can bring the
+        /// agent back even though its process is long gone.
+        var agent: String?
+        var agentResumeID: String?
         /// For pane_type "agent_overview": index (in this pane list) of the
         /// terminal pane the overview is bound to.
         var overviewOf: Int?
@@ -903,6 +908,12 @@ final class Trm {
             }
             if let rs = extras[i].remoteSession {
                 config.panes[i].remoteSession = rs
+            }
+            if let agent = extras[i].agent {
+                config.panes[i].agent = agent
+            }
+            if let resumeID = extras[i].agentResumeID {
+                config.panes[i].agentResumeID = resumeID
             }
             if let of = extras[i].overviewOf {
                 config.panes[i].overviewOf = of
@@ -1144,6 +1155,8 @@ final class Trm {
         var stackFractions: [Double]?
         var remoteHost: String?
         var remoteSession: String?
+        var agent: String?
+        var agentResumeID: String?
         var sidebar: Bool = false
     }
 
@@ -1190,6 +1203,14 @@ final class Trm {
             } else if trimmed.hasPrefix("remote_session") {
                 if let value = parseTomlStringValue(trimmed) {
                     current?.remoteSession = value
+                }
+            } else if trimmed.hasPrefix("agent_resume_id") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.agentResumeID = value
+                }
+            } else if trimmed.hasPrefix("agent") {
+                if let value = parseTomlStringValue(trimmed) {
+                    current?.agent = value
                 }
             } else if trimmed.hasPrefix("overview_of") {
                 if let eqIdx = trimmed.firstIndex(of: "=") {
