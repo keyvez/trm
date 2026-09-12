@@ -1572,11 +1572,20 @@ private struct CopyableOverviewCodeBlock: View {
             // Wrapping is intentional. A horizontal ScrollView nested inside
             // the overview's vertical one previously created a non-converging
             // width negotiation during window restore.
+            // Not selectable, which is what makes the whole block a copy
+            // target: selectable text takes the mouse, so a tap landing on the
+            // glyphs never reached the gesture below and only the padding and
+            // the icon responded — a copy button the size of a postage stamp
+            // on a block the size of the pane.
+            //
+            // A code block is a thing you take whole: a command to paste, a
+            // snippet to run. Prose is what you quote a sentence from, and
+            // prose is still selectable.
             Text(text)
                 .font(.system(size: fontSize, weight: .light, design: .monospaced))
                 .lineSpacing(lineSpacing)
                 .foregroundStyle(.primary.opacity(0.88))
-                .textSelection(.enabled)
+                .textSelection(.disabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
@@ -1586,13 +1595,21 @@ private struct CopyableOverviewCodeBlock: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(Color.black.opacity(0.22))
+                .fill(Color.black.opacity(isHovering ? 0.28 : 0.22))
         )
         .overlay(
+            // The border carries the affordance: the whole block lights up
+            // under the pointer, so "this is one thing you can click" is
+            // visible before you click it rather than discovered by accident.
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(Color.secondary.opacity(0.16), lineWidth: 1)
+                .strokeBorder(
+                    didCopy
+                        ? Color.green.opacity(0.55)
+                        : Color.secondary.opacity(isHovering ? 0.42 : 0.16),
+                    lineWidth: 1)
                 .allowsHitTesting(false)
         )
+        .animation(.easeOut(duration: 0.12), value: isHovering)
         .overlay(alignment: .topTrailing) {
             // Always drawn, just faint until wanted: a copy button you can
             // only find by hovering is one you don't know is there, and after
@@ -1608,7 +1625,7 @@ private struct CopyableOverviewCodeBlock: View {
         .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .onHover { isHovering = $0 }
         .onTapGesture { copy() }
-        .help("Copy code block")
+        .help("Click anywhere to copy this code")
     }
 
     private func copy() {
