@@ -80,7 +80,10 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     @Published private(set) var boundPaneId: Int?
 
     @Published var transcript = AgentTranscript() {
-        didSet { reanchorTurnSelection() }
+        didSet {
+            rebuildBrowsableTurns()
+            reanchorTurnSelection()
+        }
     }
 
     /// How many turns back from the latest the view shows; 0 = live.
@@ -91,7 +94,16 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// arriving mid-read doesn't shift the page underneath the reader.
     private var viewedTurnID: String? = nil
 
-    var turnCount: Int { transcript.turns.count }
+    /// What this pane can page through: the contexts it has been through, and
+    /// the turns kept from each. See `AgentTurnHistory`.
+    typealias BrowsableTurn = AgentTurnHistory.Entry
+    private var history = AgentTurnHistory()
+
+    /// Everything pageable, oldest first — the kept contexts, then the live
+    /// one. Published because the turn list draws from it.
+    @Published private(set) var browsableTurns: [BrowsableTurn] = []
+
+    var turnCount: Int { browsableTurns.count }
     var canGoOlderTurn: Bool { turnOffset < turnCount - 1 }
     var canGoNewerTurn: Bool { turnOffset > 0 }
 
@@ -99,22 +111,80 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     func goToNewerTurn() { selectTurn(offset: turnOffset - 1) }
     func goToLatestTurn() { selectTurn(offset: 0) }
 
+    /// Jump to a turn by its place in `browsableTurns` — what the turn list
+    /// hands back when a row is picked.
+    func showTurn(at index: Int) {
+        selectTurn(offset: browsableTurns.count - 1 - index)
+    }
+
     private func selectTurn(offset: Int) {
         let clamped = min(max(0, offset), max(0, turnCount - 1))
         turnOffset = clamped
-        let turns = transcript.turns
-        viewedTurnID = clamped > 0 ? turns[turns.count - 1 - clamped].id : nil
+        viewedTurnID = clamped > 0
+            ? browsableTurns[browsableTurns.count - 1 - clamped].id
+            : nil
     }
+
+    /// Index into `browsableTurns` of the slot on screen.
+    var displayedTurnIndex: Int { browsableTurns.count - 1 - turnOffset }
 
     /// The archived turn the view renders, or nil when live (offset 0) — the
     /// live view renders the transcript's top-level fields, which include the
     /// wider prompt-search fallback that archived turns don't get.
     var displayedTurn: AgentTranscript.Turn? {
         guard turnOffset > 0 else { return nil }
-        let turns = transcript.turns
-        let index = turns.count - 1 - turnOffset
-        guard turns.indices.contains(index) else { return nil }
-        return turns[index]
+        let index = displayedTurnIndex
+        guard browsableTurns.indices.contains(index) else { return nil }
+        let entry = browsableTurns[index]
+        return entry.isPlaceholder ? nil : entry.turn
+    }
+
+    /// True when the turn at this index opens a context — everything before it
+    /// was cleared out of the agent's memory. Never true of the very first
+    /// turn the pane ever saw: nothing was cleared to make room for it.
+    func startsNewContext(at index: Int) -> Bool {
+        guard index > 0, browsableTurns.indices.contains(index) else { return false }
+        return browsableTurns[index].contextIndex != browsableTurns[index - 1].contextIndex
+    }
+
+    /// When the context containing the turn at this index began, if it began
+    /// with a clear this pane saw.
+    func contextBreakDate(at index: Int) -> Date? {
+        guard browsableTurns.indices.contains(index) else { return nil }
+        return history.breakDates[browsableTurns[index].contextIndex]
+    }
+
+    /// Set while the overview is showing the first turn of a context, so the
+    /// view can mark the seam where the agent's memory was emptied.
+    var showsContextBreak: Bool { startsNewContext(at: displayedTurnIndex) }
+
+    /// True when what is on screen was said in a context the agent has since
+    /// forgotten — readable, but no longer part of what it knows.
+    var displayedTurnIsForgotten: Bool {
+        let index = displayedTurnIndex
+        guard browsableTurns.indices.contains(index) else { return false }
+        return browsableTurns[index].contextIndex < history.contextIndex
+    }
+
+    private func rebuildBrowsableTurns() {
+        let next = history.entries(liveTurns: transcript.turns)
+        if browsableTurns != next { browsableTurns = next }
+    }
+
+    /// Note that the pane is now reading a different transcript — a `/clear`,
+    /// a new session, or the agent going away. Called before the new parse
+    /// lands, while `transcript` still holds the context that is ending.
+    private func beginContext(sourceKey: String?) {
+        history.beginContext(sourceKey: sourceKey, liveTurns: transcript.turns)
+        rebuildBrowsableTurns()
+    }
+
+    /// Drop the kept contexts entirely: the pane itself has changed, and the
+    /// earlier turns belong to something else altogether.
+    private func resetContextHistory() {
+        guard history != AgentTurnHistory() else { return }
+        history.reset()
+        rebuildBrowsableTurns()
     }
 
     /// After a poll replaces the transcript, keep pointing at the same turn:
@@ -122,7 +192,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// the viewed turn's distance from the end.
     private func reanchorTurnSelection() {
         guard turnOffset > 0, let id = viewedTurnID else { return }
-        let turns = transcript.turns
+        let turns = browsableTurns
         if let index = turns.lastIndex(where: { $0.id == id }) {
             let offset = turns.count - 1 - index
             if offset != turnOffset { turnOffset = offset }
@@ -130,7 +200,9 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             // The viewed turn left the window — clamp to the oldest we have.
             let clamped = min(turnOffset, max(0, turns.count - 1))
             if clamped != turnOffset { turnOffset = clamped }
-            viewedTurnID = displayedTurn?.id
+            viewedTurnID = clamped > 0
+                ? turns[turns.count - 1 - clamped].id
+                : nil
         }
     }
 
@@ -563,6 +635,7 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         locatedAgentPid = 0
         agentKind = nil
         clearShellState()
+        resetContextHistory()
         goToLatestTurn()
         transcript = AgentTranscript()
         statusMessage = "Looking for the agent in this pane…"
@@ -793,6 +866,9 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                     self.lastURL = nil
                     self.lastMtime = nil
                     self.locatedSession = nil
+                    // The agent's session is gone, so nothing is live — but
+                    // what it said is kept, the same as after a clear.
+                    self.beginContext(sourceKey: nil)
                     self.goToLatestTurn()
                     self.transcript = AgentTranscript()
                     self.statusMessage =
@@ -836,9 +912,13 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
                 let sessionChanged = knownURL != url
                 if sessionChanged {
                     // `/clear` and `/new` intentionally start with an empty
-                    // transcript. That emptiness is authoritative: retaining
-                    // the previous non-empty model is precisely how the old
-                    // turn remained on screen after the chat changed.
+                    // transcript. That emptiness is authoritative for what is
+                    // *live*: retaining the previous non-empty model is
+                    // precisely how the old turn remained on screen after the
+                    // chat changed. The turns themselves are kept — paged
+                    // behind a divider — because the agent forgetting them is
+                    // not the same as the reader being finished with them.
+                    self.beginContext(sourceKey: url.path)
                     self.goToLatestTurn()
                     self.transcript = parsed ?? AgentTranscript()
                 } else if let parsed, !parsed.isEmpty {
@@ -892,7 +972,9 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
            remotePath != lastRemoteTranscriptPath {
             // The stream will replay the new file into the same mirror URL.
             // Clear the prior turn immediately, including the empty interval
-            // between `/clear` and the first prompt in the fresh chat.
+            // between `/clear` and the first prompt in the fresh chat — the
+            // turns stay pageable behind the divider `beginContext` marks.
+            beginContext(sourceKey: remotePath)
             lastRemoteTranscriptPath = remotePath
             lastMtime = nil
             goToLatestTurn()
@@ -1005,6 +1087,10 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
         scrollback: String?, commands: [ShellCommand]?,
         viewportHash: Int? = nil, emptyStatus: String
     ) {
+        // A shell's turns are its commands, and they are re-read whole every
+        // poll — there are no contexts to divide, and any kept from an agent
+        // that used to be in this pane would only shift the indices.
+        if !isShellPane { resetContextHistory() }
         isShellPane = true
         guard let scrollback, let commands else {
             // Throttled, not empty — keep the last good read.

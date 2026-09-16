@@ -36,6 +36,11 @@ struct AgentOverviewView: View {
     /// Set briefly after a URL is tapped, driving the "Link copied" pill.
     @State private var didCopyLink = false
 
+    /// Whether the whole-session turn list is open, and the guard that keeps
+    /// the long press that opens it from also paging a turn on release.
+    @State private var showingTurnList = false
+    @State private var navWasLongPressed = false
+
     // MARK: - Type scale
 
     /// Every size in the view is expressed through this, so the whole scale
@@ -193,6 +198,9 @@ struct AgentOverviewView: View {
 
                     if pane.turnOffset > 0 {
                         earlierTurnBanner
+                    }
+                    if pane.showsContextBreak || pane.displayedTurnIsForgotten {
+                        contextBreakBanner
                     }
                     if pane.isShellPane, let command = pane.displayedShellCommand {
                         shellCopyBar(command)
@@ -538,32 +546,36 @@ struct AgentOverviewView: View {
             Spacer()
 
             HStack(spacing: 2) {
-                Button(action: { pane.showPreviousTurn() }) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 10, weight: .semibold))
-                        .frame(width: 16, height: 16)
-                }
-                .buttonStyle(.plain)
-                .disabled(!pane.canShowPreviousTurn)
-                .help(pane.isShellPane ? "Previous command" : "Previous agent turn")
+                turnNavButton(
+                    symbol: "chevron.left",
+                    help: pane.isShellPane ? "Previous command" : "Previous agent turn",
+                    enabled: pane.canShowPreviousTurn,
+                    action: { pane.showPreviousTurn() })
 
                 if let position = pane.turnPositionLabel {
-                    Text(position)
-                        .font(.system(size: 9, weight: .regular, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
+                    // A click on the counter opens the same list the chevrons
+                    // open on a long press: the number is the part of the
+                    // control that is *about* the whole session.
+                    Button(action: { showingTurnList = true }) {
+                        Text(position)
+                            .font(.system(size: 9, weight: .regular, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show every \(pane.isShellPane ? "command" : "turn")")
                 }
 
-                Button(action: { pane.showNextTurn() }) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .frame(width: 16, height: 16)
-                }
-                .buttonStyle(.plain)
-                .disabled(!pane.canShowNextTurn)
-                .help(pane.isShellPane ? "Next command" : "Next agent turn")
+                turnNavButton(
+                    symbol: "chevron.right",
+                    help: pane.isShellPane ? "Next command" : "Next agent turn",
+                    enabled: pane.canShowNextTurn,
+                    action: { pane.showNextTurn() })
             }
             .foregroundStyle(.secondary)
+            .popover(isPresented: $showingTurnList, arrowEdge: .bottom) {
+                turnListPopover
+            }
 
             if compact {
                 headerOverflowMenu
@@ -750,6 +762,207 @@ struct AgentOverviewView: View {
 
     private var canDecreaseActiveFontSize: Bool {
         isPeeked ? pane.canDecreasePeekFontSize : pane.canDecreaseFontSize
+    }
+
+    /// A turn chevron. A click pages one turn; press and hold opens the list
+    /// of every turn the pane holds — the way back to something twenty turns
+    /// ago without twenty clicks, and the only place the seams between
+    /// contexts are all visible at once.
+    private func turnNavButton(
+        symbol: String,
+        help: String,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            // The long press fires while the button is still held, so the
+            // click that ends it would otherwise page a turn behind the list
+            // that press just opened.
+            if navWasLongPressed {
+                navWasLongPressed = false
+                return
+            }
+            action()
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.4).onEnded { _ in
+                navWasLongPressed = true
+                showingTurnList = true
+            }
+        )
+        .help(help + " — hold for all of them")
+    }
+
+    /// Every turn in the pane, newest first, with the clears marked.
+    private var turnListPopover: some View {
+        let turns = pane.browsableTurns
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Text(pane.isShellPane ? "Commands" : "Turns")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("\(turns.count)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
+                if pane.canShowNextTurn {
+                    Button("Latest") {
+                        pane.goToLatestTurn()
+                        showingTurnList = false
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(turns.enumerated()).reversed(), id: \.offset) { index, entry in
+                        turnListRow(index: index, entry: entry)
+                        // Drawn under the newer context's rows, because the
+                        // list runs newest first: everything below the line
+                        // was said before the agent's memory was emptied.
+                        if pane.startsNewContext(at: index) {
+                            contextDivider(at: index)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 340)
+        }
+        .frame(width: 320)
+    }
+
+    private func turnListRow(
+        index: Int, entry: AgentOverviewPane.BrowsableTurn
+    ) -> some View {
+        let isCurrent = index == pane.displayedTurnIndex
+        return Button {
+            pane.showTurn(at: index)
+            showingTurnList = false
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Text("\(index + 1)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+                    .frame(width: 24, alignment: .trailing)
+                Text(turnListSummary(entry))
+                    .font(.system(size: 11.5, weight: isCurrent ? .semibold : .regular))
+                    .foregroundStyle(entry.isPlaceholder ? .secondary : .primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(isCurrent ? Color.accentColor.opacity(0.14) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The line between two contexts: below it is what the agent no longer
+    /// knows.
+    private func contextDivider(at index: Int) -> some View {
+        HStack(spacing: 6) {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.25))
+                .frame(height: 1)
+            Label {
+                Text(contextBreakLabel(at: index))
+                    .font(.system(size: 9.5, weight: .medium))
+            } icon: {
+                Image(systemName: "eraser.line.dashed")
+                    .font(.system(size: 9))
+            }
+            .foregroundStyle(.secondary)
+            .fixedSize()
+            Rectangle()
+                .fill(Color.secondary.opacity(0.25))
+                .frame(height: 1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    private func contextBreakLabel(at index: Int) -> String {
+        guard let date = pane.contextBreakDate(at: index) else { return "Context cleared" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return "Context cleared · \(formatter.string(from: date))"
+    }
+
+    /// One line describing a turn in the list: what was asked, failing that
+    /// what was said, failing that what was run.
+    private func turnListSummary(_ entry: AgentOverviewPane.BrowsableTurn) -> String {
+        if entry.isPlaceholder {
+            return pane.transcript.isWorking
+                ? "Working…"
+                : "Nothing said in this context yet"
+        }
+        let turn = entry.turn
+        if let prompt = turn.prompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !prompt.isEmpty {
+            return Self.oneLine(prompt)
+        }
+        for block in turn.blocks {
+            if case .paragraph(let text) = block {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return Self.oneLine(trimmed) }
+            }
+        }
+        if let call = turn.activity.first {
+            return Self.oneLine([call.name, call.detail].compactMap { $0 }.joined(separator: " "))
+        }
+        return "Untitled turn"
+    }
+
+    private static func oneLine(_ text: String) -> String {
+        let flat = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return flat.count > 120 ? String(flat.prefix(119)) + "…" : flat
+    }
+
+    /// Shown above a turn that opens a context: everything older than it is
+    /// still here to page back to, but the agent no longer remembers any of
+    /// it.
+    private var contextBreakBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "eraser.line.dashed")
+                .font(.system(size: 10))
+            Text(pane.showsContextBreak
+                 ? "Context cleared before this — earlier turns are still here"
+                 : "This turn is from a context the agent has since cleared")
+                .font(.system(size: scaled(11), weight: .medium))
+            Spacer(minLength: 0)
+            Button(action: { showingTurnList = true }) {
+                Text("All turns")
+                    .font(.system(size: scaled(11), weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.secondary.opacity(0.10))
+        )
     }
 
     /// Banner shown while paging through history, with the way back.
