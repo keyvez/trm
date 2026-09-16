@@ -3376,8 +3376,8 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
-    /// Send text to a specific surface via the `text:` binding action.
-    /// Type `text` into a pane as if the user had, then press Enter.
+    /// Put `text` into a pane as if it had been pasted there, then press
+    /// Enter.
     ///
     /// Used by the Agent Overview and Command Center compose boxes: those are
     /// reading surfaces for an agent, and answering it should not mean hunting
@@ -3390,14 +3390,23 @@ class BaseTerminalController: NSWindowController,
     /// rather than more paste — at 80 ms the message landed in the box and sat
     /// there unsent.
     func sendMessageToSurface(_ surface: Ghostty.SurfaceView, text: String) {
-        // Trimmed at both ends, and interior newlines folded to spaces: an
-        // agent's input box submits on Return, so a multi-line message would
-        // send its first line and leave the rest behind.
-        let body = text
-            .replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // A message arrives in the shape it was written in. It goes down as a
+        // paste, so a program with bracketed paste on — every agent's input
+        // box — takes the whole thing at once and the newlines inside it stay
+        // newlines; only the Return that follows submits it.
+        //
+        // Without bracketing there is nothing to frame the text, and each
+        // newline would reach a shell as "run this line", so there the
+        // message is folded onto one line instead. Trimming is at the ends
+        // only, either way.
+        let bracketed = surface.keepsPastedLineBreaks
+        var body = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        if !bracketed {
+            body = body.replacingOccurrences(of: "\n", with: " ")
+        }
+        body = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
 
         // Exactly what went down the wire, so a report of "it arrived with a
@@ -3415,9 +3424,24 @@ class BaseTerminalController: NSWindowController,
             CommandCenterMonitor.shared.recordSentMessage(paneId: paneId, text: body)
         }
 
-        sendTextToSurface(surface, text: body)
+        pasteTextToSurface(surface, text: body)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.sendTextToSurface(surface, text: "\r")
+        }
+    }
+
+    /// Deliver text to a surface the way a paste would: bracketed when the
+    /// program asked for bracketing, so newlines arrive as text rather than
+    /// as a run of Returns.
+    ///
+    /// The submitting Return must not come this way — inside the brackets it
+    /// would be just another newline in the box.
+    private func pasteTextToSurface(_ surface: Ghostty.SurfaceView, text: String) {
+        guard let s = surface.surface else { return }
+        let len = text.utf8CString.count
+        guard len > 1 else { return }
+        text.withCString { cString in
+            ghostty_surface_text(s, cString, UInt(len - 1))
         }
     }
 

@@ -3869,6 +3869,17 @@ pub fn mouseCaptured(self: *Surface) bool {
     return self.io.terminal.flags.mouse_event != .none;
 }
 
+/// Returns true if the running program has bracketed paste mode on.
+///
+/// This tells a caller whether multi-line text can be delivered whole:
+/// with bracketing, the newlines arrive as text; without it, they arrive
+/// as carriage returns and a line-oriented program runs each line.
+pub fn bracketedPaste(self: *Surface) bool {
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+    return self.io.terminal.modes.get(.bracketed_paste);
+}
+
 /// Called for mouse button press/release events. This will return true
 /// if the mouse event was consumed in some way (i.e. the program is capturing
 /// mouse events). If the event was not consumed, then false is returned.

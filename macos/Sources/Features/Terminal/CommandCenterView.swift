@@ -1033,10 +1033,14 @@ struct CommandCenterView: View {
 
             HStack(spacing: 8) {
                 // Said plainly, because it is the one thing about this box
-                // that is not obvious and cannot be undone after sending: an
-                // agent's input box submits on Return, so the message goes as
-                // one line however many you wrote it on.
-                Text("Line breaks become spaces when sent")
+                // that is not obvious and cannot be undone after sending. A
+                // message goes down as a paste, so an agent's input box keeps
+                // the lines you wrote — but a pane sitting at a plain shell
+                // prompt has nothing framing a paste, where a newline means
+                // "run this", and there the message is flattened instead.
+                Text(keepsLineBreaks(entry)
+                     ? "Line breaks are kept"
+                     : "Line breaks become spaces in this pane")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: 0)
@@ -1313,6 +1317,13 @@ struct CommandCenterView: View {
     private func apply(_ text: String, to entry: CommandCenterMonitor.Entry) {
         historyEcho[entry.id] = text
         drafts[entry.id] = text
+    }
+
+    /// Whether what is in this pane takes a paste whole. Every agent's input
+    /// box does; a bare shell prompt does not.
+    private func keepsLineBreaks(_ entry: CommandCenterMonitor.Entry) -> Bool {
+        guard let surface = entry.surface else { return true }
+        return surface.keepsPastedLineBreaks
     }
 
     private func send(_ entry: CommandCenterMonitor.Entry) {

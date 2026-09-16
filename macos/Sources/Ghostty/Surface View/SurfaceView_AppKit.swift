@@ -251,6 +251,15 @@ extension Ghostty {
         var surface: ghostty_surface_t? {
             surfaceModel?.unsafeCValue
         }
+
+        /// True when the program running here has bracketed paste on, and so
+        /// takes a multi-line paste whole instead of reading each newline as
+        /// a Return. Every agent's input box does; a bare shell prompt does
+        /// not, and a message sent there has to arrive on one line.
+        var keepsPastedLineBreaks: Bool {
+            guard let surface else { return false }
+            return ghostty_surface_bracketed_paste(surface)
+        }
         /// Current scrollbar state, cached here for persistence across rebuilds
         /// of the SwiftUI view hierarchy, for example when changing splits
         var scrollbar: Ghostty.Action.Scrollbar?
