@@ -149,6 +149,16 @@ class SurfaceScrollView: NSView {
                 self?.scrollView.documentCursor = newStyle.cursor
             }
             .store(in: &cancellables)
+
+        // Another view that was showing this surface is going away. See
+        // `surfaceRelinquished` for why this cannot wait for a layout pass.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: Self.surfaceRelinquished,
+            object: surfaceView,
+            queue: nil
+        ) { [weak self] _ in
+            self?.reclaimSurfaceIfNeeded()
+        })
     }
     
     required init?(coder: NSCoder) {
@@ -157,6 +167,68 @@ class SurfaceScrollView: NSView {
     
     deinit {
         observers.forEach { NotificationCenter.default.removeObserver($0) }
+
+        // If we still hold the surface, let go of it *and say so*.
+        //
+        // A peek renders the same `SurfaceView` in a second scroll view, and
+        // an NSView has one superview, so the two hand it back and forth. The
+        // hand-back used to be inferred: `layout()` noticed an orphaned
+        // surface and took it in. That only works if a layout pass happens to
+        // run afterwards, and when the peek is dismissed the grid cell's
+        // frame has not changed, so often none does — leaving the pane a dark
+        // rectangle with its watermark on it until something else forces a
+        // relayout. Reloading the UI was the only reliable cure, which is the
+        // signature of state that is right underneath and just not on screen.
+        //
+        // So the loss is announced instead of deduced. Orphaning first is
+        // what makes the announcement safe to act on: every observer sees a
+        // surface with no parent and the first one on screen adopts it.
+        relinquishSurfaceIfHeld()
+    }
+
+    /// Posted with a `SurfaceView` when a scroll view that was holding it goes
+    /// away, so another view showing the same surface can take it back.
+    static let surfaceRelinquished = Notification.Name(
+        "SurfaceScrollViewSurfaceRelinquished")
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            // We have left the screen. Hand the surface back now rather than
+            // at dealloc: SwiftUI keeps a removed view alive for a while, and
+            // for every moment we hold a surface we are not drawing, the cell
+            // that should be drawing it shows an empty rectangle.
+            relinquishSurfaceIfHeld()
+        } else {
+            // We have arrived on screen. If the surface is going spare — the
+            // usual case on the way back from a peek — it is ours.
+            reclaimSurfaceIfNeeded()
+        }
+    }
+
+    /// Give up the surface, and say so, if we are the one holding it.
+    private func relinquishSurfaceIfHeld() {
+        guard surfaceView.superview === documentView else { return }
+        surfaceView.removeFromSuperview()
+        NotificationCenter.default.post(
+            name: Self.surfaceRelinquished, object: surfaceView)
+    }
+
+    /// Take the surface into our document view if nothing on screen is using
+    /// it.
+    ///
+    /// The test is "is its current parent on screen", not "does it have one".
+    /// A peek that is actually showing the surface must keep it — that is the
+    /// whole point of the handoff — and it is in a window, so it is left
+    /// alone. A surface parented to a view that has left the window, or to
+    /// nothing at all, is one nobody is drawing, and the cell it belongs to is
+    /// sitting there empty.
+    private func reclaimSurfaceIfNeeded() {
+        guard window != nil else { return }
+        guard surfaceView.superview !== documentView else { return }
+        guard surfaceView.superview?.window == nil else { return }
+        documentView.addSubview(surfaceView)
+        needsLayout = true
     }
 
     // The entire bounds is a safe area, so we override any default
@@ -167,12 +239,12 @@ class SurfaceScrollView: NSView {
     override func layout() {
         super.layout()
 
-        // If the surface view lost its parent (e.g. a peek overlay that
-        // created a competing SurfaceScrollView has been dismissed and
-        // deallocated), reclaim it into our document view.
-        if surfaceView.superview == nil {
-            documentView.addSubview(surfaceView)
-        }
+        // Reclaim the surface if a peek overlay took it and is no longer on
+        // screen. The notification above is the reliable path; this remains
+        // as the backstop for a handoff that happened without one — a view
+        // torn down as part of a larger teardown, where our post may have
+        // arrived before this cell existed to hear it.
+        reclaimSurfaceIfNeeded()
 
         // Fill entire bounds with scroll view
         scrollView.frame = bounds
