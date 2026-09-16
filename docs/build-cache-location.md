@@ -12,6 +12,20 @@ so no build command had to change:
 | `macos/build` | `trm-build/macos-build` | ~1.2 GB |
 | `~/.cache/zig` | `trm-build/zig-global-cache` | ~515 MB |
 
+**These links are local to the mini and are not tracked in git.** They were
+committed once, and every other machine then inherited a symlink into a disk
+it has never seen: the laptop's build died at `unable to open local cache
+directory '.zig-cache': FileNotFound`, and once that was worked around, Xcode
+died at `unable to write manifest ... File is a broken symbolic link:
+macos/build`. Both paths are now ignored, so each machine makes its own
+ordinary directory there. To set the mini up again after a fresh clone:
+
+    ln -s /Volumes/BackseatDriver/trm-build/zig-cache   .zig-cache
+    ln -s /Volumes/BackseatDriver/trm-build/macos-build macos/build
+
+If the external drive is ever missing, delete the dangling links — a plain
+directory in either place works, it just fills the internal disk.
+
 ## What deliberately stayed on the internal disk
 
 `~/Library/Developer/Xcode/DerivedData/trm-*`. It was moved out there too, and

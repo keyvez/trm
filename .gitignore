@@ -9,6 +9,8 @@
 .flatpak-builder/
 zig-cache/
 .zig-cache/
+# …and as a symlink onto another disk, which a trailing-slash rule misses.
+.zig-cache
 zig-out/
 /result*
 /.nixos-test-history
@@ -33,6 +35,7 @@ trm-*.zip
 ios/build/
 
 # Local xcodebuild derived data (macos/build is a machine-specific symlink)
+macos/build
 macos/build-release/
 ios/build-ios/
 
