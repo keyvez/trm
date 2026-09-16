@@ -6386,7 +6386,9 @@ class BaseTerminalController: NSWindowController,
                 // the one event zmx cannot survive — can put it back. Local
                 // panes only: a remote pane's hook record lives on the other
                 // machine, and reading it would mean an SSH round trip per
-                // pane on the 30-second checkpoint.
+                // pane on the 30-second checkpoint. Remote panes are not
+                // left out, they are handled the other way round — asked at
+                // restore, once per host, by `resumeRemoteAgents()`.
                 if surface.remoteHost == nil, let resume = agentResume(for: surface) {
                     lines.append("agent = \(tomlQuote(resume.kind.rawValue))")
                     lines.append("agent_resume_id = \(tomlQuote(resume.id))")
@@ -7326,6 +7328,11 @@ class BaseTerminalController: NSWindowController,
         // Explicit watermarks from the config will override the defaults above.
         applyPaneConfig(paneConfigs)
 
+        // The same restore for panes whose machine is somewhere else. It has
+        // to be a separate pass because the answer lives on that machine and
+        // has to be asked for over SSH.
+        resumeRemoteAgents()
+
         // Recreate agent overview panes once their terminal panes exist.
         restoreAgentOverviews(from: paneConfigs)
 
@@ -7804,6 +7811,71 @@ class BaseTerminalController: NSWindowController,
             }
 
             surfaceIndex += 1
+        }
+    }
+
+    /// Bring the agents in *remote* panes back after the far machine rebooted.
+    ///
+    /// The local half of this is settled at save time: `agentResume(for:)`
+    /// writes the conversation into the session file and `applyPaneConfig`
+    /// types it back into a pane whose daemon is gone. Neither half survives
+    /// the crossing to another machine. The hook's record and the transcript
+    /// are over there, so there is nothing here to snapshot; and `zmx attach`
+    /// silently recreates a session that has died, so this side cannot even
+    /// tell that anything died — a remote pane always looks reattached, which
+    /// is why it was skipped at both ends and a reboot of the other machine
+    /// brought back ten empty shells.
+    ///
+    /// So the far machine is asked directly, once per host rather than once
+    /// per pane, and the one round trip answers the whole question: which of
+    /// these sessions is gone, and what was it talking about. A session still
+    /// running is left strictly alone — its agent is still in it, and typing
+    /// would arrive as a prompt rather than a command.
+    private func resumeRemoteAgents() {
+        var byHost: [String: [(surface: Ghostty.SurfaceView, session: String)]] = [:]
+        for surface in gridSurfaces {
+            guard let host = surface.remoteHost, !host.isEmpty,
+                  Self.isValidRemoteHost(host),
+                  let session = surface.remoteZmxSession,
+                  AgentResume.isSafeSessionName(session)
+            else { continue }
+            byHost[host, default: []].append((surface, session))
+        }
+        guard !byHost.isEmpty else { return }
+
+        // The pane's own SSH is still dialling while this one runs. Hold the
+        // answer until it has plausibly landed on a shell: the probe's own
+        // latency usually covers it, but on a fast link it does not, and a
+        // resume typed into a connection that has not finished opening is
+        // simply lost.
+        let started = Date()
+        let settle: TimeInterval = 1.5
+
+        for (host, panes) in byHost {
+            let sessions = panes.map(\.session)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let answers = AgentResume.remoteSessions(host: host, sessions: sessions)
+                guard !answers.isEmpty else { return }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    var index = 0
+                    for pane in panes {
+                        guard let answer = answers[pane.session],
+                              !answer.alive,
+                              let record = answer.record else { continue }
+                        // Staggered like the local path: a grid where every
+                        // pane lost its agent is exactly the moment when ten
+                        // of them would start one at the same instant.
+                        let delay = max(0, settle - Date().timeIntervalSince(started))
+                            + Double(index) * 0.2
+                        index += 1
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            self.sendInitialCommandsWhenReady(
+                                [AgentResume.command(for: record)], to: pane.surface)
+                        }
+                    }
+                }
+            }
         }
     }
 

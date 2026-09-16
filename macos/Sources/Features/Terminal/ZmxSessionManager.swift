@@ -694,7 +694,7 @@ enum ZmxSessionManager {
     /// an empty list from a machine full of sessions (and a fish login shell
     /// wouldn't parse the script at all). Naming the interpreter removes the
     /// whole class of problem.
-    nonisolated private static func shWrapped(_ script: String) -> String {
+    nonisolated static func shWrapped(_ script: String) -> String {
         let quoted = script.replacingOccurrences(of: "'", with: "'\\''")
         return "exec /bin/sh -c '\(quoted)'"
     }
@@ -1057,7 +1057,7 @@ enum ZmxSessionManager {
 
     /// Run an executable and capture stdout, giving up after `timeout`
     /// seconds. A hung SSH must never wedge the browser's scan.
-    nonisolated private static func runCapturing(
+    nonisolated static func runCapturing(
         _ executable: String,
         _ args: [String],
         timeout: TimeInterval

@@ -85,6 +85,113 @@ enum AgentResume {
         }
     }
 
+    // MARK: - Panes on another machine
+
+    /// What a host says about one of its own sessions.
+    ///
+    /// A remote pane cannot be snapshotted the way a local one is. The daemon,
+    /// the hook's record and the transcript all live on the far machine, so
+    /// `record(forZmxSession:)` has nothing to read here, and reading it there
+    /// would mean an SSH round trip per pane on the 30-second checkpoint.
+    ///
+    /// So a remote pane is asked at *restore* instead, once per host, where a
+    /// single round trip answers both halves of the question at once: did this
+    /// session survive, and if it did not, what was it talking about. That is
+    /// also the more truthful answer — it describes the machine as it is now
+    /// rather than as it was when the layout was last written.
+    struct RemoteSession: Equatable {
+        /// The session's daemon is still running, so whatever agent was in it
+        /// is still in it. The pane must not be typed at: `zmx attach` will
+        /// reattach to the live shell and the resume would land in the agent
+        /// as a prompt.
+        let alive: Bool
+        /// The conversation the hook recorded for this session. Only resolved
+        /// when the session is gone, since that is the only case that acts.
+        let record: Record?
+    }
+
+    /// Ask one host about a set of its sessions, in one round trip.
+    ///
+    /// Returns nothing when the host is unreachable or the probe fails, which
+    /// is the right answer: an unreachable machine's panes are about to show
+    /// an SSH error, and typing a resume into that is worse than silence.
+    nonisolated static func remoteSessions(
+        host: String, sessions: [String]
+    ) -> [String: RemoteSession] {
+        let names = sessions.filter(isSafeSessionName)
+        guard !names.isEmpty else { return [:] }
+        let run = ZmxSessionManager.runCapturing(
+            "/usr/bin/ssh",
+            [
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                "-o", "ServerAliveInterval=5",
+                "-o", "ServerAliveCountMax=2",
+                host,
+                ZmxSessionManager.shWrapped(remoteProbeScript(sessions: names)),
+            ],
+            timeout: 20)
+        guard run.status == 0, let out = run.output else { return [:] }
+        return parseRemoteProbe(out)
+    }
+
+    /// One script, run once per host, printing `name<TAB>alive|gone<TAB>path`.
+    ///
+    /// Liveness is `lsof` on the socket rather than the socket merely being
+    /// there. The sockets live under `$HOME` and so outlive a restart: a
+    /// machine that has just rebooted is precisely the case where the file is
+    /// present and nothing is listening, and that is the one case this whole
+    /// feature exists for. Both socket directories are checked, as the attach
+    /// command itself does — trm pins `~/.trm/zmx`, but sessions made before
+    /// that pin still live in the per-user tmp dir.
+    static func remoteProbeScript(sessions: [String]) -> String {
+        let names = sessions.map { "\"\($0)\"" }.joined(separator: " ")
+        return [
+            "D=\"$HOME/.trm/zmx\";",
+            "T=\"${TMPDIR:-/tmp}\"; T=\"${T%/}/zmx-$(id -u)\";",
+            "for N in \(names); do",
+            "  A=gone;",
+            "  for DIR in \"$D\" \"$T\"; do",
+            "    [ -S \"$DIR/$N\" ] || continue;",
+            "    [ -n \"$(lsof -t \"$DIR/$N\" 2>/dev/null)\" ] && A=alive;",
+            "  done;",
+            "  P=\"\";",
+            "  if [ \"$A\" = gone ] && [ -f \"$HOME/.trm/agent-sessions/$N\" ]; then",
+            "    P=\"$(cat \"$HOME/.trm/agent-sessions/$N\" 2>/dev/null)\";",
+            "    [ -n \"$P\" ] && [ -f \"$P\" ] || P=\"\";",
+            "  fi;",
+            "  printf '%s\\t%s\\t%s\\n' \"$N\" \"$A\" \"$P\";",
+            "done",
+        ].joined(separator: " ")
+    }
+
+    static func parseRemoteProbe(_ output: String) -> [String: RemoteSession] {
+        var result: [String: RemoteSession] = [:]
+        for line in output.components(separatedBy: .newlines) {
+            let cols = line.components(separatedBy: "\t")
+            guard cols.count >= 2, !cols[0].isEmpty else { continue }
+            let alive = cols[1] == "alive"
+            guard alive || cols[1] == "gone" else { continue }
+            var found: Record?
+            if !alive, cols.count >= 3, !cols[2].isEmpty {
+                found = record(forTranscript: URL(fileURLWithPath: cols[2]))
+            }
+            result[cols[0]] = RemoteSession(alive: alive, record: found)
+        }
+        return result
+    }
+
+    /// A session name is about to become a shell word on a machine we do not
+    /// control. trm's own are `trm-<hex>`, but a pane can be pointed at a
+    /// session someone made with plain zmx, so the shape is checked rather
+    /// than assumed.
+    static func isSafeSessionName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.count <= 64 else { return false }
+        return name.allSatisfy {
+            $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == ".")
+        }
+    }
+
     /// 8-4-4-4-12 hex. Both agents use them; anything else in that filename
     /// position is something we do not understand and must not pass to a
     /// shell.
