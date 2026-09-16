@@ -42,7 +42,20 @@ final class CommandCenterMonitor: ObservableObject {
         let location: String?
         let host: String?
         /// The agent's current message — the paragraph an overview would show.
+        ///
+        /// Flattened and capped: a board row is one line, so the markers come
+        /// out and code blocks are dropped. Use `messageBlocks` anywhere with
+        /// room to render the message as what it is.
         let message: String
+        /// The same message in the form the Overview renders — paragraphs with
+        /// their markdown intact, fenced code as code, images as images. The
+        /// expanded panel has half a screen for the reply and no reason to
+        /// show it as flattened, truncated prose.
+        ///
+        /// Defaulted, so a row built for a test or a placeholder says what it
+        /// is about — the board's text — without having to hand over blocks
+        /// it has no opinion on.
+        var messageBlocks: [AgentTranscript.Block] = []
         /// The last thing the human asked, for context when the reply is terse.
         let prompt: String?
         /// Everything this person has said to this agent, oldest first, as the
@@ -286,6 +299,11 @@ final class CommandCenterMonitor: ObservableObject {
 
         let questions = transcript.questions
         let message = currentMessage(transcript)
+        // What the agent is saying *now*, matching `currentMessage`: a turn's
+        // blocks accumulate, and the newest message is the live one.
+        let messageBlocks = transcript.latestBlocks.isEmpty
+            ? transcript.blocks
+            : transcript.latestBlocks
         let errors = transcript.activity.filter(\.isError)
 
         let paneId = surface.paneId ?? 0
@@ -304,6 +322,7 @@ final class CommandCenterMonitor: ObservableObject {
                 ?? cwd.map { ($0 as NSString).lastPathComponent },
             host: surface.remoteHost,
             message: message,
+            messageBlocks: messageBlocks,
             prompt: transcript.lastUserPrompt,
             promptHistory: Self.promptHistory(transcript),
             activity: Self.activityLines(transcript),

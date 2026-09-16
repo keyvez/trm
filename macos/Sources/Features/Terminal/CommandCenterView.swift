@@ -934,13 +934,13 @@ struct CommandCenterView: View {
                     // to re-read one — and re-reading it is the reason you
                     // are looking at this panel.
                     if let prompt = entry.prompt, !prompt.isEmpty {
-                        labelled("You asked") {
-                            Text(prompt)
-                                .font(.system(size: 11, design: .monospaced))
+                        labelled("You asked", copying: prompt) {
+                            AgentMarkdownProse(
+                                blocks: [.paragraph(prompt)],
+                                fontSize: 11,
+                                design: .monospaced,
+                                spacing: 8)
                                 .foregroundStyle(.secondary)
-                                .lineSpacing(2)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
 
@@ -949,7 +949,10 @@ struct CommandCenterView: View {
                     // the test" and seeing that it edited one file and ran
                     // nothing.
                     if !entry.activity.isEmpty {
-                        labelled("This turn") {
+                        labelled(
+                            "This turn",
+                            copying: entry.activity.joined(separator: "\n")
+                        ) {
                             VStack(alignment: .leading, spacing: 2) {
                                 ForEach(entry.activity, id: \.self) { line in
                                     HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -968,13 +971,30 @@ struct CommandCenterView: View {
                         }
                     }
 
-                    labelled("Said") {
-                        Text(entry.message)
-                            .font(.system(size: 12, design: .monospaced))
-                            .lineSpacing(3)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    // The reply as markdown, not as the board's one-line
+                    // summary of it. `message` has had its markers stripped
+                    // and its code dropped to fit a row; here there is half a
+                    // panel, so the blocks the Overview renders are rendered.
+                    let said = "\(entry.kind?.displayName ?? "Agent") said"
+                    if !entry.messageBlocks.isEmpty {
+                        labelled(
+                            said,
+                            copying: AgentMarkdownProse.plainText(entry.messageBlocks)
+                        ) {
+                            AgentMarkdownProse(
+                                blocks: entry.messageBlocks,
+                                fontSize: 12,
+                                design: .default)
+                        }
+                    } else if !entry.message.isEmpty {
+                        labelled(said, copying: entry.message) {
+                            Text(entry.message)
+                                .font(.system(size: 12, design: .monospaced))
+                                .lineSpacing(3)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
 
                     links(entry)
@@ -985,17 +1005,27 @@ struct CommandCenterView: View {
     }
 
     /// A small caption over a block, so the halves read as sections rather
-    /// than as one run of grey monospace.
+    /// than as one run of grey monospace — and the caption line is the way to
+    /// take that section's text.
+    ///
+    /// The whole line, not the words: this is offered as the easy alternative
+    /// to selecting text in a scrolling column, and a heading you have to hit
+    /// exactly is not easier than selecting. The Overview's headings work the
+    /// same way, and this is the same control.
     @ViewBuilder
     private func labelled<Content: View>(
-        _ caption: String, @ViewBuilder content: () -> Content
+        _ caption: String,
+        copying content: @autoclosure @escaping () -> String,
+        @ViewBuilder body: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(caption.uppercased())
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .tracking(0.8)
-                .foregroundStyle(.tertiary)
-            content()
+            CopyableSectionLabel(title: caption, content: content) {
+                Text(caption.uppercased())
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(.tertiary)
+            }
+            body()
         }
     }
 

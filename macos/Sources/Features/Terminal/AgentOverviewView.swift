@@ -1761,7 +1761,7 @@ private struct AgentOverviewTerminalBackground: View {
 
 /// A fenced block in the agent reply is an independent copy target. Keeping
 /// confirmation state here ensures only the tapped block flashes a checkmark.
-private struct CopyableOverviewCodeBlock: View {
+struct CopyableOverviewCodeBlock: View {
     let language: String?
     let text: String
     let fontSize: CGFloat
@@ -2036,7 +2036,7 @@ private struct AgentQuestionOptionRow: View {
 /// intact while SwiftUI applies emphasis, links, strikethrough, and inline-code
 /// styling. Shared by agent replies and structured question cards so Markdown
 /// never leaks through as raw punctuation in one section but not another.
-private func overviewStyledMarkdown(
+func overviewStyledMarkdown(
     _ text: String,
     size: CGFloat,
     weight: Font.Weight,
@@ -2397,7 +2397,7 @@ private struct OverviewURLActions: View {
 }
 
 /// Section heading that copies its section on tap, confirming in place.
-private struct CopyableSectionLabel<Label: View>: View {
+struct CopyableSectionLabel<Label: View>: View {
     let title: String
     let content: () -> String
     @ViewBuilder let label: () -> Label
@@ -2417,7 +2417,14 @@ private struct CopyableSectionLabel<Label: View>: View {
                     // into a ternary makes the branches disagree on type.
                     .foregroundStyle(didCopy ? Color.accentColor : Color.secondary.opacity(0.6))
             }
+            // The rest of the line is part of the button. A heading is a few
+            // small words and an 8-point icon, and aiming at either is a
+            // fiddly click for something offered as the easy way to take the
+            // text; the empty space beside them is the obvious place to press
+            // and did nothing at all.
+            Spacer(minLength: 0)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .onTapGesture { copy() }
@@ -2461,7 +2468,7 @@ enum AgentOverviewDragContext {
 }
 
 
-private extension View {
+extension View {
     /// `.textSelection` takes its selectability statically, so a runtime
     /// flag needs a branch.
     @ViewBuilder
