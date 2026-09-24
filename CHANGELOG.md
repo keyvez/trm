@@ -11,6 +11,10 @@ retroactively.
 
 ## Unreleased
 
+### Added
+
+- **⌃⌘⇧N: another agent where this one is.** ⌘⇧N opens a remote pane in the other machine's home directory, and the next thing anyone does is `cd` back to the project the pane beside it is in and start the same agent again. ⌃⌘⇧N does both: one SSH round trip reads the folder the focused pane's session is in and the agent running in it, and the new pane opens on that machine, in that folder, with the agent's command typed in — flags and all (`--dangerously-skip-permissions`, `--model …`), minus the ones that name a conversation (`--resume`, `--continue`, `codex resume …`), since two agents on one session would write one transcript. Typed, not run as the pane's command, so the shell is still there when the agent exits. From a local pane it goes to the usual remote machine, with a path under your home mapped to the same place under the other machine's. Pressed in a Command Center row's reply box, it opens beside that row's pane and leaves you on the board. In the File menu under New Remote Pane, with Control held.
+
 ### Fixed
 
 - **Parking the pane you were in sent focus to the top-left corner.** Focus now goes where moving right would have taken it — the pane beside it, stepping over its overview when that is parked along with it, or at the right edge the next pane in reading order. Parking some other pane from its bar still leaves your focus where it is.

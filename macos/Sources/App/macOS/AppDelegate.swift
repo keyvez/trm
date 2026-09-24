@@ -1240,12 +1240,24 @@ class AppDelegate: NSObject,
         asking.isAlternate = true
         asking.setImageIfDesired(systemSymbolName: "network.badge.shield.half.filled")
 
+        // Hold Control and it opens where the focused pane is — same machine,
+        // same folder — and starts the agent that pane is running.
+        let here = NSMenuItem(
+            title: "New Remote Pane Here, with Agent",
+            action: #selector(BaseTerminalController.newRemotePaneHereAction(_:)),
+            keyEquivalent: "n")
+        here.keyEquivalentModifierMask = [.command, .shift, .control]
+        here.isAlternate = true
+        here.setImageIfDesired(systemSymbolName: "arrow.triangle.branch")
+
         if let index = fileMenu.items.firstIndex(where: { $0.title == "New Pane" }) {
             fileMenu.insertItem(item, at: index + 1)
             fileMenu.insertItem(asking, at: index + 2)
+            fileMenu.insertItem(here, at: index + 3)
         } else {
             fileMenu.addItem(item)
             fileMenu.addItem(asking)
+            fileMenu.addItem(here)
         }
     }
 

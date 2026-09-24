@@ -1403,10 +1403,23 @@ struct CommandCenterView: View {
                 return nil
             }
 
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+            // ⌃⌘⇧N: a new remote pane beside this row's pane, in its folder,
+            // running its agent — the grid's shortcut, aimed at the row you
+            // are on rather than the pane with focus. Focus stays here: the
+            // board is where you are working, and the new agent turns up on
+            // it as a row of its own.
+            if event.keyCode == 45, flags == [.command, .shift, .control],
+               let surface = entry.surface,
+               let controller = TerminalController.all.first(where: { $0.surfaceTree.contains(surface) }) {
+                controller.newRemotePaneHere(from: surface, takeFocus: false)
+                return nil
+            }
+
             // ⌘↩ sends from the expanded editor, where Return is a line
             // break. Checked before the relay, which has its own opinion
             // about Return with modifiers.
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if focusedComposerID == id,
                event.keyCode == 36 || event.keyCode == 76,
                flags == .command {

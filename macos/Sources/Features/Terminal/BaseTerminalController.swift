@@ -1085,7 +1085,8 @@ class BaseTerminalController: NSWindowController,
         direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
         baseConfig config: Ghostty.SurfaceConfiguration? = nil,
         didReconcile: Bool = false,
-        skipPersistenceWrap: Bool = false
+        skipPersistenceWrap: Bool = false,
+        takeFocus: Bool = true
     ) -> Ghostty.SurfaceView? {
         guard !isLayoutEditingDisabled else { return nil }
         guard let ghostty_app = ghostty.app else { return nil }
@@ -1244,7 +1245,7 @@ class BaseTerminalController: NSWindowController,
 
         replaceSurfaceTree(
             newTree,
-            moveFocusTo: newView,
+            moveFocusTo: takeFocus ? newView : nil,
             moveFocusFrom: anchorView,
             undoAction: "New Pane")
 
@@ -5475,11 +5476,23 @@ class BaseTerminalController: NSWindowController,
     ///
     /// This creates a NEW pane; to re-point an existing pane at another
     /// machine, see `switchPaneToRemote` (`trm.switch_remote`).
-    func newRemotePane(host: String?, at surfaceView: Ghostty.SurfaceView) {
+    ///
+    /// - Parameters:
+    ///   - directory: a folder on that machine for the session's shell to start
+    ///     in. One that isn't there leaves it in the home directory.
+    ///   - startCommand: typed into the new shell once it is up — so the shell
+    ///     is still there when the command exits.
+    func newRemotePane(
+        host: String?,
+        at surfaceView: Ghostty.SurfaceView,
+        directory: String? = nil,
+        startCommand: String? = nil,
+        takeFocus: Bool = true
+    ) {
         guard !isLayoutEditingDisabled else { return }
 
         guard let host = host.map(Self.sanitizedRemoteHost), !host.isEmpty else {
-            promptForRemoteHost(at: surfaceView)
+            promptForRemoteHost(at: surfaceView, directory: directory, startCommand: startCommand)
             return
         }
         guard validateRemoteHostOrPresentError(host) else { return }
@@ -5490,7 +5503,8 @@ class BaseTerminalController: NSWindowController,
         // the checkpoint and reattached later.
         let session = ZmxSessionManager.newSessionName()
         let remoteZmx = Self.defaultRemoteZmxPath
-        let command = Self.remoteAttachCommand(host: host, session: session, zmxPath: remoteZmx)
+        let command = Self.remoteAttachCommand(
+            host: host, session: session, zmxPath: remoteZmx, directory: directory)
 
         var config = Ghostty.SurfaceConfiguration()
         config.command = command
@@ -5502,7 +5516,8 @@ class BaseTerminalController: NSWindowController,
             at: surfaceView,
             direction: .right,
             baseConfig: config,
-            skipPersistenceWrap: true
+            skipPersistenceWrap: true,
+            takeFocus: takeFocus
         ) else {
             presentInternalCommandError(
                 title: "Could not Create Remote Pane",
@@ -5515,6 +5530,15 @@ class BaseTerminalController: NSWindowController,
         // remote pane rather than as a local shell running an ssh command.
         view.remoteHost = host
         view.remoteZmxSession = session
+
+        if let startCommand {
+            // The same settle `resumeRemoteAgents` gives a pane still dialling:
+            // text typed before the connection has landed on a shell is lost.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak view] in
+                guard let self, let view else { return }
+                self.sendInitialCommandsWhenReady([startCommand], to: view)
+            }
+        }
     }
 
     /// Build the SSH command that attaches a remote zmx session, creating it
@@ -5522,7 +5546,13 @@ class BaseTerminalController: NSWindowController,
     ///
     /// `-t` forces a PTY (zmx needs one); the remote side runs zmx directly so
     /// the daemon is owned by that machine.
-    static func remoteAttachCommand(host: String, session: String, zmxPath: String) -> String {
+    ///
+    /// `directory`, when given, is where a session created by this attach
+    /// starts: zmx starts its shell wherever `attach` was run. An existing
+    /// session is unaffected, and a folder that has gone leaves it at home.
+    static func remoteAttachCommand(
+        host: String, session: String, zmxPath: String, directory: String? = nil
+    ) -> String {
         // The host and session are validated before we get here. Keepalives
         // so a dead link exits (surfacing the reconnect button) within ~20 s
         // instead of sitting frozen inside the TCP timeout.
@@ -5541,18 +5571,26 @@ class BaseTerminalController: NSWindowController,
         // forever — a dead session migrates to the pinned dir on reconnect.
         // TMPDIR's trailing slash is trimmed because lsof's name matching
         // (unlike the -S file test) fails on the double slash.
-        let remoteScript = "S=\(session); D=\"$HOME/.trm/zmx\"; "
+        let cd = directory.map { "cd \(RemotePaneHere.remoteCdTarget($0)) 2>/dev/null; " } ?? ""
+        let remoteScript = cd + "S=\(session); D=\"$HOME/.trm/zmx\"; "
             + "T=\"${TMPDIR:-/tmp}\"; T=\"${T%/}/zmx-$(id -u)\"; "
             + "if [ ! -S \"$D/$S\" ]; then "
             + "if [ -n \"$XDG_RUNTIME_DIR\" ] && [ -n \"$(lsof -t \"$XDG_RUNTIME_DIR/zmx/$S\" 2>/dev/null)\" ]; then D=\"$XDG_RUNTIME_DIR/zmx\"; "
             + "elif [ -n \"$(lsof -t \"$T/$S\" 2>/dev/null)\" ]; then D=\"$T\"; fi; fi; "
             + "mkdir -p \"$D\"; ZMX_DIR=\"$D\" exec \"\(zmxPath)\" attach \"$S\""
+        // The script travels single-quoted; a quote inside it (only ever from
+        // a folder name) is closed, escaped and reopened.
+        let quotedScript = remoteScript.replacingOccurrences(of: "'", with: "'\\''")
         return "ssh -t -o ServerAliveInterval=10 -o ServerAliveCountMax=2 -o ConnectTimeout=10 "
-            + "\(host) '\(remoteScript)'"
+            + "\(host) '\(quotedScript)'"
     }
 
     /// Ask which machine the new pane should run on.
-    private func promptForRemoteHost(at surfaceView: Ghostty.SurfaceView) {
+    private func promptForRemoteHost(
+        at surfaceView: Ghostty.SurfaceView,
+        directory: String? = nil,
+        startCommand: String? = nil
+    ) {
         let host = promptForRemoteHost(
             messageText: "New Remote Pane",
             informativeText: """
@@ -5565,7 +5603,8 @@ class BaseTerminalController: NSWindowController,
             buttonTitle: "Create Pane"
         )
         guard let host else { return }
-        newRemotePane(host: host, at: surfaceView)
+        newRemotePane(
+            host: host, at: surfaceView, directory: directory, startCommand: startCommand)
     }
 
     /// Run the shared remote-host picker: a prompt offering Bonjour-discovered
@@ -5902,6 +5941,59 @@ class BaseTerminalController: NSWindowController,
     @IBAction func newRemotePaneAskingHostAction(_ sender: Any?) {
         guard let view = focusedSurface else { return }
         newRemotePane(host: nil, at: view)
+    }
+
+    /// New Remote Pane, in the focused pane's folder and running its agent
+    /// (⌃⌘⇧N). See `RemotePaneHere`.
+    ///
+    /// A remote pane is asked over SSH, and the new pane opens on *its*
+    /// machine rather than the default one — "here" is where that pane is. A
+    /// local pane answers from this machine, and the new pane goes to the
+    /// usual remote machine in the same path, which is where a checkout
+    /// synced between the two lives. Whatever cannot be learnt is left out:
+    /// no folder opens at home, no agent opens a shell, and an unreachable
+    /// machine still gets its pane the ⌘⇧N way.
+    @IBAction func newRemotePaneHereAction(_ sender: Any?) {
+        guard let view = focusedSurface else { return }
+        newRemotePaneHere(from: view)
+    }
+
+    /// The work behind ⌃⌘⇧N, for any pane of this window.
+    ///
+    /// - Parameter takeFocus: false leaves keyboard focus where it is. The
+    ///   Command Center passes it: you are on the board working through
+    ///   agents, and a new pane pulling you off it would undo the reason for
+    ///   starting it from there.
+    func newRemotePaneHere(from view: Ghostty.SurfaceView, takeFocus: Bool = true) {
+
+        func open(host: String?, _ context: RemotePaneHere.Context?) {
+            let command = context?.agent.map {
+                RemotePaneHere.launchCommand(agent: $0, commandLine: context?.agentCommandLine)
+            }
+            newRemotePane(
+                host: host, at: view,
+                directory: context?.directory, startCommand: command,
+                takeFocus: takeFocus)
+        }
+
+        if let host = view.remoteHost, !host.isEmpty, let session = view.remoteZmxSession {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let context = RemotePaneHere.probe(host: host, session: session)
+                DispatchQueue.main.async {
+                    guard self != nil else { return }
+                    open(host: host, context)
+                }
+            }
+            return
+        }
+
+        let agent = agentOverviewPanes.first { $0.surface === view }?.agentKind
+        let context = RemotePaneHere.Context(
+            directory: AgentOverviewPane.workingDirectory(for: view)
+                .map { RemotePaneHere.homeRelative($0) },
+            agent: agent,
+            agentCommandLine: nil)
+        open(host: defaultRemoteHostIfUnambiguous(), context)
     }
 
     /// Normalize a typed or pasted SSH destination.
