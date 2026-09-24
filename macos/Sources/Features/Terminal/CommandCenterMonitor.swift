@@ -531,23 +531,22 @@ final class CommandCenterMonitor: ObservableObject {
 
     /// Pure link extraction, so the trimming rules are testable.
     nonisolated static func links(inText text: String, limit: Int = 4) -> [String] {
-        guard !text.isEmpty,
-              let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-        else { return [] }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
         var found: [String] = []
         var seen: Set<String> = []
-        detector.enumerateMatches(in: text, range: range) { match, _, stop in
-            guard let match, let url = match.url else { return }
+        // Written-out links only: the detector also turns a file name like
+        // `jobs.rs` into http://jobs.rs, and the check for "://" below could
+        // never catch that — the scheme it tests is the one the detector added.
+        for match in WrittenLinks.matches(in: text) {
+            let url = match.url
             // Prose and markdown leave debris clinging to a URL. A trailing
             // `)` or `.` is almost never part of an address, and neither are
             // the emphasis markers an agent wraps one in — `**https://…**`
             // arrived as a link ending in two stars, which pastes nowhere.
             var string = url.absoluteString
             string = Self.trimmingURLDebris(string)
-            guard string.contains("://"), seen.insert(string).inserted else { return }
+            guard string.contains("://"), seen.insert(string).inserted else { continue }
             found.append(string)
-            if found.count >= limit { stop.pointee = true }
+            if found.count >= limit { break }
         }
         return found
     }

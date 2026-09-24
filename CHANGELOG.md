@@ -13,6 +13,8 @@ retroactively.
 
 ### Fixed
 
+- **File names were being opened as web pages.** `jobs.rs`, `main.py`, `README.md` — any file whose extension is also a country's domain — came out of the link detector as `http://jobs.rs` and so on, and the overview underlined them, listed them as links and tried to photograph each one. A link now has to be written as one: with its `https://`, or starting `www.`.
+
 - **Every pane had two header bars.** Upstream Ghostty draws a hover-revealed "…" strip across the top of each surface for dragging it around its split tree; in trm it sat right under the pane's own bar, the one that grows when you point at it and already drags, peeks and parks the pane. The "…" strip is gone for good: its file is deleted, and a test fails if an upstream merge brings it back.
 
 ## 0.4.0 (build 14554)

@@ -1509,17 +1509,11 @@ struct AgentOverviewView: View {
         // Cheap pre-check: NSDataDetector on every paragraph of every poll
         // would be wasted work for the common linkless paragraph.
         guard plain.contains("://") || plain.contains("www.") else { return result }
-        guard let detector = try? NSDataDetector(
-            types: NSTextCheckingResult.CheckingType.link.rawValue
-        ) else { return result }
-
-        let matches = detector.matches(
-            in: plain,
-            range: NSRange(plain.startIndex..., in: plain)
-        )
-        for match in matches {
-            guard let url = match.url,
-                  let stringRange = Range(match.range, in: plain) else { continue }
+        // Only links written as links: a bare `jobs.rs` is a file name, not
+        // the Serbian site the detector would make of it.
+        for match in WrittenLinks.matches(in: plain) {
+            let url = match.url
+            guard let stringRange = Range(match.range, in: plain) else { continue }
             // Map the String range onto the AttributedString by character
             // offset — both views index the same Character sequence.
             let lowerOffset = plain.distance(from: plain.startIndex, to: stringRange.lowerBound)
@@ -2319,19 +2313,16 @@ private func overviewURLs(in transcript: AgentTranscript) -> [URL] {
         if let answer = question.selectedAnswer { pieces.append(answer) }
     }
 
-    guard let detector = try? NSDataDetector(
-        types: NSTextCheckingResult.CheckingType.link.rawValue
-    ) else { return [] }
-
+    // Written-out links only. A file name like `jobs.rs` was turned into
+    // http://jobs.rs here and photographed as a web page.
     var seen = Set<String>()
     var result: [URL] = []
     for piece in pieces {
-        let range = NSRange(piece.startIndex..<piece.endIndex, in: piece)
-        detector.enumerateMatches(in: piece, range: range) { match, _, _ in
-            guard let url = match?.url,
-                  let scheme = url.scheme?.lowercased(),
+        for match in WrittenLinks.matches(in: piece) {
+            let url = match.url
+            guard let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https",
-                  seen.insert(url.absoluteString).inserted else { return }
+                  seen.insert(url.absoluteString).inserted else { continue }
             result.append(url)
         }
     }
