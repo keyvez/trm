@@ -1,6 +1,6 @@
 .{
     .name = .trm,
-    .version = "0.1.0",
+    .version = "0.3.0",
     .paths = .{""},
     .fingerprint = 0x82b31f0f1350a96f,
     .minimum_zig_version = "0.15.2",
