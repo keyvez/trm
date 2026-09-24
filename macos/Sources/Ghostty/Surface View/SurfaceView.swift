@@ -230,13 +230,14 @@ extension Ghostty {
                     }
                 }
 
-                #if canImport(AppKit)
-                // Grab handle for dragging the window. We want this to appear at the very
-                // top Z-index os it isn't faded by the unfocused overlay.
-                //
-                // This is disabled except on macOS because it uses AppKit drag/drop APIs.
-                SurfaceGrabHandle(surfaceView: surfaceView)
-                #endif
+                // trm: no SurfaceGrabHandle here. Upstream Ghostty draws a
+                // hover-revealed "…" strip across the top of every surface; in
+                // trm it sat directly under the grid's own pane bar
+                // (`SubPaneBar` in TrmGridView), which already drags, peeks and
+                // parks the pane — two header bars on every pane. The file is
+                // deleted and `GrabHandleRemovalTests` fails if the handle
+                // comes back, so an upstream merge that restores it has to be
+                // dropped on purpose rather than slipping in.
             }
 
         }

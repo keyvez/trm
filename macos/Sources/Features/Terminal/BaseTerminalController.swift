@@ -2237,8 +2237,8 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
-    /// Handle a tap on a pane's grab handle: toggle the peek/expand overlay
-    /// for that surface. Posted by `SurfaceGrabHandle` via `Trm.peekPaneRequest`.
+    /// Toggle the peek/expand overlay for a surface asked for by
+    /// `Trm.peekPaneRequest`.
     @objc private func onPeekPaneRequest(_ notification: Notification) {
         guard let surface = notification.object as? Ghostty.SurfaceView else { return }
         // The notification is broadcast to every controller; only the one that

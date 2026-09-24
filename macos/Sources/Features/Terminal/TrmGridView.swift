@@ -1093,9 +1093,8 @@ struct TrmGridView: View {
     private func terminalPaneView(_ surface: Ghostty.SurfaceView, index: Int, paneId: Int) -> some View {
         let isPeeked = isPaneShownInPeekOverlay(.terminal(surface))
         VStack(spacing: 0) {
-            // No drag bar for non-stacked panes — they use the surface's own
-            // hover-revealed grab handle (SurfaceGrabHandle); peek is wired
-            // into that handle.
+            // No bar here: `paneCellView` draws the pane's one `SubPaneBar`
+            // above this view. The surface must not draw a bar of its own.
 
             if isPeeked {
                 // Placeholder while this pane is shown in the peek overlay.

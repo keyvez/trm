@@ -9,6 +9,12 @@ numbers below mark the build at which each release's features shipped;
 `≈` marks numbers reconstructed from commit dates for releases tagged
 retroactively.
 
+## Unreleased
+
+### Fixed
+
+- **Every pane had two header bars.** Upstream Ghostty draws a hover-revealed "…" strip across the top of each surface for dragging it around its split tree; in trm it sat right under the pane's own bar, the one that grows when you point at it and already drags, peeks and parks the pane. The "…" strip is gone for good: its file is deleted, and a test fails if an upstream merge brings it back.
+
 ## 0.4.0 (build 14554)
 
 ### Added
