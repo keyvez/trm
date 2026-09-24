@@ -321,6 +321,11 @@ private struct SidebarPaneTile: View {
     let onClose: () -> Void
 
     @State private var hovering = false
+    /// Renaming state, held per tile: the shelf is a list of independent
+    /// cards and only one of them is ever being typed into.
+    @State private var renaming = false
+    @State private var renameText = ""
+    @FocusState private var renameField: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -336,10 +341,37 @@ private struct SidebarPaneTile: View {
                         .help("Waiting for input")
                 }
 
-                Text(label)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                if renaming {
+                    // Same shape as the label it replaces, so the tile does
+                    // not resize under the cursor mid-rename.
+                    TextField("Watermark", text: $renameText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .focused($renameField)
+                        .frame(maxWidth: 140)
+                        .onSubmit { commitRename() }
+                        .onExitCommand { cancelRename() }
+                        // Clicking away is "done", not "discard". The shelf
+                        // moves under you — panes come and go — and losing a
+                        // name to a stray click elsewhere would be its own
+                        // bug report.
+                        .onChange(of: renameField) { focused in
+                            if !focused { commitRename() }
+                        }
+                        .help("Return to rename · esc to leave it alone · blank clears it")
+                } else {
+                    Text(label)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        // Both gestures live on the name itself. The tile's
+                        // own click restores the pane, and a double-click that
+                        // reached it first would put the pane back in the grid
+                        // on the way to renaming it.
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { beginRename() }
+                        .onTapGesture { tapped() }
+                }
 
                 Text(subtitle)
                     .font(.system(size: 9))
@@ -409,12 +441,47 @@ private struct SidebarPaneTile: View {
             if let onPeek {
                 Button("Peek", action: onPeek)
             }
+            if pane.firstTerminalSurface?.paneId != nil {
+                Button("Rename…", action: beginRename)
+            }
             Divider()
             Button("Close Pane", role: .destructive, action: onClose)
         }
         .help(parked
-              ? "Still running — click to bring it back, ⌘-click to read it where it is"
-              : "Click to focus this pane, ⌘-click to expand it")
+              ? "Still running — click to bring it back, ⌘-click to read it where it is, double-click the name to rename it"
+              : "Click to focus this pane, ⌘-click to expand it, double-click the name to rename it")
+    }
+
+    // MARK: - Renaming
+
+    /// Turn the name into a field, seeded with the pane's own watermark.
+    ///
+    /// The watermark rather than the label on purpose: the label falls back to
+    /// the worktree, the agent or the folder, and carries the worktree
+    /// insignia when there is one. None of that is text anyone typed, and
+    /// handing it back to be edited would make a guess look like a name.
+    private func beginRename() {
+        guard let paneId = pane.firstTerminalSurface?.paneId else { return }
+        renameText = Trm.shared.watermark(forPaneId: UInt32(paneId)) ?? ""
+        renaming = true
+        // A field that appears without the keyboard is a field you click
+        // twice to use; the hop lets it exist before it is asked to focus.
+        DispatchQueue.main.async { renameField = true }
+    }
+
+    private func commitRename() {
+        guard renaming else { return }
+        renaming = false
+        renameField = false
+        guard let paneId = pane.firstTerminalSurface?.paneId else { return }
+        let text = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text != (Trm.shared.watermark(forPaneId: UInt32(paneId)) ?? "") else { return }
+        Trm.shared.setWatermark(forPaneId: UInt32(paneId), text: text)
+    }
+
+    private func cancelRename() {
+        renaming = false
+        renameField = false
     }
 
     /// ⌘-click peeks, a plain click does the tile's usual thing.
