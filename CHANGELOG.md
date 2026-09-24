@@ -13,6 +13,8 @@ retroactively.
 
 ### Fixed
 
+- **Peeking a parked pane put it back in the grid.** On a shelf tile ⌘-click peeks and a plain click restores, and the tile decided which by asking whether ⌘ was down *when the click finished*. On the pane's name that is a third of a second later — the click waits to see whether it is the start of a double-click, which renames — and ⌘ is usually up by then, so the peek arrived as a restore. Whether it happened depended on where the click landed and how fast your finger came off the key, which is why it looked random. ⌘ is now read from the click itself. ⌘-clicking a parked pane's row on the Command Center also restored it before peeking; it now peeks the pane where it is, as the shelf does.
+
 - **File names were being opened as web pages.** `jobs.rs`, `main.py`, `README.md` — any file whose extension is also a country's domain — came out of the link detector as `http://jobs.rs` and so on, and the overview underlined them, listed them as links and tried to photograph each one. A link now has to be written as one: with its `https://`, or starting `www.`.
 
 - **Every pane had two header bars.** Upstream Ghostty draws a hover-revealed "…" strip across the top of each surface for dragging it around its split tree; in trm it sat right under the pane's own bar, the one that grows when you point at it and already drags, peeks and parks the pane. The "…" strip is gone for good: its file is deleted, and a test fails if an upstream merge brings it back.

@@ -1163,12 +1163,22 @@ final class CommandCenterMonitor: ObservableObject {
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        let id = ObjectIdentifier(surface)
-        if controller.sidebarPanes.contains(id) {
-            controller.restorePaneFromSidebar(id)
+        // A parked pane is read where it is, as ⌘-click on its shelf tile
+        // does. This used to restore it first, so looking at a parked agent
+        // from the board quietly put it back in the grid — and closing the
+        // peek left it there. Its overview, if it has one, is parked with it
+        // and peeks with it; without one it peeks alone, since opening an
+        // overview would claim a grid cell for a pane that has none.
+        let pane = GridPane.terminal(surface)
+        if controller.sidebarPanes.contains(ObjectIdentifier(surface)) {
+            if let overview = controller.agentOverviewPanes.first(where: { $0.surface === surface }) {
+                controller.peekPane(.agentOverview(overview))
+            } else {
+                controller.peekPane(pane)
+            }
+            return
         }
 
-        let pane = GridPane.terminal(surface)
         // An overview opened *here* exists only to answer this click. Escape
         // should leave the grid as it found it — the person wanted to read an
         // agent, not to permanently spend a cell on it. One that was already

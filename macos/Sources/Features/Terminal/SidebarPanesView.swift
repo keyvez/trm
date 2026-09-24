@@ -380,8 +380,9 @@ private struct SidebarPaneTile: View {
                         // reached it first would put the pane back in the grid
                         // on the way to renaming it.
                         .contentShape(Rectangle())
+                        .highPriorityGesture(peekGesture, including: peekMask)
                         .onTapGesture(count: 2) { beginRename() }
-                        .onTapGesture { tapped() }
+                        .onTapGesture { onPrimary() }
                 }
 
                 Text(subtitle)
@@ -451,7 +452,8 @@ private struct SidebarPaneTile: View {
         )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture(perform: tapped)
+        .highPriorityGesture(peekGesture, including: peekMask)
+        .onTapGesture(perform: onPrimary)
         .contextMenu {
             Button(parked ? "Restore to Grid" : "Focus Pane", action: onPrimary)
             if let onPeek {
@@ -502,19 +504,20 @@ private struct SidebarPaneTile: View {
 
     /// ⌘-click peeks, a plain click does the tile's usual thing.
     ///
-    /// The modifiers are read from the current event rather than carried by
-    /// the gesture: SwiftUI's `TapGesture` doesn't report them, and this is the
-    /// same way the grid decides a ⌘-click on a pane is a peek.
-    private func tapped() {
-        let modifiers = NSEvent.modifierFlags
-        if let onPeek,
-           modifiers.contains(.command),
-           modifiers.isDisjoint(with: [.shift, .control, .option]) {
-            onPeek()
-            return
-        }
-        onPrimary()
+    /// The modifier is matched by the gesture, on the click itself. It used to
+    /// be read from `NSEvent.modifierFlags` when the tap ended — the keyboard
+    /// as it is *then*. On the name, the single tap waits out the double-click
+    /// interval (a double-click renames) before it ends, and ⌘ is usually let
+    /// go well inside that. The peek arrived as a plain click, and a plain
+    /// click on a parked tile puts the pane back in the grid: a ⌘-click meant
+    /// to look at a parked pane restored it instead, depending on where it
+    /// landed and how quickly ⌘ came up.
+    private var peekGesture: some Gesture {
+        TapGesture().modifiers(.command).onEnded { onPeek?() }
     }
+
+    /// Without a peek to offer, ⌘-click falls through to the ordinary click.
+    private var peekMask: GestureMask { onPeek == nil ? .subviews : .all }
 
     /// What to call this pane.
     ///
