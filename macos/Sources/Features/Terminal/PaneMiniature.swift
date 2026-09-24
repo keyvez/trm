@@ -1,14 +1,20 @@
 import GhosttyKit
 import SwiftUI
 
-/// A pane drawn as it looks, very small.
+/// A pane drawn as it looks, somewhere other than where it lives.
 ///
 /// Not a live view of the surface and it cannot be one: an `NSView` has exactly
-/// one superview, so putting a parked pane's surface in the shelf would take it
-/// out of its grid cell, and drawing it small would reflow the terminal to a
+/// one superview, so showing a pane's surface in a second place would take it
+/// out of its grid cell, and drawing it smaller would reflow the terminal to a
 /// few columns — the pane would change shape because something was looking at
 /// it. So the cells are read and redrawn instead: same characters, same
-/// colours, same grid, at whatever size the tile has.
+/// colours, same grid, at whatever size the caller has.
+///
+/// The shelf used to draw whole viewports this way and no longer does: at the
+/// size a tile has, an honest copy of a terminal is a grey smear that says "a
+/// terminal" rather than which one. What is left is the case this is actually
+/// good at — a *region* that has to be read exactly, like the diff inside a
+/// permission prompt, where the colours are the content.
 ///
 /// The whole viewport by default, never a crop *of a pane you are
 /// identifying*: a terminal's meaning is often in its shape — a column of test

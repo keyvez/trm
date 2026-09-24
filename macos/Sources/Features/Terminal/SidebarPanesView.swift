@@ -60,15 +60,26 @@ struct SidebarPanesView: View {
     /// Collapse the shelf.
     var onCollapse: (() -> Void)? = nil
 
-    /// A pane's viewport, cells and colours.
+    /// What a pane is running, as its terminal reports it.
+    ///
+    /// The tiles used to draw the pane's whole viewport in three-and-a-half
+    /// point type. It was honest — same characters, same colours — and it was
+    /// unreadable: a grey smear that said "a terminal" and not which one. The
+    /// line a terminal already keeps about itself says more in a tenth of the
+    /// space, and costs a string read instead of four thousand cells a second
+    /// per pane.
     ///
     /// `refresh` exists only to make SwiftUI re-read this: the value is a
     /// snapshot of live terminal state, which the view system has no way to
     /// observe on its own.
-    private static func screen(for pane: GridPane, refresh: Int) -> Trm.PaneScreen? {
+    private static func running(for pane: GridPane, refresh: Int) -> String? {
         _ = refresh
-        guard let paneId = pane.firstTerminalSurface?.paneId else { return nil }
-        return Trm.shared.paneScreen(paneId: UInt32(paneId))
+        guard let surface = pane.firstTerminalSurface else { return nil }
+        let title = surface.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A surface with no title yet draws a ghost; it is a placeholder, not
+        // a command.
+        guard !title.isEmpty, title != "👻" else { return nil }
+        return title
     }
 
     /// Bumped on a timer so the previews follow the panes they describe.
@@ -97,9 +108,9 @@ struct SidebarPanesView: View {
         .onReceive(NotificationCenter.default.publisher(for: Trm.watermarkDidChange)) { _ in
             watermarkVersion += 1
         }
-        // Once a second: reading a viewport is cheap, but redrawing a shelf of
-        // full-grid miniatures is not, and a sidebar is glanced at rather than
-        // watched.
+        // Once a second. Cheap now that a tile is a name and a line rather
+        // than a grid of cells, and still the right cadence: a sidebar is
+        // glanced at rather than watched.
         .onReceive(Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()) { _ in
             previewVersion &+= 1
         }
@@ -265,7 +276,7 @@ struct SidebarPanesView: View {
             needsAttention: needsAttention(pane),
             watermarkVersion: watermarkVersion,
             message: paneId.flatMap { messages[$0] },
-            screen: Self.screen(for: pane, refresh: previewVersion),
+            running: Self.running(for: pane, refresh: previewVersion),
             agentName: paneId.flatMap { agentNames[$0] },
             location: paneId.flatMap { locations[$0] },
             onPrimary: { parked ? onRestore?(pane) : onFocus?(pane) },
@@ -310,8 +321,8 @@ private struct SidebarPaneTile: View {
     let watermarkVersion: Int
     /// The agent's latest message, when this pane has an agent.
     let message: String?
-    /// The pane's viewport, cells and colours, to draw small.
-    let screen: Trm.PaneScreen?
+    /// What the pane is running, from the terminal's own title.
+    let running: String?
     let agentName: String?
     let location: String?
     let onPrimary: () -> Void
@@ -395,19 +406,24 @@ private struct SidebarPaneTile: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            // The pane itself, drawn small: the whole viewport, its own
-            // characters and its own colours. A pane with no agent has nothing
-            // else to show, and this is the only thing that tells one shell
-            // from another.
-            if let screen {
-                PaneMiniature(screen: screen)
-                    .padding(4)
+            // What the pane is running. For a shell this is the only thing
+            // that tells one from another, and for an agent pane it is the
+            // line underneath what the agent is saying — so it is drawn
+            // quietly, in the typeface a command belongs in.
+            if let running, !running.isEmpty {
+                Text(running)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 3)
                     .background(
                         RoundedRectangle(cornerRadius: 5)
                             .fill(Color(nsColor: .textBackgroundColor).opacity(0.6))
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 5))
             }
 
             // Buttons stay mounted so the tile height doesn't jump on hover.

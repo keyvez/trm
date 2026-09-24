@@ -182,6 +182,7 @@ struct TrmGridView: View {
     var onUnstackPane: ((GridPane) -> Void)? = nil
 
     /// Callback to park a pane in the sidebar, where it keeps running unseen.
+    /// Reached from the pane's context menu and by ⌃-clicking its bar.
     var onSendPaneToSidebar: ((GridPane) -> Void)? = nil
 
     /// Reorder a sub-pane within its stack (`true` = move up).
@@ -589,7 +590,8 @@ struct TrmGridView: View {
                         } else {
                             onPeekPane?(pane)
                         }
-                    }
+                    },
+                    onPark: onSendPaneToSidebar.map { park in { park(pane) } }
                 )
             }
             paneView(pane, index: flatIndex)
@@ -1252,7 +1254,8 @@ struct TrmGridView: View {
                                 } else {
                                     onPeekPane?(child)
                                 }
-                            }
+                            },
+                            onPark: onSendPaneToSidebar.map { park in { park(child) } }
                         )
 
                         stackChildContent(child)
@@ -1976,13 +1979,15 @@ private struct SubPaneBar: View {
     let onMoveUp: () -> Void
     let onMoveDown: () -> Void
     let onPeek: () -> Void
+    /// Park the pane on the shelf. Nil where parking makes no sense.
+    var onPark: (() -> Void)? = nil
 
     @State private var isHovering = false
 
     var body: some View {
         ZStack {
             // Drag surface + tap-to-peek, behind the buttons.
-            SubPaneDragBar(pane: pane, onPeek: onPeek)
+            SubPaneDragBar(pane: pane, onPeek: onPeek, onPark: onPark)
 
             HStack(spacing: 6) {
                 Spacer()
@@ -2029,26 +2034,41 @@ private struct SubPaneBar: View {
 private struct SubPaneDragBar: NSViewRepresentable {
     let pane: GridPane
     var onPeek: (() -> Void)? = nil
+    var onPark: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> SubPaneDragBarNSView {
         let view = SubPaneDragBarNSView()
         view.pane = pane
         view.onPeek = onPeek
+        view.onPark = onPark
         return view
     }
 
     func updateNSView(_ nsView: SubPaneDragBarNSView, context: Context) {
         nsView.pane = pane
         nsView.onPeek = onPeek
+        nsView.onPark = onPark
     }
 }
 
 final class SubPaneDragBarNSView: NSView, NSDraggingSource {
     var pane: GridPane?
     var onPeek: (() -> Void)?
+    var onPark: (() -> Void)?
 
     private var dragStart: NSPoint?
     private var didDrag = false
+
+    /// ⌃-click parks the pane rather than opening a context menu.
+    ///
+    /// The bar is inside a cell that has one, and AppKit walks up the view
+    /// hierarchy looking for a menu when no view claims the click — so without
+    /// this, holding control over the bar would show the pane's context menu
+    /// and the pane would stay where it was.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        if event.modifierFlags.contains(.control), onPark != nil { return nil }
+        return super.menu(for: event)
+    }
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .openHand)
@@ -2110,12 +2130,30 @@ final class SubPaneDragBarNSView: NSView, NSDraggingSource {
     }
 
     override func mouseUp(with event: NSEvent) {
-        // A click that never became a drag is a tap: peek the pane.
+        // A click that never became a drag is a tap. ⌃ sends the pane to the
+        // shelf; a plain tap peeks it. Parking from the bar is the gesture
+        // that matches the other two: the bar is already where you drag a
+        // pane somewhere else, and the shelf is somewhere else.
         if event.clickCount == 1, !didDrag, dragStart != nil {
-            onPeek?()
+            if event.modifierFlags.contains(.control), let onPark {
+                onPark()
+            } else {
+                onPeek?()
+            }
         }
         dragStart = nil
         didDrag = false
+    }
+
+    /// ⌃-click can arrive as a secondary click depending on how the event is
+    /// routed, so the same gesture is honoured here rather than falling
+    /// through to a context menu that will not appear.
+    override func rightMouseDown(with event: NSEvent) {
+        guard event.modifierFlags.contains(.control), let onPark else {
+            super.rightMouseDown(with: event)
+            return
+        }
+        onPark()
     }
 
     // MARK: NSDraggingSource
