@@ -78,6 +78,16 @@ final class CommandCenterMonitor: ObservableObject {
         let isWorking: Bool
         /// True when the agent asked a question and is blocked on the answer.
         let needsAttention: Bool
+        /// A question the agent is asking *on screen*, read from the pane's
+        /// own viewport rather than its transcript.
+        ///
+        /// The permission prompts — may I run this, may I make this edit,
+        /// shall I leave plan mode — never reach the JSONL at all, and
+        /// `AskUserQuestion` reaches it only once the turn moves on. Both mean
+        /// the board learns about a question at the moment it stops being one.
+        /// This is the other source, and it is the honest one while the agent
+        /// is actually waiting.
+        var pendingPrompt: PanePrompt? = nil
         /// Tool calls in this turn that came back as errors. A handful of
         /// these is the difference between "still going" and "this one needs
         /// you to sit down with it".
@@ -228,7 +238,8 @@ final class CommandCenterMonitor: ObservableObject {
                     source = pane
                 }
 
-                guard let entry = Self.entry(for: surface, from: source) else { continue }
+                guard var entry = Self.entry(for: surface, from: source) else { continue }
+                entry.pendingPrompt = Self.onScreenPrompt(for: surface, entry: entry)
                 next.append(entry)
             }
         }
@@ -243,6 +254,49 @@ final class CommandCenterMonitor: ObservableObject {
         scansCompleted += 1
         if !next.isEmpty || scansCompleted >= 3 { hasSettled = true }
         updateBriefings(for: next)
+    }
+
+    /// The question a pane is showing right now, if it is showing one.
+    ///
+    /// Read from the viewport text, which is already cached for half a second
+    /// and shared with the output scanner, so this costs a string compare per
+    /// pane per scan. The cells — which is what the view draws, colours and
+    /// all — are only fetched when a prompt has actually been found.
+    ///
+    /// Skipped for a pane that is mid-tool: an agent running a command is not
+    /// waiting on you, and a box still on screen from a moment ago would be
+    /// read as live. The transcript is the better witness for *that* question,
+    /// so it wins where it has an opinion.
+    private static func onScreenPrompt(
+        for surface: Ghostty.SurfaceView, entry: Entry
+    ) -> PanePrompt? {
+        guard !entry.isWorking else { return nil }
+        let viewport = surface.cachedVisibleContents.get()
+        guard !viewport.isEmpty else { return nil }
+        return PanePromptDetector.detect(inViewport: viewport)
+    }
+
+    /// The pane's screen, for drawing the region a prompt occupies.
+    ///
+    /// Not part of `Entry`: a viewport is a few thousand cells, and putting
+    /// one on every row of the board would copy the whole grid into the model
+    /// on every scan for the sake of the one or two rows that are asking
+    /// something. The view asks for it when it has a prompt to draw.
+    func screen(for entry: Entry) -> Trm.PaneScreen? {
+        guard entry.pendingPrompt != nil else { return nil }
+        return Trm.shared.paneScreen(paneId: UInt32(entry.paneId))
+    }
+
+    /// Answer a pane's on-screen question by picking one of its choices.
+    ///
+    /// The number is sent as a keystroke and nothing else — no Return. These
+    /// menus select on the digit, and a Return behind it would arrive at
+    /// whatever the agent draws next, which is usually a prompt waiting for a
+    /// message and would submit an empty one.
+    func answer(_ option: PanePrompt.Option, for entry: Entry) {
+        guard let surface = entry.surface,
+              let controller = Self.controller(owning: surface) else { return }
+        controller.sendKeystrokeToSurface(surface, text: String(option.number))
     }
 
     /// A controller's terminal surfaces in the order the grid draws them.

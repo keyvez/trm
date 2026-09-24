@@ -3482,6 +3482,15 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
+    /// Send a bare keystroke to a pane — no paste framing, no Return behind it.
+    ///
+    /// What answering an on-screen menu needs. A menu selects on the digit, so
+    /// the digit is the whole answer; a Return following it would land in
+    /// whatever the agent draws next and submit an empty message there.
+    func sendKeystrokeToSurface(_ surface: Ghostty.SurfaceView, text: String) {
+        sendTextToSurface(surface, text: text)
+    }
+
     private func sendTextToSurface(_ surface: Ghostty.SurfaceView, text: String) {
         guard let s = surface.surface else { return }
         let action = "text:" + text
@@ -5387,12 +5396,15 @@ class BaseTerminalController: NSWindowController,
         // Prefill the last-used destination — repeat connections to the same
         // machine are the common case. The field gets focus with the text
         // fully selected, so typing a different host replaces it outright.
-        if let last = UserDefaults.standard.string(forKey: Self.lastRemoteHostDefaultsKey),
-           !last.isEmpty, Self.isValidRemoteHost(last) {
-            input.stringValue = last
+        // The configured host first: a prompt that prefills something other
+        // than your stated default is a prompt that has to be corrected.
+        if let prefill = Self.configuredRemoteHost()
+            ?? UserDefaults.standard.string(forKey: Self.lastRemoteHostDefaultsKey),
+           !prefill.isEmpty, Self.isValidRemoteHost(prefill) {
+            input.stringValue = prefill
             if let combo = input as? NSComboBox,
-               !discovered.contains(where: { $0.sshDestination == last }) {
-                combo.addItem(withObjectValue: last)
+               !discovered.contains(where: { $0.sshDestination == prefill }) {
+                combo.addItem(withObjectValue: prefill)
             }
         }
         // Every destination this machine has been reached at before, so the
@@ -5583,11 +5595,27 @@ class BaseTerminalController: NSWindowController,
         return newView
     }
 
-    /// The host to use without asking: the single trm machine advertising on
-    /// Bonjour. With zero or several machines visible there is no unambiguous
-    /// default and callers fall back to the host prompt (which lists every
-    /// discovered machine).
+    /// The host to use without asking, in order of how much it deserves to be
+    /// believed: what the config says, then what was used last, then the
+    /// single trm machine advertising on Bonjour. With none of those there is
+    /// no unambiguous default and callers fall back to the host prompt (which
+    /// lists every discovered machine).
+    ///
+    /// `[remote] host` is at the top because it is the only one of the three
+    /// that is a *decision*. The other two are inferences with a shelf life:
+    /// the last-used destination is overwritten the moment another machine is
+    /// opened, and Bonjour advertises whatever address a machine is answering
+    /// at today, which on a laptop is a DHCP lease. A name written in the
+    /// config — tailnet, `.local`, an `~/.ssh/config` alias — does not expire.
+    static func configuredRemoteHost() -> String? {
+        guard let configured = Trm.shared.configuredRemoteHost() else { return nil }
+        let host = sanitizedRemoteHost(configured)
+        guard !host.isEmpty, isValidRemoteHost(host) else { return nil }
+        return host
+    }
+
     private func defaultRemoteHostIfUnambiguous() -> String? {
+        if let configured = Self.configuredRemoteHost() { return configured }
         // What was chosen last beats what is being advertised. Discovery
         // answers "which machines are there", which is a guess at the question
         // actually being asked — and a guess that wins over an explicit choice

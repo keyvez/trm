@@ -93,6 +93,20 @@ pub const LlmConfig = struct {
     system_prompt: ?[]const u8 = null,
 };
 
+/// Where a remote pane goes when nothing says otherwise.
+///
+/// Bonjour advertises whatever address a machine happens to be answering at,
+/// and on a laptop that moves between networks the address it hands out is a
+/// DHCP lease with a few days to live. A name you own — a tailnet name, a
+/// `.local` name, an entry in `~/.ssh/config` — does not expire, so this is
+/// the one place to write it down and stop being sent to a stale IP.
+pub const RemoteConfig = struct {
+    /// SSH destination (`user@host`) new remote panes and the remote quick
+    /// terminal use without asking. Outranks both the last-used destination
+    /// and anything discovered on the network.
+    host: ?[]const u8 = null,
+};
+
 pub const PaneConfig = struct {
     pane_type: []const u8 = "terminal",
     title: ?[]const u8 = null,
@@ -125,6 +139,7 @@ pub const Config = struct {
     colors: ColorConfig = .{},
     text_tap: TextTapConfig = .{},
     llm: LlmConfig = .{},
+    remote: RemoteConfig = .{},
     panes: []const PaneConfig = &.{},
     // Panes are server-backed by default: each runs under a zmx session
     // daemon, so the trm UI is disposable — quitting or killing it leaves
@@ -240,6 +255,7 @@ const SectionKind = enum {
     colors,
     text_tap,
     llm,
+    remote,
     sessions,
     sessions_panes,
 };
@@ -339,6 +355,8 @@ fn loadConfigFromStringAlloc(content: []const u8) ParseError!Config {
                 section = .text_tap;
             } else if (std.mem.eql(u8, sect_name, "llm")) {
                 section = .llm;
+            } else if (std.mem.eql(u8, sect_name, "remote")) {
+                section = .remote;
             } else {
                 // Unknown section: skip it
                 section = .root;
@@ -363,6 +381,7 @@ fn loadConfigFromStringAlloc(content: []const u8) ParseError!Config {
             .colors => setStructField(ColorConfig, &cfg.colors, key, val),
             .text_tap => setStructField(TextTapConfig, &cfg.text_tap, key, val),
             .llm => setStructField(LlmConfig, &cfg.llm, key, val),
+            .remote => setStructField(RemoteConfig, &cfg.remote, key, val),
             .sessions => {
                 if (sessions_count > 0) {
                     setStructField(SessionConfig, &sessions_buf[sessions_count - 1], key, val);
@@ -674,7 +693,7 @@ pub fn clearConfigPath() void {
 pub fn loadConfig() Config {
     // 1. Try explicit path (set via setConfigPath / termania_create_with_config)
     if (explicit_config_path) |p| {
-        if (loadConfigFileAbsolute(p)) |cfg| return mergeGlobalLlm(cfg);
+        if (loadConfigFileAbsolute(p)) |cfg| return mergeGlobalDefaults(cfg);
     }
 
     // 2. Try $TRM_CWD/trm.toml (set by the `trm` CLI wrapper to pass the shell's cwd)
@@ -682,12 +701,12 @@ pub fn loadConfig() Config {
         var path_buf2: [512]u8 = undefined;
         const trm_path = std.fmt.bufPrint(&path_buf2, "{s}/trm.toml", .{trm_cwd}) catch null;
         if (trm_path) |p| {
-            if (loadConfigFileAbsolute(p)) |cfg| return mergeGlobalLlm(cfg);
+            if (loadConfigFileAbsolute(p)) |cfg| return mergeGlobalDefaults(cfg);
         }
     }
 
     // 3. Try ./trm.toml in the current working directory
-    if (loadConfigFile("trm.toml")) |cfg| return mergeGlobalLlm(cfg);
+    if (loadConfigFile("trm.toml")) |cfg| return mergeGlobalDefaults(cfg);
 
     // 4. Try ~/.config/trm/config.toml
     const home = std.posix.getenv("HOME") orelse return Config{};
@@ -698,12 +717,16 @@ pub fn loadConfig() Config {
     return Config{};
 }
 
-/// If a local config doesn't define [llm] settings, inherit them from the
-/// global config (~/.config/trm/config.toml). This allows users to set their
-/// API token once globally and have it work across all projects.
-fn mergeGlobalLlm(local: Config) Config {
-    // If local config already has an api_key, no need to merge
-    if (local.llm.api_key != null) return local;
+/// Fill in what a local config didn't say from the global one
+/// (~/.config/trm/config.toml).
+///
+/// Two things are written once and meant everywhere: the LLM credentials, and
+/// the machine remote panes go to. Both belong to the person rather than to a
+/// project, so a directory with its own `trm.toml` must not lose them just by
+/// having a config of its own.
+fn mergeGlobalDefaults(local: Config) Config {
+    // Nothing to fetch when the local config already answers both questions.
+    if (local.llm.api_key != null and local.remote.host != null) return local;
 
     const home = std.posix.getenv("HOME") orelse return local;
     var path_buf: [512]u8 = undefined;
@@ -712,13 +735,24 @@ fn mergeGlobalLlm(local: Config) Config {
     const file = std.fs.openFileAbsolute(path, .{}) catch return local;
     defer file.close();
     global_config_len = file.readAll(&global_config_buf) catch return local;
-
-    // Parse only the [llm] section from the global config to avoid
-    // overwriting session/pane static buffers from the local config.
-    const global_llm = parseLlmSection(global_config_buf[0..global_config_len]);
+    const global = global_config_buf[0..global_config_len];
 
     var merged = local;
-    if (local.llm.api_key == null and global_llm.api_key != null) {
+
+    // One section at a time, never the whole file: a full parse would
+    // overwrite the session and pane static buffers the local config is
+    // still pointing into.
+    if (local.remote.host == null) {
+        const global_remote = parseNamedSection(RemoteConfig, global, "remote");
+        if (global_remote.host) |host| merged.remote.host = host;
+    }
+
+    // An api_key locally means the whole [llm] block is the local one's to
+    // own; mixing halves of two credentials sets is worse than either.
+    if (local.llm.api_key != null) return merged;
+
+    const global_llm = parseNamedSection(LlmConfig, global, "llm");
+    if (global_llm.api_key != null) {
         merged.llm.api_key = global_llm.api_key;
     }
     if (local.llm.model == null and global_llm.model != null) {
@@ -741,11 +775,14 @@ fn mergeGlobalLlm(local: Config) Config {
     return merged;
 }
 
-/// Parse only the [llm] section from config content. This avoids touching
-/// the shared static pane/session buffers used by the full parser.
-fn parseLlmSection(content: []const u8) LlmConfig {
-    var llm = LlmConfig{};
-    var in_llm_section = false;
+/// Parse a single named `[section]` out of config content.
+///
+/// Deliberately not the full parser: that one fills shared static buffers for
+/// sessions and panes, so running it over a second file to read one section
+/// would pull the ground out from under the config that is already loaded.
+fn parseNamedSection(comptime T: type, content: []const u8, name: []const u8) T {
+    var out = T{};
+    var inside = false;
 
     var line_iter = std.mem.splitSequence(u8, content, "\n");
     while (line_iter.next()) |raw_line| {
@@ -757,32 +794,37 @@ fn parseLlmSection(content: []const u8) LlmConfig {
         // Detect section headers (skip [[array_of_tables]])
         if (line[0] == '[') {
             if (line.len >= 2 and line[1] == '[') {
-                // Array of tables — not [llm]
-                if (in_llm_section) break;
-                in_llm_section = false;
+                // Array of tables — never the section being looked for.
+                if (inside) break;
+                inside = false;
                 continue;
             }
             const close = std.mem.indexOfScalar(u8, line, ']') orelse continue;
-            if (close > 1 and std.mem.eql(u8, std.mem.trim(u8, line[1..close], " \t"), "llm")) {
-                in_llm_section = true;
+            if (close > 1 and std.mem.eql(u8, std.mem.trim(u8, line[1..close], " \t"), name)) {
+                inside = true;
             } else {
-                if (in_llm_section) break; // Left [llm] section
-                in_llm_section = false;
+                if (inside) break; // Left the section
+                inside = false;
             }
             continue;
         }
 
-        if (!in_llm_section) continue;
+        if (!inside) continue;
 
         // Parse key = value
         const eq = std.mem.indexOf(u8, line, "=") orelse continue;
         const key = std.mem.trim(u8, line[0..eq], " \t");
         const raw_val = std.mem.trim(u8, line[eq + 1 ..], " \t");
         const val = stripInlineComment(raw_val);
-        setStructField(LlmConfig, &llm, key, val);
+        setStructField(T, &out, key, val);
     }
 
-    return llm;
+    return out;
+}
+
+/// The [llm] section alone, for the global-config merge.
+fn parseLlmSection(content: []const u8) LlmConfig {
+    return parseNamedSection(LlmConfig, content, "llm");
 }
 
 fn loadConfigFile(rel_path: []const u8) ?Config {
@@ -812,6 +854,48 @@ test "config defaults" {
     try testing.expectEqual(@as(u32, 1080), cfg.window.height);
     try testing.expectEqualSlices(u8, "JetBrains Mono", cfg.font.family);
     try testing.expectEqual(@as(usize, 0), cfg.panes.len);
+}
+
+test "remote host from [remote] section" {
+    const toml =
+        \\[remote]
+        \\host = "g@mini.follow-ionian.ts.net"
+        \\
+        \\[grid]
+        \\rows = 2
+    ;
+    const cfg = loadConfigFromString(toml);
+    try testing.expect(cfg.remote.host != null);
+    try testing.expectEqualSlices(u8, "g@mini.follow-ionian.ts.net", cfg.remote.host.?);
+    // The section after it still parses: a new section kind must not swallow
+    // the rest of the file.
+    try testing.expectEqual(@as(usize, 2), cfg.grid.rows);
+}
+
+test "no remote host by default" {
+    const cfg = loadConfigFromString("[grid]\nrows = 1\n");
+    try testing.expect(cfg.remote.host == null);
+}
+
+test "parseNamedSection reads one section and stops at the next" {
+    const toml =
+        \\[llm]
+        \\provider = "anthropic"
+        \\
+        \\[remote]
+        \\host = "gaurav@laptop"
+        \\
+        \\[window]
+        \\title = "not a host"
+    ;
+    const remote = parseNamedSection(RemoteConfig, toml, "remote");
+    try testing.expect(remote.host != null);
+    try testing.expectEqualSlices(u8, "gaurav@laptop", remote.host.?);
+}
+
+test "parseNamedSection ignores a missing section" {
+    const remote = parseNamedSection(RemoteConfig, "[llm]\nprovider = \"anthropic\"\n", "remote");
+    try testing.expect(remote.host == null);
 }
 
 test "parse hex color 6 digit" {

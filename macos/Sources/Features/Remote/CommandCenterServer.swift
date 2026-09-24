@@ -585,6 +585,19 @@ final class CommandCenterServer: ObservableObject {
                 self.send(reply, to: client)
             }
 
+        case "answer":
+            // Picking one of an on-screen menu's choices. Separate from
+            // `send` because it is not a message: it is a keystroke, and it
+            // must not have a Return behind it — these menus act on the digit,
+            // and the Return would land in whatever the agent draws next.
+            guard client.authenticated,
+                  let rowId = object["id"] as? String,
+                  let number = object["option"] as? Int else { return }
+            let answered = answer(option: number, forRow: rowId)
+            send(["type": "ack", "id": rowId, "delivered": answered], to: client)
+            CommandCenterMonitor.shared.refresh()
+            send(snapshotPayload(), to: client)
+
         case "send":
             // `id` is protocol 2. A phone still on 1 addresses by pane number
             // and never learns otherwise — it doesn't check the version we
@@ -835,6 +848,23 @@ final class CommandCenterServer: ObservableObject {
         return false
     }
 
+    /// Pick one of an on-screen menu's choices, from a phone.
+    ///
+    /// Only for rows backed by a pane on this Mac: the menu is being drawn by
+    /// a program attached to that surface, and a keystroke is only an answer
+    /// if it arrives there. A hosted session with no pane here has no menu on
+    /// screen to answer.
+    private func answer(option number: Int, forRow rowId: String) -> Bool {
+        guard rowId.hasPrefix("pane:"), let paneId = Int(rowId.dropFirst("pane:".count))
+        else { return false }
+        guard let entry = CommandCenterMonitor.shared.entries.first(where: { $0.paneId == paneId }),
+              let prompt = entry.pendingPrompt,
+              let option = prompt.options.first(where: { $0.number == number })
+        else { return false }
+        CommandCenterMonitor.shared.answer(option, for: entry)
+        return true
+    }
+
     // MARK: - Snapshots
 
     private func pushSnapshotIfChanged() {
@@ -880,6 +910,18 @@ final class CommandCenterServer: ObservableObject {
             // instead of making someone retype a message they already sent.
             row["promptHistory"] = entry.promptHistory
             row["errorText"] = entry.errorText
+            // A question the pane is asking on screen, which the transcript
+            // does not carry: the phone is where being able to answer one
+            // without walking to the Mac is worth the most.
+            if let pending = entry.pendingPrompt {
+                row["question"] = pending.question
+                row["questionOptions"] = pending.options.map { option in
+                    ["number": option.number, "label": option.label, "selected": option.isSelected]
+                }
+                if !pending.previewText.isEmpty {
+                    row["questionPreview"] = pending.previewText.joined(separator: "\n")
+                }
+            }
             row["updatedAt"] = entry.updatedAt?.timeIntervalSince1970
             return row
         }

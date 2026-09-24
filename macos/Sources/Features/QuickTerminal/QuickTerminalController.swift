@@ -350,12 +350,13 @@ class QuickTerminalController: BaseTerminalController {
 
     /// Toggle the quick terminal with a shell that runs on another machine.
     ///
-    /// The host is the last remote destination trm used — the same
-    /// `LastRemoteHost` a new remote pane prefills with — so the usual case
-    /// is one keystroke and no questions. With nothing remembered, a single
-    /// trm advertising on Bonjour is taken as the answer; failing that the
-    /// normal host prompt appears, and what it returns is remembered so the
-    /// next drop-down is silent.
+    /// The host is `[remote] host` from the config when one is set, otherwise
+    /// the last remote destination trm used — the same `LastRemoteHost` a new
+    /// remote pane prefills with — so the usual case is one keystroke and no
+    /// questions. With nothing configured or remembered, a single trm
+    /// advertising on Bonjour is taken as the answer; failing that the normal
+    /// host prompt appears, and what it returns is remembered so the next
+    /// drop-down is silent.
     func toggleRemote() {
         // Closing never asks a question.
         if visible {
@@ -371,6 +372,10 @@ class QuickTerminalController: BaseTerminalController {
     /// Which machine `toggleRemote()` should connect to, asking only when
     /// there is nothing to infer.
     private func resolvedRemoteHost() -> String? {
+        // Same order as a new remote pane: the config's answer, then the last
+        // one used, then a lone machine on the network.
+        if let configured = BaseTerminalController.configuredRemoteHost() { return configured }
+
         if let last = UserDefaults.standard.string(
             forKey: BaseTerminalController.lastRemoteHostDefaultsKey) {
             let host = BaseTerminalController.sanitizedRemoteHost(last)

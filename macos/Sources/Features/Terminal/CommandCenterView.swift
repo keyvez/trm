@@ -480,6 +480,12 @@ struct CommandCenterView: View {
         VStack(alignment: .leading, spacing: 6) {
             cardHeader(entry)
 
+            // Same rule as a briefing row: a question that has stopped the
+            // work outranks a report on the work.
+            if let pending = entry.pendingPrompt {
+                promptCard(entry, prompt: pending)
+            }
+
             if let prompt = entry.prompt, !prompt.isEmpty {
                 Text(prompt)
                     .font(.system(size: 10.5, design: .monospaced))
@@ -586,6 +592,14 @@ struct CommandCenterView: View {
                 .onTapGesture(count: 2) { monitor.reveal(entry) }
                 .onTapGesture { rowTap(entry) }
 
+                // A question being asked on screen comes before anything
+                // else the row has to say. Everything below is a report on
+                // work already done; this is work that has stopped until you
+                // answer, and the answer is one click away.
+                if let prompt = entry.pendingPrompt {
+                    promptCard(entry, prompt: prompt)
+                }
+
                 // What was done, above the conclusion it led to: read down
                 // the detail to judge whether the sentence is the whole
                 // story, or skip it and take the sentence.
@@ -669,6 +683,98 @@ struct CommandCenterView: View {
         .help("Click to reply · ⌘-click for the Agent Overview · double-click the header for the pane · double-click the watermark to rename")
     }
 
+    // MARK: - The question a pane is asking
+
+    /// A pane's on-screen question, with whatever it is asking *about*.
+    ///
+    /// The preview is the part that makes this worth building. "Do you want to
+    /// make this edit?" is unanswerable from a board; the same words over six
+    /// lines of the actual diff, in the colours the terminal drew them in, is
+    /// a decision you can take from a phone.
+    @ViewBuilder
+    private func promptCard(
+        _ entry: CommandCenterMonitor.Entry, prompt: PanePrompt
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: "questionmark.bubble.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                Text("WAITING ON YOU")
+                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(.orange.opacity(0.9))
+            }
+
+            // What it is asking about: the diff, the plan, the command. Drawn
+            // from the pane's own cells, so it looks like what is on screen
+            // rather than a description of it.
+            if let rows = prompt.previewRows, let screen = monitor.screen(for: entry) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    PaneMiniature(screen: screen, fontSize: 9, rowRange: rows)
+                }
+                .frame(maxHeight: 132)
+                .padding(6)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(0.05)))
+            }
+
+            Text(prompt.question)
+                .font(.system(size: 13.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // One button per choice, sending the digit the menu offers it
+            // under. Wrapped rather than in a row: these are whole sentences
+            // ("No, and tell Claude what to do differently"), not "OK".
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(prompt.options) { option in
+                    Button {
+                        monitor.answer(option, for: entry)
+                    } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text("\(option.number)")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(option.isSelected ? Color.orange : .secondary)
+                                .frame(width: 12, alignment: .trailing)
+                            Text(option.label)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 7)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(option.isSelected
+                                      ? Color.orange.opacity(0.14)
+                                      : Color.primary.opacity(0.05)))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(option.isSelected
+                                              ? Color.orange.opacity(0.5)
+                                              : Color.clear))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Answer the pane with \(option.number)")
+                }
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.orange.opacity(0.08)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.28)))
+    }
+
     /// Briefing tiles: up to five detail lines of three lines each, the
     /// headline, one escalation line, and a reply box twice the height of the
     /// detail view's — grown to fit them. Every tile is the same height so the
@@ -715,7 +821,11 @@ struct CommandCenterView: View {
     }
 
     static func status(for entry: CommandCenterMonitor.Entry) -> Status {
-        if entry.needsAttention {
+        // A question on screen counts the same as one in the transcript — it
+        // is the same agent, stopped for the same reason. It is checked first
+        // because it is the earlier of the two: the box is drawn while the
+        // transcript still says the turn is running.
+        if entry.needsAttention || entry.pendingPrompt != nil {
             return Status(label: "needs you", color: .orange, emphasis: 0.14)
         }
         if entry.errorCount > 0 {
@@ -729,6 +839,9 @@ struct CommandCenterView: View {
 
     /// The one extra line worth showing under the sentence, or nothing.
     static func escalation(for entry: CommandCenterMonitor.Entry) -> String? {
+        // Nothing to add when the question itself is on the row: the card
+        // above says what is being asked and offers the answers.
+        if entry.pendingPrompt != nil { return nil }
         if entry.needsAttention {
             return "Waiting on your answer."
         }

@@ -1335,6 +1335,7 @@ uint32_t termania_layout_subscriber_count(trm_app_t);
 uint64_t termania_layout_subscribe_generation(trm_app_t);
 
 // LLM config accessors
+uint32_t termania_config_remote_host(trm_app_t, char*, uint32_t);
 uint32_t termania_config_llm_provider(trm_app_t, char*, uint32_t);
 uint32_t termania_config_llm_api_key(trm_app_t, char*, uint32_t);
 uint32_t termania_config_llm_model(trm_app_t, char*, uint32_t);

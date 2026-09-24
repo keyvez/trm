@@ -60,6 +60,37 @@ the paragraphs under it, with fenced code left out and list markers stripped
 while their text stays. That fallback is rebuilt from the pane on every scan,
 so it can never describe a turn that has moved on.
 
+## The question an agent is asking
+
+An agent that has stopped to ask "may I run this?" or "may I make this edit?"
+is the most urgent thing on the board, and it is the one thing a transcript
+cannot report: those prompts are drawn and answered entirely in the terminal
+and never reach the JSONL. `AskUserQuestion` does reach it, but not until the
+turn moves on — so both kinds of question used to arrive at the board at the
+moment they stopped being questions.
+
+trm reads them off the pane's own screen instead. A row with a question shows:
+
+- **the question**, above everything else the row has to say;
+- **the preview** — the diff, the plan, the command about to run — drawn from
+  the pane's actual cells, in the colours the terminal drew them in;
+- **the choices as buttons**. Clicking one sends that digit to the pane and
+  nothing else: these menus act on the digit, and a Return behind it would land
+  in whatever the agent draws next.
+
+The same question, its options and a plain-text preview go to the phone, which
+can answer it back.
+
+The detector is deliberately hard to please: two or more consecutively numbered
+choices, at the bottom of the screen, with the cursor resting on one of them.
+That last rule is what separates a menu from the numbered list an agent writes
+when it reports three things it fixed, and it is also the liveness test — the
+cursor belongs to the menu that is taking input, and what is left after an
+answer is the echoed choice without it. Where the shape is not unmistakable the
+row shows what it always showed.
+
+Because the pane's surface renders locally, this works for remote panes too.
+
 ## Full view
 
 The expand button in the panel header gives the board the whole window: cards

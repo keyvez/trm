@@ -1332,6 +1332,21 @@ final class Trm {
         )
     }
 
+    // MARK: - Remote Config
+
+    /// The default SSH destination for remote panes, from `[remote] host`.
+    ///
+    /// Nil when nothing is configured, which leaves the old order in place:
+    /// the destination used last, then a single machine advertising itself on
+    /// Bonjour, then the prompt. Set, it outranks all three — the point of
+    /// writing a name down is that a lease-length IP stops winning.
+    func configuredRemoteHost() -> String? {
+        guard let h = handle else { return nil }
+        let host = readStringField { buf, max in termania_config_remote_host(h, buf, max) }
+        guard let host, !host.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        return host.trimmingCharacters(in: .whitespaces)
+    }
+
     /// Generic helper to read a buffer-copy C API field into a Swift String.
     private func readStringField(_ reader: (UnsafeMutablePointer<CChar>, UInt32) -> UInt32) -> String? {
         var buf = [CChar](repeating: 0, count: 1025)

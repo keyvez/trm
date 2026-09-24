@@ -162,6 +162,22 @@ by path (<code>trm --config path/to/session.toml</code>) or from the Session Bro
 <tr><td><code>ansi</code></td><td>(16 colors)</td><td>ANSI color palette: 8 normal + 8 bright</td></tr>
 </tbody></table>
 <hr />
+<h2 id="remote">[remote]</h2>
+<p>The machine remote panes and the remote quick terminal open on. Only in
+<code>config.toml</code>, and inherited by projects that have a <code>trm.toml</code> of their own —
+like the LLM credentials, this belongs to the person rather than the project.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">remote</span><span style="color: #89DDFF;">]</span></span>
+<span class="giallo-l"><span>host</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">you@machine.tailnet.ts.net</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>host</code></td><td>String</td><td>(unset)</td><td>SSH destination used without asking, and prefilled in the host prompt</td></tr>
+</tbody></table>
+<p>Without it, trm uses the destination it used last, then a single trm
+advertising itself on Bonjour, then asks. Both of those have a shelf life: the
+last-used destination is overwritten the moment you open a pane on another
+machine, and Bonjour advertises the address a machine is answering at <em>today</em>,
+which on a laptop is a DHCP lease. A name you own — a tailnet name, a <code>.local</code>
+name, an alias from <code>~/.ssh/config</code> — does not expire, and set here it outranks
+both.</p>
+<hr />
 <h2 id="text-tap">[text_tap]</h2>
 <p>The Text Tap API server. See the <a href="/docs/text-tap-api/">Text Tap API</a> reference for protocol details. Only in <code>config.toml</code>.</p>
 <pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">text_tap</span><span style="color: #89DDFF;">]</span></span>

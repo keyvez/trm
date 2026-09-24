@@ -10,18 +10,36 @@ import SwiftUI
 /// it. So the cells are read and redrawn instead: same characters, same
 /// colours, same grid, at whatever size the tile has.
 ///
-/// The whole viewport, never a crop. A terminal's meaning is often in its
-/// shape — a column of test results, a diff, a progress table — and the last
-/// six lines of that is not a smaller version of it, it is a different thing.
+/// The whole viewport by default, never a crop *of a pane you are
+/// identifying*: a terminal's meaning is often in its shape — a column of test
+/// results, a diff, a progress table — and the last six lines of that is not a
+/// smaller version of it, it is a different thing.
+///
+/// `rowRange` is the exception, and it is a different job. When the thing
+/// being shown is one piece of the screen that stands on its own — the diff
+/// inside a permission prompt, the plan above "shall I proceed" — the rest of
+/// the viewport is not context, it is everything the question is *not* about.
 struct PaneMiniature: View {
     let screen: Trm.PaneScreen
-    /// Point size for a cell. Tiny on purpose: legibility is not the job here,
-    /// recognisability is — you are looking for which pane this is.
+    /// Point size for a cell. Tiny on purpose when the whole viewport is
+    /// shown: legibility is not the job there, recognisability is — you are
+    /// looking for which pane this is. A cropped region is meant to be read,
+    /// so it is given a real size by its caller.
     var fontSize: CGFloat = 3.5
+    /// Rows to draw, inclusive. Nil draws the viewport.
+    var rowRange: ClosedRange<Int>? = nil
+
+    private var drawnRows: [Int] {
+        guard let rowRange else { return Array(0..<screen.rows) }
+        let low = max(0, rowRange.lowerBound)
+        let high = min(screen.rows - 1, rowRange.upperBound)
+        guard low <= high else { return [] }
+        return Array(low...high)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(0..<screen.rows, id: \.self) { row in
+            ForEach(drawnRows, id: \.self) { row in
                 line(row)
             }
         }

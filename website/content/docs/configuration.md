@@ -156,6 +156,31 @@ ansi = [
 
 ---
 
+## \[remote\]
+
+The machine remote panes and the remote quick terminal open on. Only in
+`config.toml`, and inherited by projects that have a `trm.toml` of their own —
+like the LLM credentials, this belongs to the person rather than the project.
+
+```toml
+[remote]
+host = "you@machine.tailnet.ts.net"
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `host` | String | (unset) | SSH destination used without asking, and prefilled in the host prompt |
+
+Without it, trm uses the destination it used last, then a single trm
+advertising itself on Bonjour, then asks. Both of those have a shelf life: the
+last-used destination is overwritten the moment you open a pane on another
+machine, and Bonjour advertises the address a machine is answering at *today*,
+which on a laptop is a DHCP lease. A name you own — a tailnet name, a `.local`
+name, an alias from `~/.ssh/config` — does not expire, and set here it outranks
+both.
+
+---
+
 ## \[text_tap\]
 
 The Text Tap API server. See the [Text Tap API](/docs/text-tap-api/) reference for protocol details. Only in `config.toml`.

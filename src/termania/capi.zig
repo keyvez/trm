@@ -1482,6 +1482,20 @@ export fn termania_config_pane_pattern(handle: ?*anyopaque, pane_idx: u32, pat_i
 // ---------------------------------------------------------------------------
 
 /// Get the LLM provider string. Returns bytes written.
+/// Get the configured default SSH destination for remote panes.
+///
+/// Returns bytes written, 0 when `[remote] host` is unset — which is the
+/// signal to fall back to what was used last, then to what is advertising
+/// itself on the network.
+export fn termania_config_remote_host(handle: ?*anyopaque, buf: ?[*]u8, max: u32) u32 {
+    const app = getApp(handle) orelse return 0;
+    const out = buf orelse return 0;
+    const str = app.config.remote.host orelse return 0;
+    const n = @min(str.len, @as(usize, max));
+    @memcpy(out[0..n], str[0..n]);
+    return @intCast(n);
+}
+
 export fn termania_config_llm_provider(handle: ?*anyopaque, buf: ?[*]u8, max: u32) u32 {
     const app = getApp(handle) orelse return 0;
     const out = buf orelse return 0;
