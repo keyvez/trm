@@ -104,3 +104,33 @@ struct GridFocusMoveTests {
         #expect(BaseTerminalController.neighbour(of: 9, direction: .left, rows: [2, 2]) == nil)
     }
 }
+
+/// Where focus goes when the focused pane is parked: where moving focus right
+/// would have taken it, not the window's first pane.
+struct ParkingFocusTests {
+    private func target(_ index: Int, vacated: Set<Int> = [], rows: [Int]) -> Int? {
+        BaseTerminalController.focusTargetAfterParking(
+            from: index, vacated: vacated.union([index]), rows: rows)
+    }
+
+    @Test func focusStepsRight() {
+        #expect(target(1, rows: [3, 2]) == 2)
+        #expect(target(3, rows: [3, 2]) == 4)
+    }
+
+    @Test func anOverviewLeavingWithItsTerminalIsSteppedOver() {
+        // Terminal at 0, its overview at 1, both parked.
+        #expect(target(0, vacated: [1], rows: [3, 2]) == 2)
+    }
+
+    @Test func atTheRightEdgeTheNextCellInReadingOrder() {
+        #expect(target(2, rows: [3, 2]) == 3)
+        // Last cell wraps to the first.
+        #expect(target(4, rows: [3, 2]) == 0)
+    }
+
+    @Test func nothingLeftIsNil() {
+        #expect(target(0, rows: [1]) == nil)
+        #expect(target(0, vacated: [1], rows: [2]) == nil)
+    }
+}

@@ -2473,6 +2473,12 @@ class BaseTerminalController: NSWindowController,
         // last is still a stack child when it leaves, so it takes no cell with
         // it, and the last one out closes the cell behind it.
         let members = (pane.stackChildren ?? [pane]).reversed()
+
+        // Where focus goes next is worked out on the grid as it is *before*
+        // the pane leaves: "the pane to its right" means nothing once it has
+        // no cell to be to the right of.
+        let successor = paneToFocusAfterParking(Array(members))
+
         for member in members { parkPane(member) }
 
         if peekedPane.map({ id in sidebarPanes.contains(id) }) == true { dismissPeek() }
@@ -2480,7 +2486,74 @@ class BaseTerminalController: NSWindowController,
         gridColWidthFractions = []
         reconcileGridRowCols()
         sidebarIsShowing = true
-        focusFirstGridSurface()
+        if let successor, gridPanes.contains(where: { $0.id == successor.id }) {
+            focusCell(successor)
+        } else {
+            focusFirstGridSurface()
+        }
+    }
+
+    /// The cell to focus once `members` are parked, or nil to leave focus
+    /// where it is.
+    ///
+    /// Only when focus is leaving with them — parking some other pane from
+    /// its bar should not pull you off the one you are typing in. The answer
+    /// is the pane that moving focus right would have reached, so parking
+    /// reads as the pane stepping out of the row and focus stepping along it,
+    /// rather than jumping to the top-left corner of the window.
+    private func paneToFocusAfterParking(_ members: [GridPane]) -> GridPane? {
+        // Everything leaving: the members, and the overviews that go with
+        // their terminals.
+        var leavingIDs = Set(members.map(\.id))
+        for case .terminal(let surface) in members {
+            for overview in agentOverviewPanes where overview.surface === surface {
+                leavingIDs.insert(ObjectIdentifier(overview))
+            }
+        }
+
+        let focusIsLeaving: Bool = {
+            if let surface = focusedSurface { return leavingIDs.contains(ObjectIdentifier(surface)) }
+            if let selected = selectedNonSurfacePane { return leavingIDs.contains(selected) }
+            return false
+        }()
+        guard focusIsLeaving else { return nil }
+
+        let cells = gridPanes
+        func ids(of cell: GridPane) -> [ObjectIdentifier] {
+            cell.stackChildren?.map(\.id) ?? [cell.id]
+        }
+        let memberIDs = Set(members.map(\.id))
+        guard let from = cells.firstIndex(where: { cell in
+            ids(of: cell).contains { memberIDs.contains($0) }
+        }) else { return nil }
+        let vacated = Set(cells.indices.filter { i in
+            ids(of: cells[i]).allSatisfy { leavingIDs.contains($0) }
+        })
+        let rows = Self.rowShape(cellCount: cells.count, rowCols: gridRowCols)
+        return Self.focusTargetAfterParking(from: from, vacated: vacated, rows: rows)
+            .map { cells[$0] }
+    }
+
+    /// Pure core of `paneToFocusAfterParking`: from the parked pane's cell,
+    /// the cell that moving focus right reaches, stepping over cells that are
+    /// being parked too (an overview usually sits right beside its terminal
+    /// and leaves with it). At the right edge, where moving right goes
+    /// nowhere, the next cell in reading order, wrapping.
+    nonisolated static func focusTargetAfterParking(
+        from index: Int, vacated: Set<Int>, rows: [Int]
+    ) -> Int? {
+        var step = index
+        while let right = neighbour(of: step, direction: .right, rows: rows) {
+            if !vacated.contains(right) { return right }
+            step = right
+        }
+        let count = rows.reduce(0, +)
+        guard count > 1 else { return nil }
+        for offset in 1..<count {
+            let candidate = (index + offset) % count
+            if !vacated.contains(candidate) { return candidate }
+        }
+        return nil
     }
 
     /// Move one concrete pane out of the grid and onto the shelf.
