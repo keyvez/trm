@@ -62,13 +62,22 @@
 <h2 id="pane-navigation">Pane Navigation</h2>
 <table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
 <tr><td><code>Cmd+1</code> through <code>Cmd+9</code></td><td>Jump to pane by number (1-indexed)</td></tr>
-<tr><td><code>Cmd+]</code></td><td>Focus the next pane</td></tr>
-<tr><td><code>Cmd+[</code></td><td>Focus the previous pane</td></tr>
+<tr><td><code>Cmd+]</code></td><td>Focus the next pane (wraps)</td></tr>
+<tr><td><code>Cmd+[</code></td><td>Focus the previous pane (wraps)</td></tr>
+<tr><td><code>Cmd+Option+Left</code></td><td>Focus the pane to the left</td></tr>
+<tr><td><code>Cmd+Option+Right</code></td><td>Focus the pane to the right</td></tr>
+<tr><td><code>Cmd+Option+Up</code></td><td>Focus the pane above</td></tr>
+<tr><td><code>Cmd+Option+Down</code></td><td>Focus the pane below</td></tr>
 <tr><td><code>Cmd+Shift+Left</code></td><td>Swap focused pane with the neighbor to the left</td></tr>
 <tr><td><code>Cmd+Shift+Right</code></td><td>Swap focused pane with the neighbor to the right</td></tr>
 <tr><td><code>Cmd+Shift+Up</code></td><td>Swap focused pane with the neighbor above</td></tr>
 <tr><td><code>Cmd+Shift+Down</code></td><td>Swap focused pane with the neighbor below</td></tr>
 </tbody></table>
+<p>Directional focus moves through the grid as it is drawn, not as the panes were
+created, so it follows what you rearranged. Rows may be ragged: moving up or
+down from a column a shorter row doesn't have lands on that row's last pane. At
+an edge the key is left alone and reaches the terminal, so <code>Cmd+Option+Left</code> in
+the leftmost pane still does whatever your shell does with it.</p>
 <h2 id="font-size">Font Size</h2>
 <table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
 <tr><td><code>Cmd++</code> / <code>Cmd+=</code></td><td>Increase font size by 2pt</td></tr>
@@ -83,6 +92,15 @@
 <tr><td><code>Cmd+Shift+D</code></td><td>Deselect all panes</td></tr>
 </tbody></table>
 <p>When multiple panes are selected, the command overlay targets only those panes.</p>
+<h2 id="the-shelf">The Shelf</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd+Ctrl+S</code></td><td>Show or hide the sidebar shelf</td></tr>
+<tr><td><code>Cmd+Ctrl+H</code></td><td>Send the focused pane to the shelf — it keeps running</td></tr>
+<tr><td><code>Ctrl+Click</code> a pane's bar</td><td>The same thing, where your hand already is</td></tr>
+</tbody></table>
+<p>A parked pane keeps its shell, its agent and whatever it was doing; the grid
+expands into the space it left. Click a tile to bring it back, ⌘-click to read
+it where it is, double-click its name to rename it.</p>
 <h2 id="agents">Agents</h2>
 <table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
 <tr><td><code>Cmd+Shift+A</code></td><td>Toggle the <a href="/docs/command-center/">Command Center</a> — every agent in every window</td></tr>

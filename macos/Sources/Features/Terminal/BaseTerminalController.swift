@@ -3318,6 +3318,132 @@ class BaseTerminalController: NSWindowController,
     }
 
     /// Move focus to a surface view.
+    // MARK: - Moving focus around the grid
+
+    /// Move focus one cell in the grid.
+    ///
+    /// Ghostty's own `goto_split` walks the *split tree*, which is how panes
+    /// are stored and not how trm draws them: the tree remembers the order
+    /// panes were created in, while the grid is rows and columns the user has
+    /// since moved, stacked and parked. Navigating the tree therefore lands
+    /// somewhere unrelated to the arrow that was pressed — or, when the tree
+    /// says there is no neighbour, nowhere at all.
+    ///
+    /// So the grid answers for itself. `gridPanes` is already in display order
+    /// with stacks collapsed to the single cell they occupy, and `gridRowCols`
+    /// says how many cells each row holds, which between them are the picture
+    /// on screen.
+    ///
+    /// Returns false when there is nowhere to go — the caller passes that back
+    /// to the keybinding layer, so a left arrow at the left edge reaches the
+    /// terminal as a keystroke instead of being swallowed.
+    @discardableResult
+    func focusGridNeighbour(_ direction: Ghostty.SplitFocusDirection) -> Bool {
+        let cells = gridPanes
+        guard cells.count > 1 else { return false }
+        guard let current = focusedCellIndex(in: cells) else { return false }
+        let rows = Self.rowShape(cellCount: cells.count, rowCols: gridRowCols)
+
+        let target: Int?
+        switch direction {
+        case .previous:
+            // Wrapping, because "the one before this" is a cycle through the
+            // window rather than a direction on screen.
+            target = (current - 1 + cells.count) % cells.count
+        case .next:
+            target = (current + 1) % cells.count
+        case .left, .right, .up, .down:
+            target = Self.neighbour(of: current, direction: direction, rows: rows)
+        }
+
+        guard let target, target != current, cells.indices.contains(target) else { return false }
+        focusCell(cells[target])
+        return true
+    }
+
+    /// Which cell of the grid currently has focus.
+    ///
+    /// By focused surface first, since that is what a keystroke came from, and
+    /// by the selected non-surface pane second — an overview or a plugin pane
+    /// can be the thing you are on, and it holds a selection rather than
+    /// keyboard focus.
+    private func focusedCellIndex(in cells: [GridPane]) -> Int? {
+        if let surface = focusedSurface,
+           let index = cells.firstIndex(where: { $0.containsSurface(ObjectIdentifier(surface)) }) {
+            return index
+        }
+        if let selected = selectedNonSurfacePane,
+           let index = cells.firstIndex(where: { $0.id == selected }) {
+            return index
+        }
+        return nil
+    }
+
+    /// Put focus on a cell, whatever kind of thing is in it.
+    private func focusCell(_ pane: GridPane) {
+        if let surface = pane.firstTerminalSurface {
+            // Synchronously, like the numbered pane switches: the surface is
+            // already in this window, and the async hop costs two run-loop
+            // cycles and drops rapid consecutive presses.
+            focusedSurface = surface
+            window?.makeFirstResponder(surface)
+            return
+        }
+        // An overview, a webview or a plugin pane takes the selection instead:
+        // they have no first responder to give.
+        selectNonSurfacePane(pane.id)
+    }
+
+    /// The grid as a list of row widths, reconciled against the number of
+    /// cells actually in it.
+    ///
+    /// `gridRowCols` is the layout's own description and is usually right, but
+    /// it is updated on its own schedule — a pane parked a moment ago can
+    /// leave it describing one cell too many. Rather than navigate a shape
+    /// that isn't there, a disagreement falls back to one row, which is always
+    /// true of a grid nobody has arranged.
+    nonisolated static func rowShape(cellCount: Int, rowCols: [Int]) -> [Int] {
+        guard !rowCols.isEmpty, rowCols.allSatisfy({ $0 > 0 }),
+              rowCols.reduce(0, +) == cellCount else { return [cellCount] }
+        return rowCols
+    }
+
+    /// The cell one step in a direction, or nil at the edge.
+    ///
+    /// Rows are jagged — that is the whole point of `row_cols` — so moving up
+    /// or down keeps the column where it can and lands on the last cell of a
+    /// shorter row rather than nowhere.
+    nonisolated static func neighbour(
+        of index: Int, direction: Ghostty.SplitFocusDirection, rows: [Int]
+    ) -> Int? {
+        var row = 0
+        var start = 0
+        while row < rows.count, index >= start + rows[row] {
+            start += rows[row]
+            row += 1
+        }
+        guard row < rows.count else { return nil }
+        let column = index - start
+
+        switch direction {
+        case .left:
+            return column > 0 ? index - 1 : nil
+        case .right:
+            return column < rows[row] - 1 ? index + 1 : nil
+        case .up:
+            guard row > 0 else { return nil }
+            let above = row - 1
+            let aboveStart = start - rows[above]
+            return aboveStart + min(column, rows[above] - 1)
+        case .down:
+            guard row + 1 < rows.count else { return nil }
+            let belowStart = start + rows[row]
+            return belowStart + min(column, rows[row + 1] - 1)
+        case .previous, .next:
+            return nil
+        }
+    }
+
     func focusSurface(_ view: Ghostty.SurfaceView) {
         // Check if target surface is in our tree
         guard surfaceTree.contains(view) else { return }

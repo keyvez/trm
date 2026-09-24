@@ -1207,11 +1207,20 @@ extension Ghostty {
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
                     guard let controller = surfaceView.window?.windowController as? BaseTerminalController else { return false }
 
-                    // If the window has no splits, the action is not performable
-                    guard controller.surfaceTree.isSplit else { return false }
-
                     // Convert the C API direction to our Swift type
                     guard let splitDirection = SplitFocusDirection.from(direction: direction) else { return false }
+
+                    // trm lays panes out as a grid, and the grid is not the
+                    // split tree: the tree remembers the order panes were
+                    // created in, while the grid is what the user has since
+                    // rearranged. Ask the grid, which is the thing on screen.
+                    // It answers false at an edge, which leaves the key
+                    // unconsumed and lets the arrow reach the terminal.
+                    if controller.focusGridNeighbour(splitDirection) { return true }
+                    if controller.gridPanes.count > 1 { return false }
+
+                    // If the window has no splits, the action is not performable
+                    guard controller.surfaceTree.isSplit else { return false }
 
                     // Find the current node in the tree
                     guard let targetNode = controller.surfaceTree.root?.node(view: surfaceView) else { return false }

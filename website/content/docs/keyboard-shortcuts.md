@@ -21,12 +21,22 @@ On macOS, `Cmd` refers to the Command key. The shortcuts below are the defaults;
 | Shortcut | Action |
 |----------|--------|
 | `Cmd+1` through `Cmd+9` | Jump to pane by number (1-indexed) |
-| `Cmd+]` | Focus the next pane |
-| `Cmd+[` | Focus the previous pane |
+| `Cmd+]` | Focus the next pane (wraps) |
+| `Cmd+[` | Focus the previous pane (wraps) |
+| `Cmd+Option+Left` | Focus the pane to the left |
+| `Cmd+Option+Right` | Focus the pane to the right |
+| `Cmd+Option+Up` | Focus the pane above |
+| `Cmd+Option+Down` | Focus the pane below |
 | `Cmd+Shift+Left` | Swap focused pane with the neighbor to the left |
 | `Cmd+Shift+Right` | Swap focused pane with the neighbor to the right |
 | `Cmd+Shift+Up` | Swap focused pane with the neighbor above |
 | `Cmd+Shift+Down` | Swap focused pane with the neighbor below |
+
+Directional focus moves through the grid as it is drawn, not as the panes were
+created, so it follows what you rearranged. Rows may be ragged: moving up or
+down from a column a shorter row doesn't have lands on that row's last pane. At
+an edge the key is left alone and reaches the terminal, so `Cmd+Option+Left` in
+the leftmost pane still does whatever your shell does with it.
 
 ## Font Size
 
@@ -46,6 +56,18 @@ On macOS, `Cmd` refers to the Command key. The shortcuts below are the defaults;
 | `Cmd+Shift+D` | Deselect all panes |
 
 When multiple panes are selected, the command overlay targets only those panes.
+
+## The Shelf
+
+| Shortcut | Action |
+|----------|--------|
+| `Cmd+Ctrl+S` | Show or hide the sidebar shelf |
+| `Cmd+Ctrl+H` | Send the focused pane to the shelf — it keeps running |
+| `Ctrl+Click` a pane's bar | The same thing, where your hand already is |
+
+A parked pane keeps its shell, its agent and whatever it was doing; the grid
+expands into the space it left. Click a tile to bring it back, ⌘-click to read
+it where it is, double-click its name to rename it.
 
 ## Agents
 
