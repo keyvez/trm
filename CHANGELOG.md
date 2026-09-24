@@ -9,7 +9,7 @@ numbers below mark the build at which each release's features shipped;
 `≈` marks numbers reconstructed from commit dates for releases tagged
 retroactively.
 
-## Unreleased
+## 0.4.0 (build 14554)
 
 ### Added
 
