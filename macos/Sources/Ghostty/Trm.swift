@@ -846,13 +846,13 @@ final class Trm {
 
     /// Grid layout config from termania.toml.
     struct TrmGridConfig {
-        let rows: Int
-        let cols: Int
+        var rows: Int
+        var cols: Int
         let gap: CGFloat
         let padding: CGFloat
         var panes: [TrmPaneConfig]
         /// Per-row column counts for jagged grids. Empty means use rows/cols.
-        let rowCols: [Int]
+        var rowCols: [Int]
         /// Stable window identity carried in checkpoint TOMLs (top-level
         /// window_id key). Mirrors subscribe to layout updates with it.
         var windowId: String?
@@ -877,6 +877,30 @@ final class Trm {
         var windowSize: CGSize?
         /// Window origin (bottom-left, screen coordinates) from `[window]`.
         var windowOrigin: CGPoint?
+
+        /// The same settings with the layout taken out: one pane, no saved
+        /// geometry, everything else — gap, padding, fractions the grid draws
+        /// with — untouched.
+        ///
+        /// What a window opened with no layout of its own starts from. The
+        /// app-wide config describes the window trm was *launched* for, and
+        /// after a Reload Latest UI or a `--config` launch that is a snapshot
+        /// of a whole session; handing it to every later window turns ⌘⇧N into
+        /// a second copy of the one you are already in, panes and commands and
+        /// all.
+        var withoutLayout: TrmGridConfig {
+            var copy = self
+            copy.panes = []
+            copy.rowCols = []
+            copy.rows = 1
+            copy.cols = 1
+            copy.rowFractions = []
+            copy.colFractions = []
+            copy.windowId = nil
+            copy.windowSize = nil
+            copy.windowOrigin = nil
+            return copy
+        }
     }
 
     /// Read grid/session config from a specific config file path.

@@ -9,6 +9,12 @@ numbers below mark the build at which each release's features shipped;
 `≈` marks numbers reconstructed from commit dates for releases tagged
 retroactively.
 
+## Unreleased
+
+### Fixed
+
+- **A new window came up as a copy of the one you were in.** File → New Window, ⌘⇧N, "New Window" in the startup dialog — all of them rebuilt the entire grid you were already looking at: fifteen panes, their directories, their commands, a second agent started in each. It looked like a session restoring itself for no reason, and after a **Reload Latest UI** it was exactly that. A window opened with no layout of its own falls back to the app-wide config, and the app-wide config is whatever trm was *launched* with — which, after a reload handoff or a `--config` launch, is a snapshot of a whole session written seconds earlier. That snapshot describes the window it was written for. It now seeds exactly one window: the first. Every window opened afterwards without a layout of its own starts as a single pane, keeping the gap, the padding and the rest of the settings, which are preferences rather than a layout. Windows that are *handed* a layout — a session restore, the Session Browser, a project `trm.toml` opened by path — are untouched, because they never consulted the fallback in the first place.
+
 ## 0.3.0 (build 14546)
 
 ### Added

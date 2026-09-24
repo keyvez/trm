@@ -69,6 +69,12 @@
 <li>Falls back to <code>[[panes]]</code> in <code>config.toml</code></li>
 </ol>
 <p>This means you can drop a <code>trm.toml</code> in any project directory and trm will automatically load it when launched from that directory.</p>
+<p>The layout in a session file describes the window trm is <em>launched</em> into, and
+it seeds that one window only. A window opened afterwards with no layout of its
+own — File → New Window, ⌘⇧N — starts as a single pane; it still takes the gap,
+the padding and the rest of the settings from your config, since those are
+preferences rather than a layout. To open a layout in a second window, open it
+by path (<code>trm --config path/to/session.toml</code>) or from the Session Browser.</p>
 <hr />
 <h2 id="font">[font]</h2>
 <p>Typography settings for all terminal panes. Only in <code>config.toml</code>.</p>

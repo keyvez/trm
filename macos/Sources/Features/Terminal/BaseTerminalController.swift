@@ -7348,11 +7348,40 @@ class BaseTerminalController: NSWindowController,
         } else {
             setupInitialPanes()
         }
+
+        // Whatever layout the app was launched with has now reached a window.
+        // Set after the branch above so a window built from a restored tree
+        // counts too: it is a window, and the startup layout is spent.
+        Self.startupLayoutConsumed = true
     }
+
+    /// Whether the layout trm was launched with has already been given to a
+    /// window.
+    ///
+    /// The app-wide config is the one trm started from, and after a Reload
+    /// Latest UI or a `--config` launch it is a snapshot of an entire session
+    /// — fifteen panes with their commands and directories. It describes the
+    /// window it was written for. Used as the fallback for every window, it
+    /// made File → New Window open a second copy of the window you were
+    /// already in, agents and all, as though something were restoring a
+    /// session nobody asked to restore.
+    ///
+    /// So it seeds exactly one window. Every window opened afterwards without
+    /// a layout of its own starts as a single pane — the gap, padding and the
+    /// rest of the app config still apply, since those are preferences rather
+    /// than a layout. Windows that are *given* a layout (a restore, a session
+    /// file, a project `trm.toml` opened by path) are unaffected: they never
+    /// look at this.
+    private static var startupLayoutConsumed = false
 
     /// Read the termania.toml session config and create the initial multi-pane layout.
     private func setupInitialPanes() {
-        setupInitialPanes(from: activeGridConfig)
+        // A window with a config of its own always gets it. Only the app-wide
+        // fallback is spent, and only after the first window has used it.
+        let hasOwnLayout = runtimeGridConfig != nil || gridConfigOverride != nil
+        let config = activeGridConfig
+        setupInitialPanes(
+            from: hasOwnLayout || !Self.startupLayoutConsumed ? config : config.withoutLayout)
     }
 
     /// Apply a concrete grid config and create the pane layout in-place.

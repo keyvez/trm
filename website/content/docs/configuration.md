@@ -29,6 +29,13 @@ Looked up in this order:
 
 This means you can drop a `trm.toml` in any project directory and trm will automatically load it when launched from that directory.
 
+The layout in a session file describes the window trm is *launched* into, and
+it seeds that one window only. A window opened afterwards with no layout of its
+own — File → New Window, ⌘⇧N — starts as a single pane; it still takes the gap,
+the padding and the rest of the settings from your config, since those are
+preferences rather than a layout. To open a layout in a second window, open it
+by path (`trm --config path/to/session.toml`) or from the Session Browser.
+
 ---
 
 ## \[font\]
