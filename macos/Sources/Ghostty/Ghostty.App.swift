@@ -527,7 +527,11 @@ extension Ghostty {
                 return gotoTab(app, target: target, tab: action.action.goto_tab)
 
             case GHOSTTY_ACTION_GOTO_SPLIT:
-                break // Split navigation removed — using grid layout
+                // Not "removed": redirected. This used to be dropped here
+                // when trm replaced ghostty's split tree with a grid, which
+                // left ⌘[ / ⌘] and ⌥⌘-arrow bound to an action that reached
+                // the app and stopped. They move focus around the grid now.
+                return gotoSplit(app, target: target, direction: action.action.goto_split)
 
             case GHOSTTY_ACTION_GOTO_WINDOW:
                 return gotoWindow(app, target: target, direction: action.action.goto_window)
@@ -1216,7 +1220,11 @@ extension Ghostty {
                     // rearranged. Ask the grid, which is the thing on screen.
                     // It answers false at an edge, which leaves the key
                     // unconsumed and lets the arrow reach the terminal.
-                    if controller.focusGridNeighbour(splitDirection) { return true }
+                    let moved = controller.focusGridNeighbour(splitDirection)
+                    TrmDiagnostics.log(
+                        "[focus] goto_split \(splitDirection) cells=\(controller.gridPanes.count) "
+                        + "moved=\(moved)")
+                    if moved { return true }
                     if controller.gridPanes.count > 1 { return false }
 
                     // If the window has no splits, the action is not performable
