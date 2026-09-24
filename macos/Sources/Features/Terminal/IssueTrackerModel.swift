@@ -858,7 +858,40 @@ actor IssueTrackerDiscoveryCache {
     private var remoteTasks: [
         String: Task<(contexts: [String: IssueTrackerRemotePaneContext], error: String?), Never>
     ] = [:]
+    /// Consecutive failures per host, which is how long to leave it alone.
+    private var remoteFailures: [String: Int] = [:]
+    /// Destination strings resolved to the machine and account they actually
+    /// reach, so three spellings of one Mac are probed once.
+    private var canonicalHosts: [String: String] = [:]
     private let lifetime: TimeInterval = 30
+
+    /// How long to wait before probing a host that just failed.
+    ///
+    /// This used to go the other way: a failed probe was recorded with a
+    /// timestamp twenty seconds in the past, so a host that *could not be
+    /// reached* was retried every ten seconds instead of every thirty, on the
+    /// reasoning that a waking laptop or an agent becoming available should
+    /// not hide the button for a full cache lifetime.
+    ///
+    /// That reasoning is right about one failure and badly wrong about ten.
+    /// The failure this caused: macOS launches sshd through launchd with a
+    /// hard cap of 42 concurrent instances, and a Mac with a dozen remote
+    /// panes open sits near it. Connections then start being closed during
+    /// key exchange — which is a failure — which tripled the probe rate,
+    /// which used more of the slots that were already gone. The board
+    /// degraded fastest exactly when it was already struggling.
+    ///
+    /// So failure now backs off: a minute, two, four, up to a quarter of an
+    /// hour, and any success clears it. A host that comes back is found
+    /// within a minute, and a host that is not there is asked about four
+    /// times an hour instead of three hundred and sixty.
+    static func retryDelay(afterFailures failures: Int) -> TimeInterval {
+        guard failures > 0 else { return 30 }
+        // Doubling from a minute, and stopping at a quarter of an hour: the
+        // fifth failure would ask for sixteen minutes, which the cap trims.
+        let backoff = 60.0 * pow(2, Double(min(failures, 5) - 1))
+        return min(backoff, 900)
+    }
 
     func project(
         cwd: String?, remoteHost: String?, remoteSession: String? = nil
@@ -889,11 +922,18 @@ actor IssueTrackerDiscoveryCache {
     }
 
     func remoteContexts(host: String) async -> [String: IssueTrackerRemotePaneContext] {
-        if let cached = remoteValues[host],
-           Date().timeIntervalSince(cached.checkedAt) < lifetime {
-            return cached.contexts
+        // Panes record the destination they were opened with, and one machine
+        // is routinely several of those: an IP, a tailnet name, an alias from
+        // ~/.ssh/config. Keyed by the string, each spelling got its own probe
+        // of the same Mac — three connections a cycle where one would do, on
+        // a host whose SSH slots are the thing running out.
+        let key = await canonicalKey(for: host)
+
+        if let cached = remoteValues[key] {
+            let wait = Self.retryDelay(afterFailures: remoteFailures[key] ?? 0)
+            if Date().timeIntervalSince(cached.checkedAt) < wait { return cached.contexts }
         }
-        if let task = remoteTasks[host] { return await task.value.contexts }
+        if let task = remoteTasks[key] { return await task.value.contexts }
 
         let task = Task.detached(priority: .utility) {
             () -> (contexts: [String: IssueTrackerRemotePaneContext], error: String?) in
@@ -905,17 +945,83 @@ actor IssueTrackerDiscoveryCache {
                 return (contexts: [:], error: error.localizedDescription)
             }
         }
-        remoteTasks[host] = task
+        remoteTasks[key] = task
         let loaded = await task.value
-        remoteTasks[host] = nil
-        // Retry a failed host sooner. A laptop waking or an SSH agent becoming
-        // available should not hide the affordance for a full cache lifetime.
-        let checkedAt = loaded.error == nil ? Date() : Date().addingTimeInterval(-20)
-        remoteValues[host] = (checkedAt, loaded.contexts)
+        remoteTasks[key] = nil
+        remoteValues[key] = (Date(), loaded.contexts)
         if let error = loaded.error {
-            TrmDiagnostics.log("[issue-tracker] remote pane discovery on \(host) failed: \(error)")
+            let failures = (remoteFailures[key] ?? 0) + 1
+            remoteFailures[key] = failures
+            let wait = Int(Self.retryDelay(afterFailures: failures))
+            // Logged once per attempt, with the wait, because the shape of
+            // this problem is only visible in the gaps: a host failing every
+            // ten seconds and a host failing every ten minutes read
+            // identically otherwise.
+            TrmDiagnostics.log(
+                "[issue-tracker] remote pane discovery on \(host) failed (\(failures)): "
+                + "\(error) — next attempt in \(wait)s")
+        } else {
+            remoteFailures[key] = nil
         }
         return loaded.contexts
+    }
+
+    /// The machine and account a destination actually reaches.
+    ///
+    /// Asked of ssh itself rather than guessed at, because the answer lives in
+    /// `~/.ssh/config`: `mini` may be an alias for an address, a bare hostname
+    /// takes the local username, and a `HostName` line can rewrite either. Run
+    /// once per distinct spelling and remembered — it is a local config read,
+    /// but it is still a process.
+    private func canonicalKey(for host: String) async -> String {
+        if let known = canonicalHosts[host] { return known }
+        let resolved = await Task.detached(priority: .utility) {
+            Self.resolvedDestination(for: host)
+        }.value
+        canonicalHosts[host] = resolved
+        return resolved
+    }
+
+    /// `ssh -G` prints the configuration it would connect with, after every
+    /// alias and rewrite has been applied. Two spellings that produce the same
+    /// `user` and `hostname` are the same door.
+    nonisolated static func resolvedDestination(for host: String) -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = ["-G", host]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return host
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return host }
+        return destination(fromSSHConfigDump: String(decoding: data, as: UTF8.self)) ?? host
+    }
+
+    /// Pull `user` and `hostname` out of an `ssh -G` dump. Pure, for testing.
+    nonisolated static func destination(fromSSHConfigDump dump: String) -> String? {
+        var user: String?
+        var hostname: String?
+        var port: String?
+        for line in dump.components(separatedBy: .newlines) {
+            let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            switch parts[0].lowercased() {
+            case "user": user = parts[1]
+            case "hostname": hostname = parts[1]
+            case "port": port = parts[1]
+            default: continue
+            }
+        }
+        guard let hostname, let user else { return nil }
+        // The port belongs in the key: the same address on two ports is two
+        // machines as far as anything here is concerned.
+        return port == nil || port == "22" ? "\(user)@\(hostname)" : "\(user)@\(hostname):\(port!)"
     }
 }
 
