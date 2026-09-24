@@ -74,7 +74,9 @@ struct CommandCenterLayoutTests {
         needsAttention: Bool = false,
         errorCount: Int = 0,
         errorText: String? = nil,
-        promptHistory: [String] = []
+        promptHistory: [String] = [],
+        activity: [String] = [],
+        prompt: String? = nil
     ) -> CommandCenterMonitor.Entry {
         .init(
             id: anchors.identity(id),
@@ -84,9 +86,9 @@ struct CommandCenterLayoutTests {
             location: nil,
             host: nil,
             message: message,
-            prompt: nil,
+            prompt: prompt,
             promptHistory: promptHistory,
-            activity: [],
+            activity: activity,
             links: [],
             isWorking: working,
             needsAttention: needsAttention,
@@ -178,6 +180,96 @@ struct CommandCenterLayoutTests {
 
     @Test func nothingUsableIsNoBriefing() {
         #expect(CommandCenterMonitor.parseBriefing("   \n\n  ") == nil)
+    }
+
+    // MARK: The briefing a row falls back to
+
+    @Test func aRowWithNoSummaryCarriesTheAgentsOwnAccount() {
+        // What a row shows before the summarizer answers, and everything it
+        // shows with no LLM configured: the failure first, then the rest of
+        // what the agent wrote — never the tool calls, which name commands the
+        // terminal is already showing one pane away.
+        let local = CommandCenterMonitor.localBriefing(for: entry(
+            id: 1,
+            message: """
+                I'll start by reading the file.
+
+                The leak was in the reconnect path: daemon.zig closed the \
+                listener but never freed the poller, so every dropped socket \
+                left one behind. I rewrote that to free both.
+
+                Two of the socket tests still fail and I have not worked out \
+                why yet.
+                """,
+            errorCount: 2,
+            errorText: "daemon.zig:41: expected 3, found 4",
+            activity: ["Read daemon.zig", "Edit daemon.zig", "Bash zig build test"],
+            prompt: "fix the socket leak"))
+        #expect(local.sentence == "I'll start by reading the file.")
+        #expect(local.bullets.first == "2 failed calls: daemon.zig:41: expected 3, found 4")
+        #expect(local.bullets.contains { $0.contains("freed the poller") })
+        #expect(local.bullets.last == "Two of the socket tests still fail and I have not worked out why yet.")
+        // The commands are gone: the board is for what came of the work.
+        #expect(!local.bullets.contains { $0.hasPrefix("Bash ") || $0.hasPrefix("Read ") })
+    }
+
+    @Test func aTurnWithNothingDoneYetFallsBackToWhatWasAsked() {
+        let local = CommandCenterMonitor.localBriefing(for: entry(
+            id: 2, message: "Working…", working: true, prompt: "fix the socket leak"))
+        #expect(local.sentence == "Working…")
+        #expect(local.bullets == ["You asked: fix the socket leak"])
+    }
+
+    @Test func theFallbackKeepsAtMostFiveLines() {
+        let local = CommandCenterMonitor.localBriefing(for: entry(
+            id: 3,
+            message: (1...9)
+                .map { "Paragraph number \($0) says something worth reading." }
+                .joined(separator: "\n\n"),
+            errorCount: 1,
+            errorText: "boom"))
+        #expect(local.bullets.count == 5)
+        #expect(local.bullets.first == "1 failed call: boom")
+    }
+
+    // MARK: Turning a message into detail lines
+
+    @Test func detailPicksUpWhereTheHeadlineStopped() {
+        let message = "Fixed the leak. It was in the reconnect path. Tests pass."
+        let headline = CommandCenterMonitor.firstSentence(of: message)
+        #expect(headline == "Fixed the leak.")
+        #expect(CommandCenterMonitor.detail(of: message, after: headline)
+            == ["It was in the reconnect path.", "Tests pass."])
+    }
+
+    @Test func fencedCodeIsNotDetail() {
+        let message = """
+            Rewrote the handler.
+
+            ```zig
+            fn handle() void {}
+            ```
+
+            It now frees the poller.
+            """
+        #expect(CommandCenterMonitor.detail(of: message, after: "Rewrote the handler.")
+            == ["It now frees the poller."])
+    }
+
+    @Test func listItemsKeepTheirTextAndLoseTheirMarkers() {
+        let message = """
+            Three things changed.
+
+            - Freed the poller in daemon.zig
+            2. Added a regression test
+            """
+        #expect(CommandCenterMonitor.detail(of: message, after: "Three things changed.")
+            == ["Freed the poller in daemon.zig", "Added a regression test"])
+    }
+
+    @Test func aFlagIsNotAListMarker() {
+        #expect(CommandCenterMonitor.withoutListMarker("--optimize is set") == "--optimize is set")
+        #expect(CommandCenterMonitor.withoutListMarker("- freed it") == "freed it")
     }
 
     // MARK: Links

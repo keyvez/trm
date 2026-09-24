@@ -42,3 +42,9 @@ ios/build-ios/
 # Artifacts the zig sprite test writes relative to its working directory
 sprite_face_test-*.png
 issues/artifacts/
+
+# Wrangler's local state for the website worker
+website/.wrangler/
+
+# Python bytecode from the helper scripts
+scripts/__pycache__/

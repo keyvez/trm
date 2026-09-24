@@ -4,7 +4,7 @@ description = "Complete list of keyboard shortcuts for trm."
 weight = 3
 +++
 
-All keyboard shortcuts are hardcoded and cannot be customized via configuration. On macOS, `Cmd` refers to the Command key.
+On macOS, `Cmd` refers to the Command key. The shortcuts below are the defaults; the ones that come from trm's Ghostty core can be rebound with `keybind = ` lines in `config.toml` (for example `keybind = global:ctrl+alt+backquote=toggle_quick_terminal_remote`), while the ones attached to menu items are fixed.
 
 ## Pane Management
 
@@ -43,10 +43,22 @@ All keyboard shortcuts are hardcoded and cannot be customized via configuration.
 | `Cmd+Shift+B` | Toggle broadcast mode (type in all terminal panes at once) |
 | `Shift+Click+Drag` | Rectangle-select multiple panes |
 | `Cmd+Click` | Toggle a single pane in/out of the selection |
-| `Cmd+Shift+A` | Select all panes |
 | `Cmd+Shift+D` | Deselect all panes |
 
 When multiple panes are selected, the command overlay targets only those panes.
+
+## Agents
+
+| Shortcut | Action |
+|----------|--------|
+| `Cmd+Shift+A` | Toggle the [Command Center](/docs/command-center/) — every agent in every window |
+| `Ctrl+` `` ` `` | Drop down the quick terminal |
+| `Ctrl+Option+` `` ` `` | Drop down the quick terminal **on the remote machine** |
+
+In the Command Center: click a row to reply to that agent, ⌘-click to open its
+Agent Overview, double-click a row's header to go to the pane. The panel header
+has a briefing toggle and a full-view button that gives the board the whole
+window.
 
 ## Command Palette
 

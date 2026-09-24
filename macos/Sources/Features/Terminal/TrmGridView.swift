@@ -203,6 +203,14 @@ struct TrmGridView: View {
     /// Reattach every dropped pane at once.
     var onReconnectAll: (() -> Void)? = nil
 
+    /// Panes that are running but hold no cell — the ones parked on the shelf.
+    ///
+    /// Not laid out here; the peek overlay resolves against them so a parked
+    /// pane can be expanded and read without first being given a cell back.
+    /// That is the whole point of peeking one: a look is not a decision to
+    /// rearrange the grid.
+    var offGridPanes: [GridPane] = []
+
     /// Selected pane that has no surface (overview/webview/plugin). Terminals
     /// carry selection through `focusedSurface`; these panes can't.
     var selectedNonSurfacePane: ObjectIdentifier? = nil
@@ -1641,7 +1649,7 @@ struct TrmGridView: View {
 
     /// Find an agent overview pane by ObjectIdentifier.
     private func findOverview(byID id: ObjectIdentifier) -> AgentOverviewPane? {
-        for pane in panes {
+        for pane in panes + offGridPanes {
             switch pane {
             case .agentOverview(let overview):
                 if ObjectIdentifier(overview) == id { return overview }
@@ -1682,7 +1690,7 @@ struct TrmGridView: View {
 
     /// Find a terminal surface by ObjectIdentifier across all panes and stack children.
     private func findSurface(byID id: ObjectIdentifier) -> Ghostty.SurfaceView? {
-        for pane in panes {
+        for pane in panes + offGridPanes {
             switch pane {
             case .terminal(let surface):
                 if ObjectIdentifier(surface) == id { return surface }

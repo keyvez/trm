@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Send to Pane — AI-Native Terminal Emulator</title>
+    <meta name="description" content="Guide to auto-sending commands to AI agent panes in trm from external processes like MCP servers, Flutter apps, and shell scripts.">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
+    
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="" class="nav-logo">
+                <img src="/images/icon.png" alt="trm" class="nav-logo-icon" width="28" height="28">
+                <span class="nav-logo-text">trm</span>
+            </a>
+            <div class="nav-links">
+                <a href="/docs/installation">Install</a>
+                <a href="/docs/configuration">Config</a>
+                <a href="/docs/command-center">Command Center</a>
+                <a href="/docs/plugins">Plugins</a>
+                <a href="/docs/text-tap-api">API</a>
+                <a href="/docs/keyboard-shortcuts">Shortcuts</a>
+                <a href="https://github.com/keyvez/trm" class="nav-github" rel="noopener noreferrer" target="_blank">GitHub</a>
+            </div>
+            <button class="nav-toggle" aria-label="Toggle navigation" onclick="document.querySelector('.nav-links').classList.toggle('nav-links-open')">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+
+    <main>
+        
+<div class="docs-layout">
+    <aside class="docs-sidebar">
+        <nav class="docs-nav">
+            <h4>Documentation</h4>
+            <a href="/docs/installation" >Installation</a>
+            <a href="/docs/configuration" >Configuration</a>
+            <a href="/docs/keyboard-shortcuts" >Keyboard Shortcuts</a>
+            <a href="/docs/plugins" >Plugins</a>
+            <a href="/docs/text-tap-api" >Text Tap API</a>
+            <h4>Resources</h4>
+            <a href="/examples">Examples</a>
+            <a href="https://github.com/anthropics/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+        </nav>
+    </aside>
+    <article class="docs-content">
+        <h1>Send to Pane</h1>
+        <p>Send to Pane lets external processes type keystrokes into a trm pane running Claude Code (or any watched process). This enables fully automatic workflows where a Flutter app user sends feedback and Claude picks it up within a second -- no manual <code>process_queue</code> call needed.</p>
+<h2 id="how-it-works">How It Works</h2>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="plain"><span class="giallo-l"><span>Flutter app user taps &quot;Send Feedback&quot;</span></span>
+<span class="giallo-l"><span>  → flan_flutter posts a VM service extension event</span></span>
+<span class="giallo-l"><span>  → flan_mcp receives onUserMessageQueued callback</span></span>
+<span class="giallo-l"><span>  → TrmPaneBridge connects to /tmp/trm.sock</span></span>
+<span class="giallo-l"><span>  → Detects which pane is running Claude (via process tree walk)</span></span>
+<span class="giallo-l"><span>  → Sends: {&quot;type&quot;:&quot;send&quot;,&quot;pane&quot;:0,&quot;text&quot;:&quot;process_queue\r&quot;}</span></span>
+<span class="giallo-l"><span>  → trm buffers the command in the Zig C API send queue</span></span>
+<span class="giallo-l"><span>  → Swift timer drains the queue every 0.5s</span></span>
+<span class="giallo-l"><span>  → Text and Enter are written to the ghostty surface PTY</span></span>
+<span class="giallo-l"><span>    (Enter is sent as a separate write after a 50ms delay</span></span>
+<span class="giallo-l"><span>     so raw-mode programs like Claude Code process it correctly)</span></span>
+<span class="giallo-l"><span>  → Claude Code receives &quot;process_queue&quot; + Enter, executes the tool</span></span>
+<span class="giallo-l"><span>  → Messages drain from the Flutter app queue</span></span></code></pre>
+<p>There are two connectors: a <strong>shell script</strong> for manual or scripted use, and a <strong>Dart bridge</strong> that plugs into flan_mcp for automatic triggering.</p>
+<hr />
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li><strong>trm</strong> running with Text Tap enabled (the default)</li>
+<li>A pane running Claude Code (the <code>send_text_indicator</code> service plugin will show a teal "flan" pill at the bottom-left when the MCP bridge is connected)</li>
+<li>For the Dart bridge: <strong>flan_mcp</strong> cloned at <code>~/Documents/Code/flutter/flan_mcp</code></li>
+</ul>
+<p>Verify trm's socket is up:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># Should print the number of panes</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">echo</span><span style="color: #89DDFF;"> &#39;</span><span style="color: #C3E88D;">{&quot;type&quot;:&quot;list_panes&quot;}</span><span style="color: #89DDFF;">&#39; |</span><span style="color: #FFCB6B;"> nc</span><span style="color: #C3E88D;"> -U /tmp/trm.sock</span></span></code></pre>
+<hr />
+<h2 id="option-a-shell-script-manual-use">Option A: Shell Script (Manual Use)</h2>
+<h3 id="setup">Setup</h3>
+<p>The script lives in your project at <code>scripts/send-to-claude-pane.sh</code>. It uses Python 3 (ships with macOS) for socket and JSON handling.</p>
+<p><strong>Location:</strong> <code>~/dev/fasmac/scripts/send-to-claude-pane.sh</code></p>
+<h3 id="usage">Usage</h3>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># Send &quot;process_queue&quot; to the Claude pane (default)</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">./scripts/send-to-claude-pane.sh</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># Send a custom command</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">./scripts/send-to-claude-pane.sh</span><span style="color: #89DDFF;"> &quot;</span><span style="color: #C3E88D;">some_other_command</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><h3 id="what-it-does">What it does</h3>
+<ol>
+<li>Connects to the Text Tap socket at <code>$TRM_SOCKET_PATH</code> (defaults to <code>/tmp/trm.sock</code>)</li>
+<li>Sends <code>{"type":"list_panes"}</code> to get the pane count</li>
+<li>Walks the process tree from the caller's PID to find which trm child corresponds to the caller's pane</li>
+<li>Sends <code>{"type":"send","pane":N,"text":"process_queue\r"}</code> to that pane</li>
+<li>If multiple claude panes are found, lists them with PIDs and prompts you to choose</li>
+<li>If none are found, prints an error</li>
+</ol>
+<h3 id="environment-variables">Environment variables</h3>
+<table><thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>TRM_SOCKET_PATH</code></td><td><code>/tmp/trm.sock</code></td><td>Path to the trm Text Tap socket</td></tr>
+</tbody></table>
+<h3 id="example-wire-it-to-a-claude-code-hook">Example: Wire it to a Claude Code hook</h3>
+<p>You can trigger this script from a Claude Code hook so it runs after specific events:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  &quot;</span><span style="color: #C792EA;">hooks</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">PostToolUse</span><span style="color: #89DDFF;">&quot;: [{</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">matcher</span><span style="color: #89DDFF;">&quot;: &quot;&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">hooks</span><span style="color: #89DDFF;">&quot;: [{</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #F07178;">type</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">command</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #F07178;">command</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">/Users/gaurav/dev/fasmac/scripts/send-to-claude-pane.sh</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      }]</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    }]</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  }</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">}</span></span></code></pre>
+<hr />
+<h2 id="option-b-dart-bridge-automatic-with-flan-mcp">Option B: Dart Bridge (Automatic with flan_mcp)</h2>
+<p>This is the fully automatic option. When a Flutter app user sends feedback via the flan_flutter overlay, the flan_mcp server receives the event and immediately types <code>process_queue</code> into the Claude Code pane.</p>
+<h3 id="files">Files</h3>
+<p>Two files were added to flan_mcp (no core changes):</p>
+<table><thead><tr><th>File</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>lib/src/trm_pane_bridge.dart</code></td><td><code>TrmPaneBridge</code> class -- socket connection, pane detection, input sending</td></tr>
+<tr><td><code>bin/flan_mcp_trm.dart</code></td><td>Separate entry point that wraps <code>flan_mcp.dart</code> and adds the bridge</td></tr>
+</tbody></table>
+<h3 id="how-trmpanebridge-works">How TrmPaneBridge works</h3>
+<ul>
+<li>Connects to the trm Unix socket via <code>dart:io</code> (<code>InternetAddress</code> with <code>InternetAddressType.unix</code>)</li>
+<li>Detects the Claude pane using the same <code>pgrep</code>/<code>ps</code> recursive child-process scan as the shell script</li>
+<li><strong>Caches</strong> the detected pane index for 5 minutes (re-detects on failure or cache expiry)</li>
+<li><strong>Debounces</strong> sends with a 500ms window (rapid user messages only trigger one <code>process_queue</code>)</li>
+<li><strong>Reconnects</strong> automatically if the socket drops</li>
+<li>If multiple claude panes are found, logs a warning and uses the first one</li>
+</ul>
+<h3 id="setup-1">Setup</h3>
+<h4 id="1-update-the-mcp-server-config">1. Update the MCP server config</h4>
+<p>Change your project's <code>.mcp.json</code> to use the trm-aware entry point instead of the standard one:</p>
+<p><strong><code>~/dev/fasmac/.mcp.json</code></strong> (before):</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  &quot;</span><span style="color: #C792EA;">mcpServers</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">flan</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">command</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">flan_mcp</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">args</span><span style="color: #89DDFF;">&quot;: []</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    }</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  }</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">}</span></span></code></pre>
+<p><strong><code>~/dev/fasmac/.mcp.json</code></strong> (after):</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  &quot;</span><span style="color: #C792EA;">mcpServers</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">flan</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">command</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">dart</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">args</span><span style="color: #89DDFF;">&quot;: [</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">run</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">/Users/gaurav/Documents/Code/flutter/flan_mcp/packages/flan_mcp/bin/flan_mcp_trm.dart</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">-l</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #C3E88D;">INFO</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      ],</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">cwd</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">/Users/gaurav/Documents/Code/flutter/flan_mcp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    }</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  }</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">}</span></span></code></pre>
+<p>This switches from the globally-installed <code>flan_mcp</code> binary to the new <code>flan_mcp_trm.dart</code> entry point, which has the TrmPaneBridge baked in.</p>
+<h4 id="2-verify-the-trm-session-config">2. Verify the trm session config</h4>
+<p>Your <code>trm.toml</code> needs a pane running Claude Code. The <code>send_text_indicator</code> service plugin auto-detects it -- no extra config is needed.</p>
+<p><strong><code>~/dev/fasmac/trm.toml</code>:</strong></p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">fasmac</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span></span>
+<span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Claude</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/Users/gaurav/dev/fasmac</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">claude --dangerously-skip-permissions</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">claude</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">backend</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/Users/gaurav/dev/fasmac</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">./run-backend.sh</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">backend</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">backend</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/Users/gaurav/dev/fasmac</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">./run-extraction.sh</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">extraction</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">frontend</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>cwd</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/Users/gaurav/dev/fasmac</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>initial_commands</span><span style="color: #89DDFF;"> = [&quot;</span><span style="color: #C3E88D;">./run-frontend.sh</span><span style="color: #89DDFF;">&quot;]</span></span>
+<span class="giallo-l"><span>watermark</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">frontend</span><span style="color: #89DDFF;">&quot;</span></span></code></pre>
+<p>The Claude pane (pane 0) will show a teal "flan" pill at the bottom-left once the MCP bridge connects, confirming that the send-to-pane pipeline is active.</p>
+<h4 id="3-launch-and-test">3. Launch and test</h4>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># 1. Open trm from the fasmac directory</span></span>
+<span class="giallo-l"><span style="color: #82AAFF;">cd</span><span style="color: #C3E88D;"> ~/dev/fasmac</span><span style="color: #89DDFF;"> &amp;&amp;</span><span style="color: #FFCB6B;"> trm</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># 2. Wait for Claude Code to start in pane 0</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># 3. In the Flutter app, connect via flan:</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;">#    Claude calls: connect(&quot;ws://127.0.0.1:PORT/ws&quot;)</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># 4. User taps feedback in the Flutter app overlay</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># 5. Watch pane 0 -- &quot;process_queue&quot; should appear as typed input</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;">#    within ~1 second</span></span></code></pre><h4 id="4-optional-custom-socket-path">4. Optional: custom socket path</h4>
+<p>If you changed trm's socket path in <code>config.toml</code>:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">text_tap</span><span style="color: #89DDFF;">]</span></span>
+<span class="giallo-l"><span>socket_path</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/tmp/my-custom.sock</span><span style="color: #89DDFF;">&quot;</span></span></code></pre>
+<p>Pass it to the entry point:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  &quot;</span><span style="color: #C792EA;">mcpServers</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">flan</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">command</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">dart</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">args</span><span style="color: #89DDFF;">&quot;: [</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">run</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">/Users/gaurav/Documents/Code/flutter/flan_mcp/packages/flan_mcp/bin/flan_mcp_trm.dart</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">-l</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #C3E88D;">INFO</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">--trm-socket</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #C3E88D;">/tmp/my-custom.sock</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      ],</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">cwd</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">/Users/gaurav/Documents/Code/flutter/flan_mcp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    }</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  }</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">}</span></span></code></pre>
+<p>Or set the environment variable for the shell script:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span>TRM_SOCKET_PATH</span><span style="color: #89DDFF;">=</span><span style="color: #C3E88D;">/tmp/my-custom.sock</span><span style="color: #FFCB6B;"> ./scripts/send-to-claude-pane.sh</span></span></code></pre>
+<hr />
+<h2 id="cli-options">CLI Options</h2>
+<p><code>flan_mcp_trm.dart</code> accepts all the same options as <code>flan_mcp.dart</code>, plus one additional flag:</p>
+<table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--help</code> / <code>-h</code></td><td>Print usage</td></tr>
+<tr><td><code>--version</code></td><td>Print version</td></tr>
+<tr><td><code>--log-level</code> / <code>-l</code></td><td>Log level: <code>FINEST</code>, <code>FINE</code>, <code>INFO</code>, <code>WARNING</code>, <code>SEVERE</code></td></tr>
+<tr><td><code>--log-file</code></td><td>Log to a file instead of stderr</td></tr>
+<tr><td><code>--sse-port</code></td><td>Run as SSE server instead of stdio</td></tr>
+<tr><td><code>--trm-socket</code></td><td>Path to the trm Text Tap socket (defaults to <code>$TRM_SOCKET_PATH</code> or <code>/tmp/trm.sock</code>)</td></tr>
+</tbody></table>
+<hr />
+<h2 id="debugging">Debugging</h2>
+<h3 id="check-if-the-socket-is-alive">Check if the socket is alive</h3>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #82AAFF;">echo</span><span style="color: #89DDFF;"> &#39;</span><span style="color: #C3E88D;">{&quot;type&quot;:&quot;list_panes&quot;}</span><span style="color: #89DDFF;">&#39; |</span><span style="color: #FFCB6B;"> nc</span><span style="color: #C3E88D;"> -U /tmp/trm.sock</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># Expected: {&quot;pane_count&quot;:4}</span></span></code></pre><h3 id="check-if-claude-is-detected">Check if Claude is detected</h3>
+<p>The teal "flan" pill at the bottom-left of the pane confirms the MCP bridge is connected. If it's not showing:</p>
+<ul>
+<li>Make sure <code>flan_mcp_trm.dart</code> is running (check your <code>.mcp.json</code> config)</li>
+<li>Verify the trm socket exists: <code>ls -la /tmp/trm.sock</code></li>
+<li>Check that the <code>send_text_indicator</code> service plugin is registered (it is by default)</li>
+</ul>
+<h3 id="check-the-bridge-logs">Check the bridge logs</h3>
+<p>Run with <code>FINEST</code> logging to see bridge activity:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="json"><span class="giallo-l"><span style="color: #89DDFF;">{</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  &quot;</span><span style="color: #C792EA;">mcpServers</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    &quot;</span><span style="color: #FFCB6B;">flan</span><span style="color: #89DDFF;">&quot;: {</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">command</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">dart</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">args</span><span style="color: #89DDFF;">&quot;: [</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">run</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">/Users/gaurav/Documents/Code/flutter/flan_mcp/packages/flan_mcp/bin/flan_mcp_trm.dart</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">-l</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #C3E88D;">FINEST</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">        &quot;</span><span style="color: #C3E88D;">--log-file</span><span style="color: #89DDFF;">&quot;, &quot;</span><span style="color: #C3E88D;">/tmp/flan_mcp_trm.log</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      ],</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">      &quot;</span><span style="color: #F78C6C;">cwd</span><span style="color: #89DDFF;">&quot;: &quot;</span><span style="color: #C3E88D;">/Users/gaurav/Documents/Code/flutter/flan_mcp</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">    }</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  }</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">}</span></span></code></pre>
+<p>Then tail the log:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">tail</span><span style="color: #C3E88D;"> -f /tmp/flan_mcp_trm.log</span></span></code></pre>
+<p>You should see messages like:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="plain"><span class="giallo-l"><span>[INFO][TrmPaneBridge] Connected to trm socket at /tmp/trm.sock</span></span>
+<span class="giallo-l"><span>[INFO][TrmPaneBridge] Detected Claude pane: 0</span></span>
+<span class="giallo-l"><span>[INFO][TrmPaneBridge] Sent &quot;process_queue&quot; to trm pane 0</span></span></code></pre><h3 id="test-the-shell-script-standalone">Test the shell script standalone</h3>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #82AAFF;">cd</span><span style="color: #C3E88D;"> ~/dev/fasmac</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">./scripts/send-to-claude-pane.sh</span><span style="color: #89DDFF;"> &quot;</span><span style="color: #C3E88D;">echo hello</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># Expected: Sent &#39;echo hello&#39; to pane 0.</span></span></code></pre>
+<hr />
+<h2 id="architecture">Architecture</h2>
+<p>The send pipeline crosses three layers:</p>
+<ol>
+<li>
+<p><strong>Text Tap server</strong> (Zig, <code>text_tap.zig</code>) — accepts JSON over the Unix socket, parses <code>send</code> messages, and appends them to <code>pending_commands</code>.</p>
+</li>
+<li>
+<p><strong>C API bridge</strong> (Zig, <code>capi.zig</code>) — <code>termania_poll()</code> drains pending commands and buffers them in a fixed-size send queue on the CApp struct. <code>termania_drain_send()</code> pops one entry at a time for Swift to consume.</p>
+</li>
+<li>
+<p><strong>Swift timer</strong> (<code>Trm.swift</code>) — fires every 0.5s, calls <code>poll()</code> + <code>drainSendCommands()</code>, and posts <code>NotificationCenter</code> events to <code>BaseTerminalController</code>.</p>
+</li>
+<li>
+<p><strong>Surface routing</strong> (<code>BaseTerminalController.swift</code>) — receives the notification, resolves the target <code>SurfaceView</code>, and calls <code>ghostty_surface_binding_action("text:...")</code> to write bytes to the PTY master fd.</p>
+</li>
+</ol>
+<p><strong>Key detail:</strong> trailing <code>\r</code> or <code>\n</code> is split from the text body and sent as a separate PTY write after a 50ms delay. Programs using raw terminal mode (like Claude Code's ink-based UI) need this separation to distinguish typed text from the Enter key press.</p>
+<hr />
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table><thead><tr><th>Problem</th><th>Cause</th><th>Fix</th></tr></thead><tbody>
+<tr><td><code>Socket not found at /tmp/trm.sock</code></td><td>trm is not running or Text Tap is disabled</td><td>Start trm; check <code>[text_tap] enabled = true</code> in config.toml</td></tr>
+<tr><td><code>No pane running 'claude' found</code></td><td>Claude Code hasn't started yet, or the process name doesn't match</td><td>Wait for Claude to finish loading; check <code>pgrep claude</code></td></tr>
+<tr><td><code>process_queue</code> types but nothing happens</td><td>flan_mcp is not connected to a Flutter app</td><td>Claude needs to call <code>connect("ws://...")</code> first</td></tr>
+<tr><td>Debounced sends</td><td>Multiple rapid user messages</td><td>Expected behavior -- only one <code>process_queue</code> per 500ms. The tool drains all queued messages at once</td></tr>
+<tr><td>Bridge reconnects frequently</td><td>trm was restarted</td><td>Normal -- the bridge auto-reconnects and re-detects the pane</td></tr>
+</tbody></table>
+
+    </article>
+</div>
+
+    </main>
+
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-cols">
+                <div class="footer-col">
+                    <h4>Documentation</h4>
+                    <a href="/docs/installation">Installation</a>
+                    <a href="/docs/configuration">Configuration</a>
+                    <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                    <a href="/docs/command-center">Command Center</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Features</h4>
+                    <a href="/docs/plugins">Plugins</a>
+                    <a href="/docs/text-tap-api">Text Tap API</a>
+                    <a href="/examples">Examples</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Project</h4>
+                    <a href="https://github.com/keyvez/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+                    <a href="https://github.com/keyvez/trm/issues" rel="noopener noreferrer" target="_blank">Issues</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>trm is MIT-licensed open source software.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

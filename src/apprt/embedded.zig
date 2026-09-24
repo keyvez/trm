@@ -1849,6 +1849,17 @@ pub const CAPI = struct {
         );
     }
 
+    /// Forget any held mouse button without acting as if it was released.
+    ///
+    /// For the cases where the apprt sent a press and cannot deliver the
+    /// matching release: the view was reparented mid-click, the application
+    /// deactivated, the release arrived as a different event than the press.
+    /// Without this the surface keeps extending a selection for every pointer
+    /// movement, under a mouse that is not pressed.
+    export fn ghostty_surface_mouse_cancel(surface: *Surface) void {
+        surface.core_surface.mouseCancel();
+    }
+
     /// Update the mouse position within the view.
     export fn ghostty_surface_mouse_pos(
         surface: *Surface,

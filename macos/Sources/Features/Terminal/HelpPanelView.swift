@@ -19,6 +19,11 @@ struct HelpPanelView: View {
             ("\u{2318}\u{21E7}\u{2193}", "Focus Down"),
             ("\u{2318}1-9", "Jump to Pane"),
         ]),
+        ("Quick Terminal", [
+            ("\u{2303}`", "Quick Terminal (from any app)"),
+            ("\u{2303}\u{2325}`", "Quick Terminal on Remote"),
+            ("\u{2318}D", "Quick Terminal Here"),
+        ]),
         ("Command Palette", [
             ("\u{2318}\u{21E7}P", "Toggle Command Palette"),
             ("@ prefix", "Search commands"),

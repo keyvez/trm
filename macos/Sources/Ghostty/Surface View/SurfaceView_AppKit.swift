@@ -275,6 +275,12 @@ extension Ghostty {
         // we suppress the paired mouseDown/mouseUp so the terminal doesn't see a
         // spurious button press that would start a text selection.
         private var suppressNextMouseButton: Bool = false
+
+        // True while the terminal has been told the left button is down and
+        // has not been told it came up. Every press we send must be matched,
+        // or the terminal keeps extending a selection for every movement of a
+        // mouse that nobody is pressing; see `cancelStuckMouseButton`.
+        private var leftButtonIsDownInTerminal: Bool = false
         private var appearanceObserver: NSKeyValueObservation? = nil
 
         // This is set to non-null during keyDown to accumulate insertText contents
@@ -568,6 +574,12 @@ extension Ghostty {
             guard self.focused != focused else { return }
             self.focused = focused
             ghostty_surface_set_focus(surface, focused)
+
+            // Losing focus — to another pane, to another app — is one of the
+            // ways a click's release goes missing, and an unreleased button
+            // makes the buffer select itself later. Harmless during a real
+            // drag: the hardware is checked first.
+            if !focused { cancelStuckMouseButton() }
 
             // Update our secure input state if we are a password input
             if (passwordInput) {
@@ -956,6 +968,17 @@ extension Ghostty {
             return result
         }
 
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+
+            // Peeking a pane moves this view into the expanded overlay, and a
+            // click in flight when that happens never gets its mouseUp: the
+            // window delivers it to the view it pressed, which is no longer
+            // there to receive it. That is the press the terminal would go on
+            // believing in.
+            cancelStuckMouseButton()
+        }
+
         override func updateTrackingAreas() {
             // To update our tracking area we just recreate it all.
             trackingAreas.forEach { removeTrackingArea($0) }
@@ -1016,6 +1039,14 @@ extension Ghostty {
         }
 
         override func mouseDown(with event: NSEvent) {
+            // Decided fresh for every press. The flag below is a promise to
+            // swallow *this* click's release, and a click whose release never
+            // arrives (the peek reparents the view out from under it, the app
+            // deactivates mid-click) would otherwise leave the promise
+            // standing and eat the release of the next, real click — leaving
+            // the terminal certain a button is held.
+            suppressNextMouseButton = false
+
             // Cmd+click (tap) on a pane toggles the peek/expand overlay for it.
             // Same toggle the grab-handle tap uses; routed through the shared
             // notification so the owning controller responds. We consume the
@@ -1049,6 +1080,7 @@ extension Ghostty {
 
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
+            leftButtonIsDownInTerminal = true
             ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
         }
 
@@ -1064,10 +1096,44 @@ extension Ghostty {
 
             // If we have an active surface, report the event
             guard let surface = self.surface else { return }
+
+            // Only release a button we said was pressed. An unpaired release
+            // is not harmless: the terminal opens a hovered link on it and
+            // moves the shell's cursor on a prompt click.
+            guard leftButtonIsDownInTerminal else { return }
+            leftButtonIsDownInTerminal = false
+
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
 
             // Release pressure
+            ghostty_surface_mouse_pressure(surface, 0, 0)
+        }
+
+        /// Tell the terminal to forget a held button that the hardware says is
+        /// no longer held.
+        ///
+        /// A press has to be matched by a release, and the release is the half
+        /// that can go missing: peeking a pane moves this view into the
+        /// expanded overlay mid-click and the window has nowhere to deliver
+        /// the mouseUp; ⌃-clicking sends a left press (macOS delivers it as a
+        /// right-button event) whose release arrives as something else if the
+        /// modifier was let go first; the application can deactivate with the
+        /// button down. What the user sees is the buffer selecting itself as
+        /// it scrolls, under a mouse they are not pressing, with no way to
+        /// make it stop.
+        ///
+        /// A cancel rather than a synthesized release, because a release at an
+        /// arbitrary moment would open whatever link the pointer happens to be
+        /// resting on.
+        private func cancelStuckMouseButton() {
+            guard leftButtonIsDownInTerminal else { return }
+            // The hardware is the authority: a button that really is held is
+            // in the middle of a drag-selection and must be left alone.
+            guard NSEvent.pressedMouseButtons & 0x1 == 0 else { return }
+            leftButtonIsDownInTerminal = false
+            guard let surface = self.surface else { return }
+            ghostty_surface_mouse_cancel(surface)
             ghostty_surface_mouse_pressure(surface, 0, 0)
         }
 
@@ -1092,6 +1158,7 @@ extension Ghostty {
             // macOS converts ctrl+left-click into rightMouseDown. Route it
             // back as a left-click so the core can handle ctrl+click selection.
             if event.modifierFlags.contains(.control) {
+                leftButtonIsDownInTerminal = true
                 ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, Ghostty.ghosttyMods(event.modifierFlags))
                 return
             }
@@ -1114,8 +1181,13 @@ extension Ghostty {
         override func rightMouseUp(with event: NSEvent) {
             guard let surface = self.surface else { return super.rightMouseUp(with: event) }
 
-            // Match the ctrl+left-click conversion in rightMouseDown.
-            if event.modifierFlags.contains(.control) {
+            // Match the ctrl+left-click conversion in rightMouseDown. Keyed on
+            // the press we actually sent rather than on the modifiers now:
+            // Control is frequently let go before the button is, and a release
+            // that reads the live modifiers would then send a *right* release
+            // and leave the left button held down forever.
+            if leftButtonIsDownInTerminal {
+                leftButtonIsDownInTerminal = false
                 ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, Ghostty.ghosttyMods(event.modifierFlags))
                 return
             }
@@ -1173,6 +1245,13 @@ extension Ghostty {
         }
 
         override func mouseMoved(with event: NSEvent) {
+            // A movement with no button physically down, while the terminal
+            // believes one is held, is the moment the lost release shows
+            // itself: without this the pointer would drag a selection behind
+            // it. `mouseDragged` routes here too, and a real drag is left
+            // alone because the hardware still reports the button down.
+            cancelStuckMouseButton()
+
             guard let surfaceModel else { return }
 
             // Convert window position to view position. Note (0, 0) is bottom left.
@@ -1209,6 +1288,11 @@ extension Ghostty {
         }
 
         override func scrollWheel(with event: NSEvent) {
+            // Scrolling is not a drag, so a button the terminal still thinks
+            // is held is a leftover: it would keep the selection-scroll timer
+            // running and turn the wheel into a selection gesture.
+            cancelStuckMouseButton()
+
             guard let surfaceModel else { return }
 
             var x = event.scrollingDeltaX

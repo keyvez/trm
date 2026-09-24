@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Command Center — AI-Native Terminal Emulator</title>
+    <meta name="description" content="The board of every agent in every trm window: what each one is saying, what needs you, and a reply box on every row.">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
+    
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="" class="nav-logo">
+                <img src="/images/icon.png" alt="trm" class="nav-logo-icon" width="28" height="28">
+                <span class="nav-logo-text">trm</span>
+            </a>
+            <div class="nav-links">
+                <a href="/docs/installation">Install</a>
+                <a href="/docs/configuration">Config</a>
+                <a href="/docs/command-center">Command Center</a>
+                <a href="/docs/plugins">Plugins</a>
+                <a href="/docs/text-tap-api">API</a>
+                <a href="/docs/keyboard-shortcuts">Shortcuts</a>
+                <a href="https://github.com/keyvez/trm" class="nav-github" rel="noopener noreferrer" target="_blank">GitHub</a>
+            </div>
+            <button class="nav-toggle" aria-label="Toggle navigation" onclick="document.querySelector('.nav-links').classList.toggle('nav-links-open')">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+    </nav>
+
+    <main>
+        
+<div class="docs-layout">
+    <aside class="docs-sidebar">
+        <nav class="docs-nav">
+            <h4>Documentation</h4>
+            <a href="/docs/installation" >Installation</a>
+            <a href="/docs/configuration" >Configuration</a>
+            <a href="/docs/keyboard-shortcuts" >Keyboard Shortcuts</a>
+            <a href="/docs/plugins" >Plugins</a>
+            <a href="/docs/text-tap-api" >Text Tap API</a>
+            <h4>Resources</h4>
+            <a href="/examples">Examples</a>
+            <a href="https://github.com/anthropics/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+        </nav>
+    </aside>
+    <article class="docs-content">
+        <h1>Command Center</h1>
+        <p>The Command Center is one list of every AI agent running in every trm window —
+what each is saying right now, which ones are blocked, which ones failed, and a
+box to answer any of them without going to its pane.</p>
+<p>Open it with <strong>⌘⇧A</strong>, or <strong>View → Command Center</strong>. It opens as a panel along
+the window's trailing edge and is remembered across launches, per app rather
+than per window: it is a way of working, not a property of one layout.</p>
+<h2 id="what-a-row-says">What a row says</h2>
+<p>Every pane running an agent gets a row, in the order the panes are laid out —
+the board is a view <em>of</em> your grid, so a row is where you expect it to be. What
+it needs is carried by a coloured bar and a label rather than by position:
+<strong>needs you</strong> (orange) when the agent has asked a question and is blocked,
+<strong>check this</strong> (red) when tool calls failed this turn, <strong>working</strong> (green) while
+it is mid-task, and <strong>idle</strong> when it has stopped and is waiting for you. A row
+also carries the pane's watermark, which agent is in it, the project directory
+(a worktree shows its branch name), the machine when the pane is remote, and
+how long ago the pane last said anything.</p>
+<p>Under the summary, one escalation line appears only when something actually
+wants a decision — the question you have not answered, or the errors and what
+the last one said. Its presence is the signal.</p>
+<p>Panes whose agent is still being located hold their place rather than
+disappearing — a remote pane's transcript has to come over SSH first, and a
+board that is briefly short is worse than one that says "resolving".</p>
+<p>Links are pulled out of the agent's message whole and listed under it. A
+truncated URL is worthless, and the server address an agent just printed is the
+single most grabbable thing on the board.</p>
+<h2 id="briefing-mode">Briefing mode</h2>
+<p>The target button in the panel header switches the board from "what each agent
+is saying" to a briefing: a headline per agent, and under it a few sentences of
+what actually happened.</p>
+<p>The lines are <strong>prose about the work, not a list of commands</strong>. <code>Bash: npm test</code> names what ran, not what came of it — and the terminal one pane away is
+already showing it. What a briefing carries instead is what changed and why,
+what the numbers were, what the error actually said, and what is still
+unfinished.</p>
+<p>With an LLM configured (see <a href="/docs/configuration/">Configuration</a>), the
+summariser writes them, and it is told which state the pane is in — working,
+blocked on a question, stopped — along with what failed, because a summariser
+given only the words writes a report on a finished turn even when the agent is
+mid-tool.</p>
+<p>With no LLM configured, or while a summary is still being written, the row
+falls back to the agent's own account of the turn: its opening sentence, then
+the paragraphs under it, with fenced code left out and list markers stripped
+while their text stays. That fallback is rebuilt from the pane on every scan,
+so it can never describe a turn that has moved on.</p>
+<h2 id="full-view">Full view</h2>
+<p>The expand button in the panel header gives the board the whole window: cards
+laid out as a grid, no terminal panes on screen. Press it again to go back to
+the strip.</p>
+<p>The panes are not closed or rearranged — full view is drawn <em>over</em> the grid, so
+nothing is resized on the way in or out and every terminal comes back exactly
+as it was. Like the panel itself, the mode is remembered across launches.
+Hiding the Command Center from full view leaves the window on its panes rather
+than on a takeover waiting to reappear.</p>
+<h2 id="replying-from-the-board">Replying from the board</h2>
+<p>Every row has a reply box. What you type goes to that pane's agent as a paste
+followed by a Return, so a message written over several lines arrives with its
+line breaks intact rather than folded into one line.</p>
+<table><thead><tr><th>Gesture</th><th>What it does</th></tr></thead><tbody>
+<tr><td>Click a row</td><td>Put the cursor in its reply box</td></tr>
+<tr><td>⌘-click a row</td><td>Open that pane's Agent Overview</td></tr>
+<tr><td>Double-click the header</td><td>Go to the pane itself</td></tr>
+<tr><td>Double-click the watermark</td><td>Rename the pane</td></tr>
+<tr><td>Drop a file or image on a row</td><td>Attach it to the message</td></tr>
+<tr><td>Right-click a row</td><td>Row menu, including closing the pane</td></tr>
+</tbody></table>
+<p>Previous messages to that agent are offered back, so an instruction you send
+often does not have to be retyped.</p>
+<h2 id="on-your-phone">On your phone</h2>
+<p><strong>View → Pair iPhone…</strong> shows a QR code that hands a phone the address and a
+token. The phone then has the same board — who is stuck, what each agent just
+said, the same briefing lines, and a box to reply into any of them. It reads
+the same turns the Mac draws rather than re-deriving them, so the two cannot
+disagree.</p>
+<p>The Mac serves this over the local network, so it needs the Local Network
+permission granted to trm.</p>
+<h2 id="shortcuts">Shortcuts</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd+Shift+A</code></td><td>Toggle the Command Center panel</td></tr>
+<tr><td>Drag the panel's inner edge</td><td>Resize it (it may take most of the window)</td></tr>
+</tbody></table>
+
+    </article>
+</div>
+
+    </main>
+
+    <footer class="footer">
+        <div class="footer-inner">
+            <div class="footer-cols">
+                <div class="footer-col">
+                    <h4>Documentation</h4>
+                    <a href="/docs/installation">Installation</a>
+                    <a href="/docs/configuration">Configuration</a>
+                    <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                    <a href="/docs/command-center">Command Center</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Features</h4>
+                    <a href="/docs/plugins">Plugins</a>
+                    <a href="/docs/text-tap-api">Text Tap API</a>
+                    <a href="/examples">Examples</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Project</h4>
+                    <a href="https://github.com/keyvez/trm" rel="noopener noreferrer" target="_blank">GitHub</a>
+                    <a href="https://github.com/keyvez/trm/issues" rel="noopener noreferrer" target="_blank">Issues</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>trm is MIT-licensed open source software.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

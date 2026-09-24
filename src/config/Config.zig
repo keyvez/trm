@@ -6552,6 +6552,20 @@ pub const Keybinds = struct {
 
         // Mac-specific keyboard bindings.
         if (comptime builtin.target.os.tag.isDarwin()) {
+            // The same drop-down, on the machine you were last working on.
+            // Option on top of the quick terminal's own binding, because
+            // these are one gesture with one difference — which computer
+            // answers — and a shortcut for that should look like the one it
+            // varies. Global for the same reason the plain one is: the shell
+            // you want on the other machine is wanted from wherever you
+            // happen to be. Mac-only because remote panes are.
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .unicode = '`' }, .mods = .{ .ctrl = true, .alt = true } },
+                .{ .toggle_quick_terminal_remote = {} },
+                .{ .global = true },
+            );
+
             try self.set.put(
                 alloc,
                 .{ .key = .{ .unicode = 'q' }, .mods = .{ .super = true } },

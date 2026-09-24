@@ -1,7 +1,7 @@
 +++
 title = "Send to Pane"
 description = "Guide to auto-sending commands to AI agent panes in trm from external processes like MCP servers, Flutter apps, and shell scripts."
-weight = 6
+weight = 7
 +++
 
 Send to Pane lets external processes type keystrokes into a trm pane running Claude Code (or any watched process). This enables fully automatic workflows where a Flutter app user sends feedback and Claude picks it up within a second -- no manual `process_queue` call needed.

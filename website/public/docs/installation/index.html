@@ -20,6 +20,7 @@
             <div class="nav-links">
                 <a href="/docs/installation">Install</a>
                 <a href="/docs/configuration">Config</a>
+                <a href="/docs/command-center">Command Center</a>
                 <a href="/docs/plugins">Plugins</a>
                 <a href="/docs/text-tap-api">API</a>
                 <a href="/docs/keyboard-shortcuts">Shortcuts</a>
@@ -51,40 +52,60 @@
         <h1>Installation</h1>
         <h2 id="requirements">Requirements</h2>
 <ul>
-<li><strong>macOS</strong> (trm uses macOS-native APIs for WebView, Notes, and Screen Capture plugins)</li>
-<li><strong>Zig 0.13+</strong> (latest stable release)</li>
-<li><strong>GPU</strong> with Metal support (required by the Ghostty renderer)</li>
+<li><strong>macOS 13 or later.</strong> trm is a native Mac app: the grid, the Command Center
+and the plugin panes are AppKit and SwiftUI.</li>
+<li><strong>Xcode 15+</strong> with its command line tools, for the Swift half of the app.</li>
+<li><strong>Zig 0.15.2.</strong> Newer Zig releases are not yet supported — with Homebrew,
+<code>brew install zig@0.15</code> and build with
+<code>/opt/homebrew/opt/zig@0.15/bin/zig</code>.</li>
+<li><strong>A GPU with Metal support</strong>, required by the Ghostty renderer. Xcode must
+have its Metal toolchain installed; if a build fails with <code>cannot execute tool 'metal'</code>, run <code>xcodebuild -downloadComponent MetalToolchain</code> once.</li>
 </ul>
 <h2 id="build-from-source">Build from Source</h2>
-<p>Clone the repository and build with release optimizations:</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">git</span><span style="color: #C3E88D;"> clone https://github.com/anthropics/trm.git</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">git</span><span style="color: #C3E88D;"> clone https://github.com/keyvez/trm.git</span></span>
 <span class="giallo-l"><span style="color: #82AAFF;">cd</span><span style="color: #C3E88D;"> trm</span></span>
-<span class="giallo-l"><span style="color: #FFCB6B;">zig</span><span style="color: #C3E88D;"> build -Doptimize=ReleaseFast</span></span></code></pre>
-<p>The binary will be at <code>zig-out/bin/trm</code>. You can copy it to a location in your <code>PATH</code>:</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">cp</span><span style="color: #C3E88D;"> zig-out/bin/trm /usr/local/bin/</span></span></code></pre><h2 id="dependencies">Dependencies</h2>
-<p>trm is built on <a rel="external" href="https://ghostty.org">Ghostty</a>'s terminal core and renderer. All dependencies are managed through Zig's build system. Key components include:</p>
+<span class="giallo-l"><span style="color: #FFCB6B;">zig</span><span style="color: #C3E88D;"> build -Doptimize=ReleaseFast -Dxcframework-target=native</span></span></code></pre>
+<p><code>-Dxcframework-target=native</code> builds the framework for this Mac only, which is
+what you want on an Apple Silicon machine; leave it off only if you are
+building a universal bundle.</p>
+<p>The result is an app bundle at <code>macos/build/ReleaseLocal/trm.app</code>. Install it:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">./scripts/reinstall-trm.sh</span><span style="color: #464B5D;font-style: italic;">          # copies it to /Applications/trm.app</span></span></code></pre>
+<p>A debug build is <code>zig build</code> with no flags, and the Zig unit tests are
+<code>zig build test</code>.</p>
+<h2 id="install-the-cli">Install the CLI</h2>
+<p>The <code>trm</code> command drives the running app over its
+<a href="/docs/text-tap-api/">Text Tap socket</a> — listing panes, sending text to an
+agent, mirroring a session — and launches the app when called with no
+arguments.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">./scripts/install-cli.sh</span><span style="color: #464B5D;font-style: italic;">            # needs sudo; installs to /usr/local/bin</span></span></code></pre><h2 id="dependencies">Dependencies</h2>
+<p>trm is built on <a rel="external" href="https://ghostty.org">Ghostty</a>'s terminal core and renderer.
+Everything is managed by Zig's build system, so no system libraries need to be
+installed separately.</p>
 <table><thead><tr><th>Component</th><th>Purpose</th></tr></thead><tbody>
 <tr><td>Ghostty core</td><td>Terminal emulation, VT parser, GPU rendering</td></tr>
-<tr><td>Metal / OpenGL</td><td>GPU-accelerated rendering backends</td></tr>
-<tr><td>libghostty</td><td>C API bridge for macOS integration</td></tr>
-<tr><td>AppKit / WebKit</td><td>macOS native views (WKWebView, NSTextView)</td></tr>
+<tr><td>Metal</td><td>GPU-accelerated rendering backend</td></tr>
+<tr><td>libghostty</td><td>C API bridge for the macOS app</td></tr>
+<tr><td>zmx</td><td>Session daemon, so a pane's shell outlives the window</td></tr>
+<tr><td>AppKit / SwiftUI / WebKit</td><td>The Mac app itself</td></tr>
 </tbody></table>
-<p>No system libraries need to be installed separately; the macOS SDK provides everything else.</p>
-<h2 id="verify-installation">Verify Installation</h2>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> --version</span></span></code></pre>
-<p>This prints the version number and exits.</p>
+<h2 id="verify-the-install">Verify the Install</h2>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> version</span></span></code></pre>
+<p>This prints the version, the build number (the repo's commit count) and the
+commit it was built from — the same three the About window shows.</p>
 <h2 id="first-launch">First Launch</h2>
-<p>Simply run <code>trm</code> with no arguments to start with a single terminal pane using the default configuration:</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span></span></code></pre>
-<p>trm automatically creates a default config file at <code>~/.config/trm/config.toml</code> on first run.</p>
+<p>Open <code>/Applications/trm.app</code>, or run <code>trm</code> with no arguments, to start with a
+single terminal pane and the default configuration. A default config file is
+created at <code>~/.config/trm/config.toml</code> on first run.</p>
 <p>To launch with a specific session file:</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> --config path/to/session.toml</span></span></code></pre>
-<p>See the <a href="/docs/configuration/">Configuration</a> guide for details on customizing your setup.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> --config path/to/session.toml</span></span></code></pre>
+<p>See the <a href="/docs/configuration/">Configuration</a> guide for details on customizing
+your setup.</p>
 <h2 id="uninstall">Uninstall</h2>
-<p>Remove the binary:</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">rm</span><span style="color: #C3E88D;"> /usr/local/bin/trm</span></span></code></pre>
-<p>To also remove configuration files:</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">rm</span><span style="color: #C3E88D;"> -rf ~/.config/trm</span></span></code></pre>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">rm</span><span style="color: #C3E88D;"> -rf /Applications/trm.app</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">sudo</span><span style="color: #C3E88D;"> rm -f /usr/local/bin/trm /usr/local/bin/mirror-session.py</span></span></code></pre>
+<p>To also remove configuration, sessions and extensions:</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">rm</span><span style="color: #C3E88D;"> -rf ~/.config/trm</span></span>
+<span class="giallo-l"><span style="color: #FFCB6B;">rm</span><span style="color: #C3E88D;"> -rf ~/Library/Application</span><span>\ </span><span style="color: #C3E88D;">Support/trm</span></span></code></pre>
     </article>
 </div>
 
@@ -98,6 +119,7 @@
                     <a href="/docs/installation">Installation</a>
                     <a href="/docs/configuration">Configuration</a>
                     <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                    <a href="/docs/command-center">Command Center</a>
                 </div>
                 <div class="footer-col">
                     <h4>Features</h4>

@@ -86,6 +86,7 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuChangeTabTitle: NSMenuItem?
     @IBOutlet private var menuReadonly: NSMenuItem?
     @IBOutlet private var menuQuickTerminal: NSMenuItem?
+    @IBOutlet private var menuQuickTerminalRemote: NSMenuItem?
     @IBOutlet private var menuTerminalInspector: NSMenuItem?
     @IBOutlet private var menuCommandPalette: NSMenuItem?
 
@@ -1084,6 +1085,11 @@ class AppDelegate: NSObject,
         self.menuDecreaseFontSize?.setImageIfDesired(systemSymbolName: "textformat.size.smaller")
         self.menuCommandPalette?.setImageIfDesired(systemSymbolName: "filemenu.and.selection")
         self.menuQuickTerminal?.setImageIfDesired(systemSymbolName: "apple.terminal")
+        self.menuQuickTerminalRemote?.setImageIfDesired(systemSymbolName: "network")
+        // The remote drop-down hides behind Option on the item above it: it is
+        // the same command aimed at a different machine, and a menu that lists
+        // both all the time is a menu with two Quick Terminals in it.
+        self.menuQuickTerminalRemote?.isAlternate = true
         self.menuChangeTabTitle?.setImageIfDesired(systemSymbolName: "pencil.line")
         self.menuTerminalInspector?.setImageIfDesired(systemSymbolName: "scope")
         self.menuReadonly?.setImageIfDesired(systemSymbolName: "eye.fill")
@@ -1219,10 +1225,27 @@ class AppDelegate: NSObject,
         )
         item.keyEquivalentModifierMask = [.command, .shift]
         item.setImageIfDesired(systemSymbolName: "network")
+
+        // Hold Option and the command asks which machine instead of picking
+        // one. A machine reachable as an IP, a `.local` name and a tailnet
+        // name is one machine with three addresses, and the one that stuck
+        // first was previously the only one on offer ever after — with no way
+        // to say "that one, not this one". What it picks is remembered, so
+        // this is also how the *default* machine is changed.
+        let asking = NSMenuItem(
+            title: "New Remote Pane on…",
+            action: #selector(BaseTerminalController.newRemotePaneAskingHostAction(_:)),
+            keyEquivalent: "n")
+        asking.keyEquivalentModifierMask = [.command, .shift, .option]
+        asking.isAlternate = true
+        asking.setImageIfDesired(systemSymbolName: "network.badge.shield.half.filled")
+
         if let index = fileMenu.items.firstIndex(where: { $0.title == "New Pane" }) {
             fileMenu.insertItem(item, at: index + 1)
+            fileMenu.insertItem(asking, at: index + 2)
         } else {
             fileMenu.addItem(item)
+            fileMenu.addItem(asking)
         }
     }
 
@@ -1262,6 +1285,10 @@ class AppDelegate: NSObject,
         syncMenuShortcut(config, action: "prompt_surface_title", menuItem: self.menuChangeTitle)
         syncMenuShortcut(config, action: "prompt_tab_title", menuItem: self.menuChangeTabTitle)
         syncMenuShortcut(config, action: "toggle_quick_terminal", menuItem: self.menuQuickTerminal)
+        syncMenuShortcut(
+            config,
+            action: "toggle_quick_terminal_remote",
+            menuItem: self.menuQuickTerminalRemote)
         syncMenuShortcut(config, action: "toggle_visibility", menuItem: self.menuToggleVisibility)
         syncMenuShortcut(config, action: "toggle_window_float_on_top", menuItem: self.menuFloatOnTop)
         syncMenuShortcut(config, action: "inspector:toggle", menuItem: self.menuTerminalInspector)
@@ -1398,6 +1425,7 @@ class AppDelegate: NSObject,
     @objc private func quickTerminalDidChangeVisibility(_ notification: Notification) {
         guard let quickController = notification.object as? QuickTerminalController else { return }
         self.menuQuickTerminal?.state = if (quickController.visible) { .on } else { .off }
+        self.menuQuickTerminalRemote?.state = self.menuQuickTerminal?.state ?? .off
     }
 
     @objc private func ghosttyConfigDidChange(_ notification: Notification) {
@@ -2289,6 +2317,12 @@ class AppDelegate: NSObject,
             return controller.focusedSurface?.pwd
         }()
         quickController.toggle(startingIn: cwd)
+    }
+
+    /// Toggle the quick terminal with a shell on another machine: the one
+    /// trm used last for a remote pane, when there is one to remember.
+    @IBAction func toggleQuickTerminalOnRemote(_ sender: Any) {
+        quickController.toggleRemote()
     }
 
     /// Toggles visibility of all Ghosty Terminal windows. When hidden, activates Ghostty as the frontmost application

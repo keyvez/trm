@@ -88,7 +88,14 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     /// was found on, a third of it dead.
     ///
     /// Run at launch, beside the stream reaping, since that is the moment
-    /// nothing is streaming and every file is safely judged by its age.
+    /// nothing of ours is streaming and every file is safely judged by its
+    /// age. That used to be the whole argument, and it is one process too
+    /// narrow: a relaunch (⌘⇧R, or a crash-and-restart) has the new trm
+    /// running this while the old one still holds its mirrors open, and a
+    /// deleted mirror does not stop being written — the handle keeps taking
+    /// data into an inode with no name while every reader stats a path with
+    /// nothing behind it. Live mirrors are therefore skipped explicitly
+    /// rather than assumed absent.
     static func pruneStaleMirrors(olderThan age: TimeInterval = 24 * 60 * 60) {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
@@ -96,10 +103,17 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
 
+        liveMirrorsLock.lock()
+        let streaming = Set(liveMirrors.allObjects.map(\.mirrorURL.path))
+        liveMirrorsLock.unlock()
+
         let cutoff = Date().addingTimeInterval(-age)
         var removed = 0
         var bytes: Int64 = 0
         for file in files where file.pathExtension == "jsonl" {
+            // An idle session's mirror stops changing, so age alone would
+            // happily delete the file a live stream is filling.
+            guard !streaming.contains(file.path) else { continue }
             guard let values = try? file.resourceValues(
                 forKeys: [.contentModificationDateKey, .fileSizeKey]),
                   let modified = values.contentModificationDate,
@@ -265,6 +279,61 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
         return statusLocked
     }
 
+    /// Which file the open handle is actually writing into, by inode.
+    ///
+    /// The mirror is written through a handle and read back by path, and the
+    /// two stop meaning the same bytes the moment anything unlinks it. Keeping
+    /// the inode is what makes that detectable at all: a deleted mirror looks
+    /// exactly like an idle one from the path alone — no file, no new data,
+    /// nothing wrong.
+    private var mirrorFileNumber: Int?
+
+    /// Which stream a callback belongs to. A terminated stream's handlers can
+    /// fire after a restart has installed a new process and handle, and
+    /// closing those, or writing the old stream's replay into them, is a
+    /// second way to end up with a mirror nothing updates.
+    private var streamGeneration: UInt = 0
+
+    private static func fileNumber(atPath path: String) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.systemFileNumber] as? Int
+    }
+
+    /// Restart the stream when the file it writes into is no longer the file
+    /// the overview reads.
+    ///
+    /// Something outside this object can take the mirror away: the launch-time
+    /// pruner deleting one an older trm was still streaming, a `stop()` from a
+    /// mirror that has since been replaced, anyone emptying `~/Library/Caches`.
+    /// Nothing noticed — the writes kept succeeding into an unnamed inode, the
+    /// reader kept statting a path with no file, and the pane's overview sat on
+    /// its last parse for as long as the app ran. Found on a laptop with one
+    /// overview a day stale and 2.5 MB written into nowhere.
+    ///
+    /// The restart goes through the ordinary cooldown, so a path something is
+    /// repeatedly clearing costs one ssh every five seconds rather than a loop.
+    private func restartIfMirrorVanished() {
+        lock.lock()
+        guard !stopped, streamProcess != nil, let expected = mirrorFileNumber else {
+            lock.unlock()
+            return
+        }
+        guard Self.fileNumber(atPath: mirrorURL.path) != expected else {
+            lock.unlock()
+            return
+        }
+        streamGeneration &+= 1
+        let process = streamProcess
+        streamProcess = nil
+        let handle = mirrorHandle
+        mirrorHandle = nil
+        mirrorFileNumber = nil
+        lock.unlock()
+        process?.terminate()
+        try? handle?.close()
+        Self.logger.info(
+            "Mirror for \(self.remoteSession, privacy: .public) was deleted underneath its stream; restarting")
+    }
+
     /// Drive the mirror: called from the overview's poll timer.
     func poll() {
         lock.lock()
@@ -274,6 +343,7 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
         lock.unlock()
 
         if needsLocate { locateRemoteSession() }
+        restartIfMirrorVanished()
         ensureStreaming()
     }
 
@@ -281,14 +351,23 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     func stop() {
         lock.lock()
         stopped = true
+        streamGeneration &+= 1
         let process = streamProcess
         streamProcess = nil
         let handle = mirrorHandle
         mirrorHandle = nil
+        let owned = mirrorFileNumber
+        mirrorFileNumber = nil
         lock.unlock()
         process?.terminate()
         try? handle?.close()
-        try? FileManager.default.removeItem(at: mirrorURL)
+        // Only the file this mirror made. Mirrors for one session share a
+        // path, so a mirror that has already been replaced would otherwise
+        // delete its successor's file on the way out and leave that overview
+        // reading a path with nothing behind it.
+        if let owned, Self.fileNumber(atPath: mirrorURL.path) == owned {
+            try? FileManager.default.removeItem(at: mirrorURL)
+        }
     }
 
     // MARK: - Locate
@@ -600,6 +679,9 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
             return
         }
         mirrorHandle = handle
+        mirrorFileNumber = Self.fileNumber(atPath: mirrorURL.path)
+        streamGeneration &+= 1
+        let generation = streamGeneration
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -614,7 +696,10 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
             let data = fh.availableData
             guard !data.isEmpty, let self else { return }
             self.lock.lock()
-            let sink = self.mirrorHandle
+            // A superseded stream replays the transcript from the top, so
+            // letting its last reads through would write that history into
+            // the live mirror a second time.
+            let sink = self.streamGeneration == generation ? self.mirrorHandle : nil
             self.lock.unlock()
             sink?.write(data)
         }
@@ -622,9 +707,16 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
             guard let self else { return }
             stdout.fileHandleForReading.readabilityHandler = nil
             self.lock.lock()
-            self.streamProcess = nil
-            try? self.mirrorHandle?.close()
-            self.mirrorHandle = nil
+            // Only when this is still the live stream. A handler that fires
+            // after a restart would otherwise close the *new* handle, which
+            // stops the mirror being written at all while everything upstream
+            // still believes it is streaming.
+            if self.streamGeneration == generation {
+                self.streamProcess = nil
+                try? self.mirrorHandle?.close()
+                self.mirrorHandle = nil
+                self.mirrorFileNumber = nil
+            }
             self.lock.unlock()
         }
 
@@ -640,6 +732,7 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
             streamProcess = nil
             try? mirrorHandle?.close()
             mirrorHandle = nil
+            mirrorFileNumber = nil
             lock.unlock()
         }
     }

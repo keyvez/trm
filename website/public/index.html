@@ -20,6 +20,7 @@
             <div class="nav-links">
                 <a href="/docs/installation">Install</a>
                 <a href="/docs/configuration">Config</a>
+                <a href="/docs/command-center">Command Center</a>
                 <a href="/docs/plugins">Plugins</a>
                 <a href="/docs/text-tap-api">API</a>
                 <a href="/docs/keyboard-shortcuts">Shortcuts</a>
@@ -87,12 +88,17 @@
             <div class="feature-card">
                 <div class="feature-icon">&#x2728;</div>
                 <h3>AI Command Palette</h3>
-                <p>Ask AI to run commands, explain errors, or control your terminal. Built into the command palette with search and raw command modes.</p>
+                <p>Ask AI to run commands, explain errors, or control your terminal. Streaming responses, pane addressing with <code>#0</code> or <code>#watermark</code>, and a floating status bar that tracks progress when the palette is dismissed.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F9E0;</div>
                 <h3>Live AI Summaries</h3>
                 <p>Each pane gets a live summary of its terminal output, updated automatically by the LLM. See at a glance what every pane is doing.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F50A;</div>
+                <h3>Replies Read Aloud</h3>
+                <p>A speaker button reads the agent&rsquo;s reply aloud in the best neural voice on your Mac &mdash; fully local, code named rather than spelled out, and the sentence being spoken marked on the page as it goes.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x26A1;</div>
@@ -101,8 +107,58 @@
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x25A6;</div>
+                <h3>Quick Terminal</h3>
+                <p>A terminal that drops from the top of the screen on <strong>&#8963;`</strong>, global so it answers from any app &mdash; and <strong>&#8963;&#8997;`</strong> drops one down on <em>another machine</em> instead, reattaching the shell you left there.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x26A1;</div>
                 <h3>Multi-Pane Grid</h3>
-                <p>Jagged grid layout where each row can have different column counts. Broadcast input, navigate with keyboard, jump with Cmd+1-9.</p>
+                <p>Jagged grid where every row can have its own column count: drag the dividers to resize, drag a pane onto another to stack or swap it, or into a second window to move it there. &#8984;-click any pane to peek it full size.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1FA84;</div>
+                <h3>LLM-Built Extensions</h3>
+                <p>Describe an extension in plain language and trm's LLM builds it: <em>"notify me when any pane prints BUILD FAILED."</em> Simple automations become declarative if-this-then-that rules (no code, can't leak); complex ones become supervised out-of-process programs with enforced capabilities, memory caps, and crash-restart &mdash; in any language. Hot-reloads on edit.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F50C;</div>
+                <h3>Detachable Sessions</h3>
+                <p>Every pane runs under its own session daemon, on by default: quit trm, <code>kill -9</code> it, or close the lid and the shells keep running &mdash; relaunch and it reattaches instantly, no questions asked.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F504;</div>
+                <h3>Agents Survive a Reboot</h3>
+                <p>A reboot kills every session daemon, so trm records which conversation each pane&rsquo;s agent was having and restarts it with <code>--resume</code>: not the process back, but the thirty turns back.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F4F1;</div>
+                <h3>trm on your iPhone</h3>
+                <p>An agent that asked you something at 11pm is blocked until someone answers. Scan a QR code once and your phone has the same board: who&rsquo;s stuck, what each just said, and a box to reply into any of them.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F4CB;</div>
+                <h3>Command Center</h3>
+                <p>One panel for every agent in every window &mdash; what each is saying now, a dot for blocked / working / idle with whatever needs you sorted to the top, and a reply box on every row so you answer without going there. Briefing mode writes each row in plain English &mdash; what changed, what the numbers were, what is still unfinished &mdash; rather than listing the commands the terminal is already showing, and the full-view button gives the board the whole window when it stops being a strip beside the work and becomes the work.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#9282;</div>
+                <h3>Worktree Panes</h3>
+                <p>A worktree is a branch you can be in two places at once. <strong>New Worktree&hellip;</strong> creates it, opens a pane there and parks it on the shelf &mdash; and one an <em>agent</em> made gets a pane too, since it has no way to tell you it made one.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x2705;</div>
+                <h3>Issue Outline</h3>
+                <p>Any project with an <code>ISSUES.md</code> beside an <code>issues/</code> folder gets a checklist window that reads it as the outline it already is: click any <code>@tag</code> to filter, mark the one to do next, and hand it to an agent that has genuinely stopped.</p>
+           </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F5C2;&#xFE0F;</div>
+                <h3>Session Browser</h3>
+                <p><strong>&#8984;&#8679;S</strong> lists every live session grouped by the window it belongs to &mdash; including the ones on your <em>other</em> Macs &mdash; each with a preview, so work that outlived its window is findable instead of lost.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F4E5;</div>
+                <h3>Pane Sidebar</h3>
+                <p><strong>&#8984;&#8963;H</strong> parks a pane on a shelf at the edge: it keeps running, same shell and same agent mid-task, while the grid expands into the space. Click a tile to bring it back, &#8984;-click to read it where it is.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F4CB;</div>
@@ -112,7 +168,7 @@
             <div class="feature-card">
                 <div class="feature-icon">&#x1F9E9;</div>
                 <h3>Plugin System</h3>
-                <p>10 built-in plugin types with an extensible registry. Terminal, WebView, Notes, File Browser, Git Status, and more.</p>
+                <p>9 built-in plugin types with an extensible registry. Terminal, WebView, Notes, File Browser, Git Status, and more.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F517;</div>
@@ -132,12 +188,159 @@
             <div class="feature-card">
                 <div class="feature-icon">&#x1F514;</div>
                 <h3>Claude Code Notifications</h3>
-                <p>Native macOS notifications when Claude Code is waiting for input. Uses the Text Tap socket &mdash; no osascript needed. Drop-in hook script included.</p>
+                <p>Native macOS notifications when Claude Code is waiting for input or finishes working. Uses the Text Tap socket &mdash; no osascript needed. Each notification is attached to the pane it came from, so clicking it raises that window and focuses the exact pane &mdash; even with several agents running at once. Drop-in hook script included.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F4D6;</div>
+                <h3>Agent Overview Pane</h3>
+                <p>A reading pane bound to the agent in a pane &mdash; Claude Code or Codex &mdash; showing what it said as real Markdown, what it ran and what failed, with &#8249; &#8250; to page back through earlier turns.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F5C3;&#xFE0F;</div>
+                <h3>Replies as Cards</h3>
+                <p>A long answer is several things at once, so the overview splits it by the agent&rsquo;s own headings &mdash; what was wrong, the fix, verification, the blocker &mdash; with anything it is waiting on sorted to the bottom.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F41A;</div>
+                <h3>Overviews for Plain Shells</h3>
+                <p>A shell has the same shape as a conversation, so a pane with no agent gets an overview too: every command is a turn, its output the reply, and the failed lines picked out of the noise.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F4CA;</div>
                 <h3>Context Usage Tracking</h3>
                 <p>Real-time Claude Code context window gauge with color-coded warnings. Track daily and weekly token usage with persistent history. Auto-compact alerts built in.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F441;</div>
+                <h3>Agent Monitor</h3>
+                <p>Real-time activity tracking for AI agents running in your panes. See one-liner summaries like &ldquo;Reading config.zig&rdquo; or &ldquo;Running tests&rdquo; in a floating status pill &mdash; even when the command palette is closed.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F310;</div>
+                <h3>Inline Webview Panes</h3>
+                <p>HTTP/HTTPS links open inside a webview pane in the grid instead of jumping to your browser. Stay in context while reading docs, PRs, or dashboards.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F517;</div>
+                <h3>Server URL Detection</h3>
+                <p>Automatically detects dev-server URLs in terminal output and shows a clickable banner. One click opens the server in an inline webview. Supports custom regex patterns for tunnels and proxies.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F4E8;</div>
+                <h3>Send to Pane</h3>
+                <p>Type keystrokes into any pane from an external process. User taps feedback in a Flutter app &rarr; MCP server fires &rarr; <code>process_queue</code> appears in the Claude Code pane &mdash; under one second, fully automatic. Works with shell scripts, Dart, or any Unix socket client.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x26A1;</div>
+                <h3>Quick Actions</h3>
+                <p>Save frequently-used commands as persistent pill buttons on any pane. Select text, right-click, name it &mdash; one click to re-run. Stored in <code>.trm-actions.toml</code> with hot-reload and session persistence.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F535;</div>
+                <h3>Notification Rings</h3>
+                <p>Panes needing attention glow with an animated blue ring that pulses until you focus them. Never miss when a build finishes or a test fails in a background pane.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F4BB;</div>
+                <h3>CLI &amp; Socket API</h3>
+                <p>Full <code>trm</code> CLI with subcommands: notify, send, list-panes, open-browser, and more. Automate your workflow from shell scripts, CI, or any tool that speaks JSON over a Unix socket.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F310;</div>
+                <h3>Split Browser Pane</h3>
+                <p>Open a browser alongside your terminal with Cmd+Shift+L. Preview docs, dashboards, or local servers without leaving the grid. Navigable from the CLI or socket API.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F916;</div>
+                <h3>Agent Browser Control</h3>
+                <p>AI agents can script the split browser: evaluate JS, snapshot the accessibility tree, click elements, fill forms &mdash; all over the Text Tap socket. Build browser-in-the-loop workflows without external tools.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F517;</div>
+                <h3>cmux-Compatible API</h3>
+                <p>Speaks cmux protocol on the same socket. Tools built for cmux &mdash; like Claude Code hooks &mdash; automatically work with trm. Enumerate surfaces, identify focus, send keys and text, all via structured JSON-RPC.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x26A1;</div>
+                <h3>One-Command Claude Workspace</h3>
+                <p><code>start-claude.sh</code> opens a multi-pane grid, launches Claude Code in the last pane, and auto-focuses it after a configurable delay &mdash; ready to code in under 5 seconds.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">&#x1F343;</div>
+                <h3>Stays Light, For Days</h3>
+                <p>Leave trm running for a week with a dozen busy panes &mdash; memory stays flat. Periodic scrollback snapshots only re-read a pane when its output actually changes, so idle panes cost nothing and trm doesn't balloon over long uptime.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Crash Safety -->
+<section class="crash-safety" id="crash-safety">
+    <div class="section-inner">
+        <h2 class="section-title">Crash-Safe Plugin Isolation</h2>
+        <p class="crash-safety-sub">Plugins run as subprocesses. If one crashes, trm keeps running. No reload, no restart, no lost work.</p>
+        <div class="crash-safety-diagram">
+            <div class="crash-safety-host">
+                <div class="crash-safety-host-label">trm (host process)</div>
+                <div class="crash-safety-plugins">
+                    <div class="crash-safety-plugin in-process">
+                        <div class="crash-safety-dot green"></div>
+                        <span>URL Detector</span>
+                        <span class="crash-safety-tag">in-process</span>
+                    </div>
+                    <div class="crash-safety-plugin in-process">
+                        <div class="crash-safety-dot green"></div>
+                        <span>Attention Icon</span>
+                        <span class="crash-safety-tag">in-process</span>
+                    </div>
+                    <div class="crash-safety-plugin in-process">
+                        <div class="crash-safety-dot green"></div>
+                        <span>Send Text Indicator</span>
+                        <span class="crash-safety-tag">in-process</span>
+                    </div>
+                    <div class="crash-safety-plugin in-process">
+                        <div class="crash-safety-dot green"></div>
+                        <span>Quick Actions</span>
+                        <span class="crash-safety-tag">in-process</span>
+                    </div>
+                    <div class="crash-safety-plugin subprocess">
+                        <div class="crash-safety-dot blue"></div>
+                        <span>Your Plugin</span>
+                        <span class="crash-safety-tag sub">subprocess</span>
+                        <span class="crash-safety-pipe">stdin/stdout JSON</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="crash-safety-grid">
+            <div class="crash-safety-card">
+                <div class="crash-safety-card-icon">&#x1F6E1;</div>
+                <h3>Isolated Processes</h3>
+                <p>Each subprocess plugin runs in its own process with stdin/stdout JSON pipes. A crash is just a pipe EOF &mdash; the host detects it instantly.</p>
+            </div>
+            <div class="crash-safety-card">
+                <div class="crash-safety-card-icon">&#x1F504;</div>
+                <h3>Auto-Restart</h3>
+                <p>Crashed plugins restart with exponential backoff (2s, 4s, 8s). After 60 seconds of stable running, the retry counter resets. Three strikes and the plugin stays down &mdash; your terminal stays up.</p>
+            </div>
+            <div class="crash-safety-card">
+                <div class="crash-safety-card-icon">&#x1F30D;</div>
+                <h3>Any Language</h3>
+                <p>Subprocess plugins are standalone executables. Write them in Python, Rust, Go, or anything else. Read JSON from stdin, write state to stdout. That's the whole API.</p>
+            </div>
+        </div>
+        <div class="crash-safety-protocol">
+            <div class="crash-safety-protocol-col">
+                <div class="crash-safety-protocol-label">Host &rarr; Plugin (stdin)</div>
+                <pre><code>{"type":"terminal_output","pane":0,"text":"...","hash":"abc"}
+{"type":"notification","name":"needsAttention","pane":0}
+{"type":"stop"}</code></pre>
+            </div>
+            <div class="crash-safety-protocol-col">
+                <div class="crash-safety-protocol-label">Plugin &rarr; Host (stdout)</div>
+                <pre><code>{"type":"ready"}
+{"type":"state","overlay":"server_url_banner","panes":{"0":["http://localhost:3000"]}}
+{"type":"error","message":"regex failed"}</code></pre>
             </div>
         </div>
     </div>
@@ -229,7 +432,7 @@ trm --config path/to/config.toml</code></pre>
                     </tr>
                     <tr>
                         <td>AI command palette</td>
-                        <td class="highlight yes">Built-in (3 modes)</td>
+                        <td class="highlight yes">Streaming + pane addressing</td>
                         <td class="no">No</td>
                         <td class="no">No</td>
                         <td class="no">No</td>
@@ -284,6 +487,27 @@ trm --config path/to/config.toml</code></pre>
                         <td class="no">No</td>
                     </tr>
                     <tr>
+                        <td>Server URL detection</td>
+                        <td class="highlight yes">Auto-detect + custom patterns</td>
+                        <td class="no">No</td>
+                        <td class="no">No</td>
+                        <td class="no">No</td>
+                    </tr>
+                    <tr>
+                        <td>Quick actions</td>
+                        <td class="highlight yes">Persistent command pills</td>
+                        <td class="no">No</td>
+                        <td class="no">No</td>
+                        <td class="no">No</td>
+                    </tr>
+                    <tr>
+                        <td>Crash-safe plugin isolation</td>
+                        <td class="highlight yes">Subprocess sandboxing</td>
+                        <td class="no">No plugins</td>
+                        <td class="no">No</td>
+                        <td class="no">No</td>
+                    </tr>
+                    <tr>
                         <td>Broadcast input</td>
                         <td class="highlight yes">Yes</td>
                         <td class="no">No</td>
@@ -332,6 +556,7 @@ trm --config path/to/config.toml</code></pre>
                     <a href="/docs/installation">Installation</a>
                     <a href="/docs/configuration">Configuration</a>
                     <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                    <a href="/docs/command-center">Command Center</a>
                 </div>
                 <div class="footer-col">
                     <h4>Features</h4>

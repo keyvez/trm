@@ -261,6 +261,38 @@ class BaseTerminalController: NSWindowController,
         didSet { UserDefaults.standard.set(commandCenterIsShowing, forKey: "CommandCenterPanelOpen") }
     }
 
+    /// Whether the Command Center is taking the whole window instead of a
+    /// strip along its edge.
+    ///
+    /// Past a certain number of agents the board stops being a thing you
+    /// glance at beside the work and becomes the work: you are reading turns,
+    /// answering two of them, and the terminals behind it are not what you are
+    /// looking at. Full view gives it the window.
+    ///
+    /// It covers the grid rather than replacing it — the panes stay mounted
+    /// and stay exactly the size they were, so nothing reflows to a hundred
+    /// columns and back when the board is put away. Same reason a peek covers
+    /// the grid instead of taking its place.
+    ///
+    /// Remembered across launches, like the panel itself: it is a way of
+    /// working rather than a property of one window.
+    @Published var commandCenterIsFullScreen: Bool = UserDefaults.standard.bool(
+        forKey: "CommandCenterFullScreen"
+    ) {
+        didSet { UserDefaults.standard.set(commandCenterIsFullScreen, forKey: "CommandCenterFullScreen") }
+    }
+
+    /// Open the Command Center full-window, or put it back to its strip.
+    ///
+    /// Asking for full view when the panel is closed opens it: the button is
+    /// in the panel's own header, but the menu item and any binding for this
+    /// can be reached with nothing on screen, and "show me the board" that
+    /// leaves the screen unchanged is a broken command.
+    func toggleCommandCenterFullScreen() {
+        commandCenterIsFullScreen.toggle()
+        if commandCenterIsFullScreen { commandCenterIsShowing = true }
+    }
+
     /// Resize the Command Center panel, clamped against the window rather
     /// than a fixed maximum.
     ///
@@ -2052,6 +2084,11 @@ class BaseTerminalController: NSWindowController,
         if opened == nil,
            case .terminal(let surface) = pane,
            !isLayoutEditingDisabled,
+           // A parked pane holds no cell, and opening its overview would claim
+           // one — the grid rearranging itself behind a peek of something that
+           // is deliberately *not* in the grid. Peeked from the shelf, it is
+           // shown on its own.
+           !sidebarPanes.contains(pane.id),
            !hasAgentOverview(for: pane) {
             // Opened for every terminal pane, agent or not.
             //
@@ -4685,6 +4722,19 @@ class BaseTerminalController: NSWindowController,
         return event
     }
 
+    /// The overview the arrow keys page through, if any.
+    ///
+    /// Selection first — clicking an overview is the deliberate "this is the
+    /// pane I am reading", and it survives the pointer wandering off — then
+    /// the overview under the pointer for everything else.
+    private var turnPagingOverview: AgentOverviewPane? {
+        if let selected = selectedNonSurfacePane,
+           let overview = agentOverviewPanes.first(where: { ObjectIdentifier($0) == selected }) {
+            return overview
+        }
+        return agentOverviewPanes.first { $0.isPointerOver }
+    }
+
     private func localEventKeyDown(_ event: NSEvent) -> NSEvent? {
         if window?.isKeyWindow == true,
            temporaryURLPreview != nil,
@@ -4695,12 +4745,19 @@ class BaseTerminalController: NSWindowController,
 
         // Left and right page through an overview's turns.
         //
-        // Scoped to the overview under the pointer, because an overview has no
-        // way to hold the keyboard: the panes that take focus are terminals,
-        // and peeking an overview focuses the terminal beside it on purpose so
-        // the agent is ready to type at. Taking the arrows from whatever has
-        // focus would break line editing at that prompt, which is where those
-        // keys are used most.
+        // Scoped to the overview the user is working in: the selected one if
+        // an overview holds the selection, otherwise the one under the
+        // pointer. An overview has no way to hold the keyboard — the panes
+        // that take focus are terminals, and peeking an overview focuses the
+        // terminal beside it on purpose so the agent is ready to type at — so
+        // clicking it, which selects it and rings it exactly as clicking a
+        // terminal focuses one, is how it gets the arrows. Pointing remains a
+        // fallback so a glance at a second overview still pages without
+        // taking the selection off the first.
+        //
+        // Never taken from a text field: the composer at the foot of an
+        // overview is typed into while that overview is still selected, and a
+        // caret that cannot move left is worse than no shortcut.
         //
         // The key is only swallowed when that overview can actually move —
         // at the newest turn, right goes back to the terminal untouched — so
@@ -4708,7 +4765,8 @@ class BaseTerminalController: NSWindowController,
         if window?.isKeyWindow == true,
            event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
            event.keyCode == 123 || event.keyCode == 124,
-           let overview = agentOverviewPanes.first(where: { $0.isPointerOver }) {
+           !(window?.firstResponder is NSText),
+           let overview = turnPagingOverview {
             if event.keyCode == 123, overview.canShowPreviousTurn {
                 overview.showPreviousTurn()
                 return nil
@@ -5218,6 +5276,7 @@ class BaseTerminalController: NSWindowController,
         }
         guard validateRemoteHostOrPresentError(host) else { return }
         UserDefaults.standard.set(host, forKey: Self.lastRemoteHostDefaultsKey)
+        Self.rememberRemoteHost(host)
 
         // The remote session name is generated here so it can be recorded in
         // the checkpoint and reattached later.
@@ -5305,7 +5364,7 @@ class BaseTerminalController: NSWindowController,
     /// trm machines while still allowing any destination to be typed — plenty
     /// of hosts aren't on this LAN. Returns a validated SSH destination, or
     /// nil if the user cancelled or the input was rejected.
-    private func promptForRemoteHost(
+    func promptForRemoteHost(
         messageText: String,
         informativeText: String,
         buttonTitle: String
@@ -5336,6 +5395,17 @@ class BaseTerminalController: NSWindowController,
                 combo.addItem(withObjectValue: last)
             }
         }
+        // Every destination this machine has been reached at before, so the
+        // tailnet name that worked last week can be picked rather than
+        // remembered and retyped. Bonjour only knows the addresses it is
+        // advertising right now, which is why a machine that answers to three
+        // of them was only ever offered one.
+        if let combo = input as? NSComboBox {
+            for host in Self.rememberedRemoteHosts()
+            where combo.indexOfItem(withObjectValue: host) == NSNotFound {
+                combo.addItem(withObjectValue: host)
+            }
+        }
         alert.accessoryView = input
         alert.addButton(withTitle: buttonTitle)
         alert.addButton(withTitle: "Cancel")
@@ -5345,7 +5415,31 @@ class BaseTerminalController: NSWindowController,
         let host = Self.sanitizedRemoteHost(input.stringValue)
         guard !host.isEmpty else { return nil }
         guard validateRemoteHostOrPresentError(host) else { return nil }
+        Self.rememberRemoteHost(host)
         return host
+    }
+
+    /// Destinations that have been used before, newest first.
+    static let knownRemoteHostsDefaultsKey = "KnownRemoteHosts"
+
+    static func rememberedRemoteHosts(limit: Int = 8) -> [String] {
+        let stored = UserDefaults.standard.stringArray(forKey: knownRemoteHostsDefaultsKey) ?? []
+        return Array(stored.filter(isValidRemoteHost).prefix(limit))
+    }
+
+    /// Keep a destination that worked, newest first and deduplicated.
+    ///
+    /// The list is what makes the prompt worth opening: one machine is
+    /// routinely an IP, a `.local` name and a tailnet name, and which of those
+    /// is the right one changes with where you are — a list of the ones you
+    /// have actually used is the only place that knowledge exists.
+    static func rememberRemoteHost(_ host: String, limit: Int = 8) {
+        guard isValidRemoteHost(host) else { return }
+        var hosts = UserDefaults.standard.stringArray(forKey: knownRemoteHostsDefaultsKey) ?? []
+        hosts.removeAll { $0 == host }
+        hosts.insert(host, at: 0)
+        UserDefaults.standard.set(
+            Array(hosts.prefix(limit)), forKey: knownRemoteHostsDefaultsKey)
     }
 
     /// Reject anything that could break out of the command we build, telling
@@ -5494,6 +5588,16 @@ class BaseTerminalController: NSWindowController,
     /// default and callers fall back to the host prompt (which lists every
     /// discovered machine).
     private func defaultRemoteHostIfUnambiguous() -> String? {
+        // What was chosen last beats what is being advertised. Discovery
+        // answers "which machines are there", which is a guess at the question
+        // actually being asked — and a guess that wins over an explicit choice
+        // is how a machine you deliberately addressed by its tailnet name
+        // reverts to the IP Bonjour hands out, every time, with nothing on
+        // screen to change it back.
+        if let last = UserDefaults.standard.string(forKey: Self.lastRemoteHostDefaultsKey) {
+            let host = Self.sanitizedRemoteHost(last)
+            if !host.isEmpty, Self.isValidRemoteHost(host) { return host }
+        }
         let hosts = RemoteHostDiscovery.shared.hosts
         guard hosts.count == 1 else { return nil }
         return hosts[0].sshDestination
@@ -5553,6 +5657,24 @@ class BaseTerminalController: NSWindowController,
         } else {
             newRemotePane(host: nil, at: view)
         }
+    }
+
+    /// New Remote Pane, but always asking which machine.
+    ///
+    /// The ordinary command deliberately doesn't ask when there is an obvious
+    /// answer, and that is right until the obvious answer is the wrong one:
+    /// one machine reachable as an IP, as a `.local` name and as a tailnet
+    /// name is one machine with three addresses, and only you know which of
+    /// them you want to be using today. Without this there was no way back —
+    /// the first address that stuck was the only address on offer, in every
+    /// entry point, for good.
+    ///
+    /// Hidden behind Option on the item above it, because it is the same
+    /// command with one difference, and what it picks is remembered: this is
+    /// how you change the machine, not just this pane's machine.
+    @IBAction func newRemotePaneAskingHostAction(_ sender: Any?) {
+        guard let view = focusedSurface else { return }
+        newRemotePane(host: nil, at: view)
     }
 
     /// Normalize a typed or pasted SSH destination.

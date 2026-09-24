@@ -1,7 +1,7 @@
 +++
 title = "Text Tap API"
 description = "Protocol reference for trm's Text Tap API: a Unix domain socket interface for external process integration."
-weight = 5
+weight = 6
 +++
 
 The Text Tap API is a Unix domain socket server that lets external processes subscribe to terminal output, send input to panes, and execute structured actions. It enables scripting, automation, and integration with external tools.

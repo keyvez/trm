@@ -50,3 +50,44 @@ struct RemoteHostInputTests {
         #expect(!BaseTerminalController.isValidRemoteHost(""))
     }
 }
+
+/// The list of destinations the host prompt offers.
+///
+/// One machine is routinely an IP, a `.local` name and a tailnet name, and
+/// which one is right changes with where you are. Bonjour only knows what is
+/// being advertised now, so the addresses that have actually worked are the
+/// only record of the others.
+@MainActor
+struct RememberedRemoteHostsTests {
+
+    private func clear() {
+        UserDefaults.standard.removeObject(
+            forKey: BaseTerminalController.knownRemoteHostsDefaultsKey)
+    }
+
+    @Test func aHostIsRememberedNewestFirstAndOnlyOnce() {
+        clear()
+        defer { clear() }
+        BaseTerminalController.rememberRemoteHost("g@100.93.182.104")
+        BaseTerminalController.rememberRemoteHost("g@mini.follow-ionian.ts.net")
+        BaseTerminalController.rememberRemoteHost("g@100.93.182.104")
+        #expect(BaseTerminalController.rememberedRemoteHosts() == [
+            "g@100.93.182.104", "g@mini.follow-ionian.ts.net",
+        ])
+    }
+
+    @Test func theListStaysShort() {
+        clear()
+        defer { clear() }
+        for i in 0..<12 { BaseTerminalController.rememberRemoteHost("g@host\(i).example") }
+        #expect(BaseTerminalController.rememberedRemoteHosts().count == 8)
+        #expect(BaseTerminalController.rememberedRemoteHosts().first == "g@host11.example")
+    }
+
+    @Test func nothingUnusableIsKept() {
+        clear()
+        defer { clear() }
+        BaseTerminalController.rememberRemoteHost("g@mini; rm -rf /")
+        #expect(BaseTerminalController.rememberedRemoteHosts().isEmpty)
+    }
+}

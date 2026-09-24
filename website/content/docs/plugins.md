@@ -1,7 +1,7 @@
 +++
 title = "Plugins"
 description = "Reference for all 10 trm pane plugin types: terminal, webview, notes, screen capture, file browser, process monitor, log viewer, markdown preview, system info, and git status."
-weight = 4
+weight = 5
 +++
 
 trm supports 10 built-in pane plugin types managed by an extensible plugin registry, plus automatic server URL detection across all terminal panes. Each pane in the grid can be a different type, configured via `[[panes]]` blocks in your session file.

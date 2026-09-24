@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Every pane in the window, parked or not.
 ///
@@ -44,6 +45,14 @@ struct SidebarPanesView: View {
 
     /// Close a parked pane for good.
     var onClose: ((GridPane) -> Void)? = nil
+
+    /// Expand a pane to read it, without moving it.
+    ///
+    /// ⌘-click, the same gesture that peeks a pane in the grid or a sub-pane in
+    /// a stack. It is worth more here than anywhere: a parked pane has no cell
+    /// to ⌘-click, so the shelf was the one place a pane could be listed,
+    /// described, and still unreadable without first giving it a cell back.
+    var onPeek: ((GridPane) -> Void)? = nil
 
     /// Bring every parked pane back at once.
     var onRestoreAll: (() -> Void)? = nil
@@ -260,6 +269,7 @@ struct SidebarPanesView: View {
             agentName: paneId.flatMap { agentNames[$0] },
             location: paneId.flatMap { locations[$0] },
             onPrimary: { parked ? onRestore?(pane) : onFocus?(pane) },
+            onPeek: onPeek.map { peek in { peek(pane) } },
             onClose: { onClose?(pane) }
         )
     }
@@ -305,6 +315,9 @@ private struct SidebarPaneTile: View {
     let agentName: String?
     let location: String?
     let onPrimary: () -> Void
+    /// Nil when the window can't peek right now; the gesture then falls
+    /// through to the ordinary click rather than doing nothing.
+    let onPeek: (() -> Void)?
     let onClose: () -> Void
 
     @State private var hovering = false
@@ -390,13 +403,34 @@ private struct SidebarPaneTile: View {
         )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture(perform: onPrimary)
+        .onTapGesture(perform: tapped)
         .contextMenu {
             Button(parked ? "Restore to Grid" : "Focus Pane", action: onPrimary)
+            if let onPeek {
+                Button("Peek", action: onPeek)
+            }
             Divider()
             Button("Close Pane", role: .destructive, action: onClose)
         }
-        .help(parked ? "Still running — click to bring it back" : "Click to focus this pane")
+        .help(parked
+              ? "Still running — click to bring it back, ⌘-click to read it where it is"
+              : "Click to focus this pane, ⌘-click to expand it")
+    }
+
+    /// ⌘-click peeks, a plain click does the tile's usual thing.
+    ///
+    /// The modifiers are read from the current event rather than carried by
+    /// the gesture: SwiftUI's `TapGesture` doesn't report them, and this is the
+    /// same way the grid decides a ⌘-click on a pane is a peek.
+    private func tapped() {
+        let modifiers = NSEvent.modifierFlags
+        if let onPeek,
+           modifiers.contains(.command),
+           modifiers.isDisjoint(with: [.shift, .control, .option]) {
+            onPeek()
+            return
+        }
+        onPrimary()
     }
 
     /// What to call this pane.

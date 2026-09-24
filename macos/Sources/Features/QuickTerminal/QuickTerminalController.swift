@@ -44,6 +44,11 @@ class QuickTerminalController: BaseTerminalController {
     /// the focused pane's pwd.
     private var nextInitialCwd: String?
 
+    /// When set, the next time the quick terminal drops down it shows a shell
+    /// on this machine instead of (or beside) a local one. Cleared after one
+    /// use. Set via `toggleRemote()`.
+    private var pendingRemoteHost: String?
+
     init(_ ghostty: Ghostty.App,
          position: QuickTerminalPosition = .top,
          baseConfig base: Ghostty.SurfaceConfiguration? = nil,
@@ -343,6 +348,145 @@ class QuickTerminalController: BaseTerminalController {
         animateIn()
     }
 
+    /// Toggle the quick terminal with a shell that runs on another machine.
+    ///
+    /// The host is the last remote destination trm used — the same
+    /// `LastRemoteHost` a new remote pane prefills with — so the usual case
+    /// is one keystroke and no questions. With nothing remembered, a single
+    /// trm advertising on Bonjour is taken as the answer; failing that the
+    /// normal host prompt appears, and what it returns is remembered so the
+    /// next drop-down is silent.
+    func toggleRemote() {
+        // Closing never asks a question.
+        if visible {
+            animateOut()
+            return
+        }
+        guard let host = resolvedRemoteHost() else { return }
+        UserDefaults.standard.set(host, forKey: BaseTerminalController.lastRemoteHostDefaultsKey)
+        pendingRemoteHost = host
+        animateIn()
+    }
+
+    /// Which machine `toggleRemote()` should connect to, asking only when
+    /// there is nothing to infer.
+    private func resolvedRemoteHost() -> String? {
+        if let last = UserDefaults.standard.string(
+            forKey: BaseTerminalController.lastRemoteHostDefaultsKey) {
+            let host = BaseTerminalController.sanitizedRemoteHost(last)
+            if BaseTerminalController.isValidRemoteHost(host) { return host }
+        }
+
+        let discovered = RemoteHostDiscovery.shared.hosts
+        if discovered.count == 1 {
+            let host = BaseTerminalController.sanitizedRemoteHost(discovered[0].sshDestination)
+            if BaseTerminalController.isValidRemoteHost(host) { return host }
+        }
+
+        // The binding is global, so this can fire while another app is in
+        // front — where a modal would otherwise open behind it, unanswerable.
+        NSApp.activate(ignoringOtherApps: true)
+        return promptForRemoteHost(
+            messageText: "Quick Terminal on Remote",
+            informativeText: """
+            Which machine should the quick terminal run on?
+
+            Requires key-based SSH to the host and trm installed there. The \
+            session lives on that machine: it keeps running while the quick \
+            terminal is hidden, and drops back down where you left it.
+            """,
+            buttonTitle: "Open Quick Terminal")
+    }
+
+    /// A surface attached to this host's quick terminal session.
+    ///
+    /// The session name is remembered per host, so the drop-down comes back
+    /// to the shell it had — with whatever was left running in it — rather
+    /// than a fresh one, and that shell survives trm quitting because the
+    /// session daemon lives on the remote machine.
+    private func makeRemoteSurface(host: String, app: ghostty_app_t) -> Ghostty.SurfaceView {
+        let session = remoteSessionName(for: host)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = BaseTerminalController.remoteAttachCommand(
+            host: host,
+            session: session,
+            zmxPath: BaseTerminalController.defaultRemoteZmxPath)
+        // A dropped link leaves the surface standing with its "process
+        // exited" note instead of closing the quick terminal out from under
+        // the user, exactly as it does for a remote grid pane.
+        config.waitAfterCommand = true
+        config.environmentVariables["GHOSTTY_QUICK_TERMINAL"] = "1"
+
+        let view = Ghostty.SurfaceView(app, baseConfig: config)
+        view.remoteHost = host
+        view.remoteZmxSession = session
+        return view
+    }
+
+    /// Bring this host's session into a quick terminal that is already
+    /// showing something.
+    private func showRemoteSession(host: String) {
+        // Already down there and alive: the session is still attached, so
+        // there is nothing to spawn — just put the cursor back in it.
+        if let live = Array(surfaceTree).first(
+            where: { $0.remoteHost == host && !$0.processExited }) {
+            focusedSurface = live
+            DispatchQueue.main.async { Ghostty.moveFocus(to: live) }
+            return
+        }
+
+        guard let ghostty_app = ghostty.app else { return }
+        let view = makeRemoteSurface(host: host, app: ghostty_app)
+
+        // A link that died between drop-downs leaves a dead surface behind.
+        // The reattach takes its place rather than stacking up beside it —
+        // and because the session name is the same, it picks the shell up
+        // where the connection dropped it.
+        if let dead = Array(surfaceTree).first(where: { $0.remoteHost == host }),
+           let node = surfaceTree.root?.node(view: dead),
+           let replaced = try? surfaceTree.replacing(node: node, with: .leaf(view: view)) {
+            surfaceTree = replaced
+            focusedSurface = view
+            DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
+            return
+        }
+
+        // Otherwise the remote shell joins what is already there. A local
+        // quick terminal shell can be mid-command; asking for the remote one
+        // is not a reason to take it away.
+        guard let anchor = focusedSurface ?? Array(surfaceTree).first,
+              let grown = try? surfaceTree.inserting(
+                view: view, at: anchor, direction: .right) else { return }
+        surfaceTree = grown
+        focusedSurface = view
+        DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
+    }
+
+    /// UserDefaults key prefix for a host's quick terminal session name.
+    private static let remoteSessionDefaultsPrefix = "QuickTerminalRemoteSession-"
+
+    /// The zmx session on `host` that this machine's quick terminal owns,
+    /// creating a name for it the first time.
+    private func remoteSessionName(for host: String) -> String {
+        let key = Self.remoteSessionDefaultsPrefix + host
+        if let existing = UserDefaults.standard.string(forKey: key),
+           Self.isValidSessionName(existing) {
+            return existing
+        }
+        let session = ZmxSessionManager.newSessionName()
+        UserDefaults.standard.set(session, forKey: key)
+        return session
+    }
+
+    /// The session name is interpolated into a shell command on the remote
+    /// machine, so it is checked on the way out of defaults rather than
+    /// trusted — defaults are a writable file, not our own memory.
+    private static func isValidSessionName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.count <= 64 else { return false }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        return name.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
     func animateIn() {
         guard let window = self.window else { return }
 
@@ -382,11 +526,21 @@ class QuickTerminalController: BaseTerminalController {
                 // Each SurfaceWrapper defaults its FocusedValue to itself; without this delay,
                 // the tree often focuses the first surface instead of the intended one.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    if !view.focused {
+                    // Only if nothing else claimed focus meanwhile: a remote
+                    // drop-down onto a restored quick terminal focuses the
+                    // surface it just opened, and this must not take it back.
+                    if !view.focused, self.focusedSurface === view {
                         self.focusedSurface = view
                         self.makeWindowKey(window)
                     }
                 }
+            } else if let host = pendingRemoteHost {
+                // Nothing to preserve, so the remote shell IS the quick
+                // terminal rather than a split beside an empty one.
+                pendingRemoteHost = nil
+                let view = makeRemoteSurface(host: host, app: ghostty_app)
+                surfaceTree = SplitTree(view: view)
+                focusedSurface = view
             } else {
                 var config = Ghostty.SurfaceConfiguration()
                 if let cwd = nextInitialCwd, !cwd.isEmpty {
@@ -401,6 +555,13 @@ class QuickTerminalController: BaseTerminalController {
                 surfaceTree = SplitTree(view: view)
                 focusedSurface = view
             }
+        }
+
+        // If a remote host was requested and the quick terminal already had
+        // surfaces, show that machine's session among them.
+        if let host = pendingRemoteHost {
+            pendingRemoteHost = nil
+            showRemoteSession(host: host)
         }
 
         // If a cwd was requested and the surface already existed, cd into it.

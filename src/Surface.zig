@@ -3880,6 +3880,38 @@ pub fn bracketedPaste(self: *Surface) bool {
     return self.io.terminal.modes.get(.bracketed_paste);
 }
 
+/// Forget that any mouse button is held down, without acting as if it was
+/// released.
+///
+/// A press has to be matched by a release or the surface goes on believing
+/// the button is held: every pointer movement after that extends a selection,
+/// so the text starts selecting itself under a mouse nobody is pressing, and
+/// a drag that ran off the edge of the viewport keeps the scroll timer going
+/// too. The apprt cannot always deliver that release — a click can be
+/// interrupted by the view being reparented, by the application deactivating,
+/// or by the release arriving as a different kind of event than the press —
+/// so this is how it says "whatever I told you about the button, it is up
+/// now".
+///
+/// Deliberately not a synthetic release: releasing opens a hovered link,
+/// moves the shell's cursor on a prompt click, and rewrites the selection
+/// clipboard. None of those should happen because a window lost focus.
+pub fn mouseCancel(self: *Surface) void {
+    // Crash metadata in case we crash in here
+    crash.sentry.thread_state = self.crashThreadState();
+    defer crash.sentry.thread_state = null;
+
+    self.mouse.click_state = @splat(.release);
+    self.mouse.left_click_count = 0;
+    self.mouse.pressure_stage = .none;
+
+    // Selection scrolling only ever stops on a release, so a cancelled drag
+    // would otherwise leave the viewport crawling on its own.
+    if (self.selection_scroll_active) {
+        self.queueIo(.{ .selection_scroll = false }, .unlocked);
+    }
+}
+
 /// Called for mouse button press/release events. This will return true
 /// if the mouse event was consumed in some way (i.e. the program is capturing
 /// mouse events). If the event was not consumed, then false is returned.

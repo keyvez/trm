@@ -802,6 +802,21 @@ pub const Action = union(enum) {
     /// configuration file to customize its behavior.
     toggle_quick_terminal,
 
+    /// Same as `toggle_quick_terminal`, but the shell inside it runs on
+    /// another machine over SSH rather than on this one.
+    ///
+    /// The destination is the one trm last used for a remote pane; with
+    /// nothing remembered, a single trm advertising on Bonjour is used, and
+    /// failing that you are asked once and the answer is kept. The session
+    /// lives on the far machine under its own daemon, so the drop-down comes
+    /// back to the shell it had rather than a fresh one.
+    ///
+    /// Like `toggle_quick_terminal`, this is best used with a *global*
+    /// keybind, and is bound by default to `` global:ctrl+alt+` ``.
+    ///
+    /// This action is only implemented on macOS.
+    toggle_quick_terminal_remote,
+
     /// Show or hide all windows. If all windows become shown, we also ensure
     /// Ghostty becomes focused. When hiding all windows, focus is yielded
     /// to the next application as determined by the OS.
@@ -1294,6 +1309,7 @@ pub const Action = union(enum) {
             .close_all_windows,
             .quit,
             .toggle_quick_terminal,
+            .toggle_quick_terminal_remote,
             .toggle_visibility,
             .check_for_updates,
             .show_gtk_inspector,

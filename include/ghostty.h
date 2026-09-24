@@ -853,6 +853,7 @@ typedef enum {
   GHOSTTY_ACTION_TOGGLE_TAB_OVERVIEW,
   GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS,
   GHOSTTY_ACTION_TOGGLE_QUICK_TERMINAL,
+  GHOSTTY_ACTION_TOGGLE_QUICK_TERMINAL_REMOTE,
   GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE,
   GHOSTTY_ACTION_TOGGLE_VISIBILITY,
   GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY,
@@ -1087,6 +1088,7 @@ bool ghostty_surface_mouse_button(ghostty_surface_t,
                                   ghostty_input_mouse_state_e,
                                   ghostty_input_mouse_button_e,
                                   ghostty_input_mods_e);
+void ghostty_surface_mouse_cancel(ghostty_surface_t);
 void ghostty_surface_mouse_pos(ghostty_surface_t,
                                double,
                                double,

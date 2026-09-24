@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Configuration — AI-Native Terminal Emulator</title>
-    <meta name="description" content="Complete reference for trm&#x27;s TOML configuration files.">
+    <meta name="description" content="Complete reference for trm&#39;s TOML configuration files.">
     <link rel="stylesheet" href="/css/style.css">
     <link rel="icon" type="image/png" href="/favicon.png">
     <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
@@ -20,6 +20,7 @@
             <div class="nav-links">
                 <a href="/docs/installation">Install</a>
                 <a href="/docs/configuration">Config</a>
+                <a href="/docs/command-center">Command Center</a>
                 <a href="/docs/plugins">Plugins</a>
                 <a href="/docs/text-tap-api">API</a>
                 <a href="/docs/keyboard-shortcuts">Shortcuts</a>
@@ -71,7 +72,7 @@
 <hr />
 <h2 id="font">[font]</h2>
 <p>Typography settings for all terminal panes. Only in <code>config.toml</code>.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">font</span><span style="color: #89DDFF;">]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">font</span><span style="color: #89DDFF;">]</span></span>
 <span class="giallo-l"><span>family</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">SF Mono</span><span style="color: #89DDFF;">&quot;</span><span style="color: #464B5D;font-style: italic;">         # Font family name</span></span>
 <span class="giallo-l"><span>size</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 14.0</span><span style="color: #464B5D;font-style: italic;">                # Font size in points</span></span>
 <span class="giallo-l"><span>line_height</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 1.2</span><span style="color: #464B5D;font-style: italic;">          # Line height multiplier (1.0 = tight)</span></span>
@@ -86,7 +87,7 @@
 <hr />
 <h2 id="grid">[grid]</h2>
 <p>Grid layout for the pane tiling system. Only in <code>config.toml</code> (but <code>rows</code>/<code>cols</code> can be overridden by session files).</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">grid</span><span style="color: #89DDFF;">]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">grid</span><span style="color: #89DDFF;">]</span></span>
 <span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
 <span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
 <span class="giallo-l"><span>gap</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 4</span></span>
@@ -105,7 +106,7 @@
 <hr />
 <h2 id="window">[window]</h2>
 <p>Initial window dimensions and title. Only in <code>config.toml</code> (title can be overridden by session).</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">window</span><span style="color: #89DDFF;">]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">window</span><span style="color: #89DDFF;">]</span></span>
 <span class="giallo-l"><span>width</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 1920</span></span>
 <span class="giallo-l"><span>height</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 1080</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">trm</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
@@ -116,7 +117,7 @@
 <hr />
 <h2 id="colors">[colors]</h2>
 <p>Color scheme for all terminal panes. All values are hex strings (<code>#RRGGBB</code> or <code>#RRGGBBAA</code>). Only in <code>config.toml</code>.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">colors</span><span style="color: #89DDFF;">]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">colors</span><span style="color: #89DDFF;">]</span></span>
 <span class="giallo-l"><span>background</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#010409</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>foreground</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#e6edf3</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>cursor</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">#f0f6fc</span><span style="color: #89DDFF;">&quot;</span></span>
@@ -157,7 +158,7 @@
 <hr />
 <h2 id="text-tap">[text_tap]</h2>
 <p>The Text Tap API server. See the <a href="/docs/text-tap-api/">Text Tap API</a> reference for protocol details. Only in <code>config.toml</code>.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">text_tap</span><span style="color: #89DDFF;">]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">text_tap</span><span style="color: #89DDFF;">]</span></span>
 <span class="giallo-l"><span>enabled</span><span style="color: #89DDFF;"> =</span><span style="color: #FF9CAC;"> true</span></span>
 <span class="giallo-l"><span>socket_path</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/tmp/trm.sock</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>enabled</code></td><td>Boolean</td><td><code>true</code></td><td>Enable/disable the Unix socket server</td></tr>
@@ -166,7 +167,7 @@
 <hr />
 <h2 id="llm">[llm]</h2>
 <p>LLM integration for the AI command palette (<code>Cmd+Shift+Enter</code>). Supports Anthropic, OpenAI, Ollama, and custom OpenAI-compatible endpoints. Only in <code>config.toml</code>.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">llm</span><span style="color: #89DDFF;">]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[</span><span style="color: #FFCB6B;">llm</span><span style="color: #89DDFF;">]</span></span>
 <span class="giallo-l"><span>provider</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">anthropic</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># api_key = &quot;sk-...&quot;          # Or set ANTHROPIC_API_KEY env var</span></span>
 <span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># model = &quot;claude-sonnet-4-20250514&quot;</span></span>
@@ -190,7 +191,7 @@
 <tr><td><code>title</code></td><td>String?</td><td>Auto-generated</td><td>Custom title for the pane's title bar</td></tr>
 </tbody></table>
 <h3 id="terminal-pane-fields">Terminal pane fields</h3>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Dev Shell</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>command</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/bin/zsh</span><span style="color: #89DDFF;">&quot;</span></span>
@@ -205,14 +206,14 @@
 <tr><td><code>env</code></td><td>[String, String][]?</td><td><code>None</code></td><td>Extra environment variables</td></tr>
 </tbody></table>
 <h3 id="webview-pane-fields">WebView pane fields</h3>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">webview</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Docs</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>url</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">https://docs.rs</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>url</code></td><td>String?</td><td><code>None</code></td><td>URL to load in the embedded browser</td></tr>
 </tbody></table>
 <h3 id="notes-pane-fields">Notes pane fields</h3>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">notes</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Scratch</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>content</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Type here...</span><span style="color: #89DDFF;">&quot;</span></span>
@@ -225,13 +226,13 @@
 <hr />
 <h2 id="session-level-overrides">Session-Level Overrides</h2>
 <p>Session files (<code>trm.toml</code>) support these top-level keys that override <code>config.toml</code>:</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">My Project</span><span style="color: #89DDFF;">&quot;</span><span style="color: #464B5D;font-style: italic;">     # Overrides [window] title</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">My Project</span><span style="color: #89DDFF;">&quot;</span><span style="color: #464B5D;font-style: italic;">     # Overrides [window] title</span></span>
 <span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span><span style="color: #464B5D;font-style: italic;">                 # Overrides [grid] rows</span></span>
 <span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span><span style="color: #464B5D;font-style: italic;">                 # Overrides [grid] cols</span></span>
 <span class="giallo-l"></span>
 <span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># ... pane definitions</span></span></code></pre><h2 id="cli-usage">CLI Usage</h2>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #464B5D;font-style: italic;">                              # Default config/session</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="shellscript"><span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #464B5D;font-style: italic;">                              # Default config/session</span></span>
 <span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> --config path/to/session.toml</span><span style="color: #464B5D;font-style: italic;">    # Specific session file</span></span>
 <span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> -h / --help</span><span style="color: #464B5D;font-style: italic;">                  # Print help</span></span>
 <span class="giallo-l"><span style="color: #FFCB6B;">trm</span><span style="color: #C3E88D;"> -v / --version</span><span style="color: #464B5D;font-style: italic;">               # Print version</span></span></code></pre><h2 id="environment-variables">Environment Variables</h2>
@@ -255,6 +256,7 @@
                     <a href="/docs/installation">Installation</a>
                     <a href="/docs/configuration">Configuration</a>
                     <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                    <a href="/docs/command-center">Command Center</a>
                 </div>
                 <div class="footer-col">
                     <h4>Features</h4>

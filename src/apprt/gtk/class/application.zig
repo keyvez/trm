@@ -770,6 +770,7 @@ pub const Application = extern struct {
             .close_all_windows,
             .float_window,
             .toggle_visibility,
+            .toggle_quick_terminal_remote,
             .toggle_background_opacity,
             .cell_size,
             .render_inspector,

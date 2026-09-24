@@ -862,11 +862,17 @@ final class CommandCenterServer: ObservableObject {
                 "needsAttention": entry.needsAttention,
                 "errors": entry.errorCount,
             ]
+            // The same fallback the panel uses. A stored briefing exists only
+            // once the summarizer has answered for *this* message, so without
+            // this the phone would show a row with no line on it at all while
+            // it waits — and every row, forever, on a machine with no LLM
+            // configured. The local one is built from the turn on screen: what
+            // failed, then the agent's own account of the work under its
+            // opening sentence.
             let briefing = CommandCenterMonitor.shared.briefings[entry.id]
-            row["briefing"] = briefing?.sentence
-            // Prose bullets or none — the phone shouldn't show a column of
-            // command lines any more than the panel should.
-            row["bullets"] = briefing?.bullets ?? []
+                ?? CommandCenterMonitor.localBriefing(for: entry)
+            row["briefing"] = briefing.sentence
+            row["bullets"] = briefing.bullets
             row["location"] = entry.location
             row["host"] = entry.host
             row["prompt"] = entry.prompt

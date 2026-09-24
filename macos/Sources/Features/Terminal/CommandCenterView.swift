@@ -587,20 +587,25 @@ struct CommandCenterView: View {
                 .onTapGesture { rowTap(entry) }
 
                 // What was done, above the conclusion it led to: read down
-                // the bullets to judge whether the sentence is the whole
-                // story, or skip them and take the sentence.
+                // the detail to judge whether the sentence is the whole
+                // story, or skip it and take the sentence.
                 if !briefingBullets(entry).isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 4) {
                         ForEach(briefingBullets(entry), id: \.self) { bullet in
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 Text("•")
                                     .font(.system(size: 10, design: .monospaced))
                                     .foregroundStyle(.tertiary)
+                                // Three lines, ending at the end. A bullet is
+                                // a whole sentence about what came of the work
+                                // — a path, a figure, an error in its own
+                                // words — and a line with its middle cut out
+                                // loses exactly those.
                                 Text(bullet)
-                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .font(.system(size: 12, design: .monospaced))
                                     .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+                                    .lineLimit(3)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
@@ -612,7 +617,7 @@ struct CommandCenterView: View {
                     .foregroundStyle(.primary)
                     .lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: fixedHeight == nil)
-                    .lineLimit(fixedHeight == nil ? nil : 3)
+                    .lineLimit(fixedHeight == nil ? nil : 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 // The escalation line: only drawn when something actually
@@ -664,22 +669,35 @@ struct CommandCenterView: View {
         .help("Click to reply · ⌘-click for the Agent Overview · double-click the header for the pane · double-click the watermark to rename")
     }
 
-    /// Briefing tiles: a few bullets, one sentence, one escalation line, and a
-    /// reply box twice the height of the detail view's — grown to fit them.
-    private static let briefingTileHeight: CGFloat = 254
+    /// Briefing tiles: up to five detail lines of three lines each, the
+    /// headline, one escalation line, and a reply box twice the height of the
+    /// detail view's — grown to fit them. Every tile is the same height so the
+    /// board reads as a grid, which means the tallest thing a row can say sets
+    /// it. A tile is read instead of the pane, so it is sized for a paragraph
+    /// of the agent's own account rather than for a glance.
+    private static let briefingTileHeight: CGFloat = 420
 
-    /// The headline for a row: the model's sentence when it has answered,
-    /// the message's own opening sentence until then.
+    /// The headline for a row: the model's sentence when it has answered, the
+    /// message's own opening sentence until then.
     private func briefingSentence(_ entry: CommandCenterMonitor.Entry) -> String {
         monitor.briefings[entry.id]?.sentence
-            ?? CommandCenterMonitor.firstSentence(of: entry.message)
+            ?? CommandCenterMonitor.localBriefing(for: entry).sentence
     }
 
-    /// The lines above it, when the summary has more to say than its
-    /// sentence. Empty is the normal case and reads fine: a row is a sentence
-    /// unless there is genuinely more.
+    /// The detail above it: what the agent has actually done this turn, what
+    /// failed, what it is waiting on.
+    ///
+    /// The model's lines when it has answered, and the live ones built from
+    /// the entry until then — which is also the whole of the detail on a
+    /// machine with no LLM configured. Either way these are sentences about
+    /// the work, not the tool calls that did it: the commands were here once,
+    /// and a column of them told you less than the agent's own next paragraph
+    /// does.
     private func briefingBullets(_ entry: CommandCenterMonitor.Entry) -> [String] {
-        monitor.briefings[entry.id]?.bullets ?? []
+        if let bullets = monitor.briefings[entry.id]?.bullets, !bullets.isEmpty {
+            return bullets
+        }
+        return CommandCenterMonitor.localBriefing(for: entry).bullets
     }
 
     /// How much of your attention a pane is asking for. Ordered by how much

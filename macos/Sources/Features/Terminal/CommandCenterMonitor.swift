@@ -62,9 +62,10 @@ final class CommandCenterMonitor: ObservableObject {
         /// transcript records it. The reply box walks back through this.
         let promptHistory: [String]
         /// What the agent actually did this turn, newest last: the tool calls,
-        /// as short phrases. The briefing shows these above its sentence when
-        /// nothing better is available, and they are what the summarizer is
-        /// given to write from.
+        /// as short phrases. Context for the summarizer, which is told to
+        /// write about what came of them rather than to list them — a briefing
+        /// never shows these as they are, since a command is what the terminal
+        /// one pane away is already displaying.
         let activity: [String]
         /// Links found anywhere in the agent's message, whole.
         ///
@@ -118,10 +119,12 @@ final class CommandCenterMonitor: ObservableObject {
     struct Briefing: Equatable {
         /// One sentence, the thing you read first.
         let sentence: String
-        /// Short phrases in English, or empty. Deliberately never the tool
-        /// calls themselves: "Bash npm test" names the command, not what came
-        /// of it, and a column of those is the thing the terminal is already
-        /// showing one pane away.
+        /// Whole sentences of English, or empty — the substance the headline
+        /// had no room for. Deliberately never the tool calls themselves:
+        /// "Bash npm test" names the command, not what came of it, and a
+        /// column of those is the thing the terminal is already showing one
+        /// pane away. What earns the space is what the agent found, changed,
+        /// or is stuck on, in its own words.
         let bullets: [String]
     }
 
@@ -609,12 +612,18 @@ final class CommandCenterMonitor: ObservableObject {
         return result
     }
 
-    /// The agent's message as one paragraph of plain text.
+    /// The agent's message as plain text, paragraphs and all.
     ///
     /// Code blocks and images are dropped rather than flattened: this is a
     /// glanceable summary, and a wall of code in a one-line row tells you
     /// nothing about what the agent is doing.
-    static func summarize(_ blocks: [AgentTranscript.Block], limit: Int = 600) -> String {
+    ///
+    /// The cap is deliberately roomy. It is what a briefing writes its detail
+    /// lines from and what the summarizer is given to read, and an agent's
+    /// account of its own turn — what it changed, what it found, what is left
+    /// — is usually two or three paragraphs in. Cut it at a paragraph and the
+    /// board ends up reporting the throat-clearing.
+    static func summarize(_ blocks: [AgentTranscript.Block], limit: Int = 2000) -> String {
         var parts: [String] = []
         for block in blocks {
             guard case .paragraph(let text) = block else { continue }
@@ -651,24 +660,29 @@ final class CommandCenterMonitor: ObservableObject {
             let hash = entry.message.hashValue
             guard briefingHashes[entry.id] != hash else { continue }
             briefingHashes[entry.id] = hash
-            // Something to read immediately: the opening sentence, and the
-            // tool calls as they stand. The model replaces both when it
-            // answers.
-            // Until the summarizer answers there is a sentence and nothing
-            // else. The tool calls are what it writes *from*, not something to
-            // show: "Bash npm test" is the command, not what was done with it.
-            briefings[entry.id] = Briefing(
-                sentence: Self.firstSentence(of: entry.message),
-                bullets: [])
+            // A stored briefing belongs to the message it was written from, so
+            // a new message drops it rather than leaving the last turn's
+            // sentence sitting over this turn's work — the failure that makes
+            // a row read as describing something else entirely. Until the
+            // model answers the row falls back to `localBriefing`, which is
+            // rebuilt from the live entry on every scan and so can only ever
+            // describe the turn in front of you.
+            briefings[entry.id] = nil
 
             guard !briefingsInFlight.contains(entry.id) else { continue }
             briefingsInFlight.insert(entry.id)
             let message = entry.message
             let prompt = entry.prompt
             let activity = entry.activity
+            let errorCount = entry.errorCount
+            let errorText = entry.errorText
+            let isWorking = entry.isWorking
+            let needsAttention = entry.needsAttention
             Task { [weak self] in
                 let summary = await Self.summarize(
-                    message: message, prompt: prompt, activity: activity)
+                    message: message, prompt: prompt, activity: activity,
+                    errorCount: errorCount, errorText: errorText,
+                    isWorking: isWorking, needsAttention: needsAttention)
                 guard let self else { return }
                 self.briefingsInFlight.remove(entry.id)
                 // Only accept it if the pane hasn't moved on while we waited.
@@ -682,33 +696,218 @@ final class CommandCenterMonitor: ObservableObject {
     /// provider, the call fails, or it comes back empty — each of which leaves
     /// the local first-sentence summary in place.
     private static func summarize(
-        message: String, prompt: String?, activity: [String]
+        message: String, prompt: String?, activity: [String],
+        errorCount: Int = 0, errorText: String? = nil,
+        isWorking: Bool = false, needsAttention: Bool = false
     ) async -> Briefing? {
+        // The state goes in as well as the words. A summarizer given only the
+        // message writes about the message, which reads as a report on a turn
+        // that has finished even when the pane is mid-tool or blocked on a
+        // question — the two states a board exists to tell apart.
+        let state: String
+        if needsAttention {
+            state = "It has asked the person a question and is blocked on the answer."
+        } else if isWorking {
+            state = "It is still working: this turn is not finished."
+        } else {
+            state = "It has stopped and is waiting for the person."
+        }
+        let errors: String? = errorCount > 0
+            ? "Failed tool calls this turn: \(errorCount)."
+                + (errorText.map { " The last one said: \($0)" } ?? "")
+            : nil
         let body = [
             prompt.map { "The person asked: \($0)" },
-            activity.isEmpty ? nil : "Tools it ran:\n" + activity.map { "- \($0)" }.joined(separator: "\n"),
+            state,
+            errors,
+            activity.isEmpty ? nil : "Tools it ran, oldest first:\n"
+                + activity.map { "- \($0)" }.joined(separator: "\n"),
             "The agent's message:\n\(message)",
         ].compactMap { $0 }.joined(separator: "\n\n")
 
         do {
             let text = try await Trm.shared.llmClient.complete(
-                system: "Summarize what a coding agent just did in ONE sentence, at most 18 "
-                    + "words, in past tense, plain text, no markdown. Lead with the outcome, "
-                    + "not the process. If the agent is asking the person something, say what "
-                    + "it needs. If it hit an error it could not resolve, say so plainly. "
-                    + "Put that sentence on the first line.\n\n"
-                    + "Then, ONLY if there is more worth knowing than the sentence carries, "
-                    + "add up to three bullets on their own lines starting with \"- \". "
-                    + "Each is a short plain-English phrase about what changed or what was "
-                    + "learned — never a command line, a tool name, or a flag. Write "
-                    + "\"rewrote the retry loop\", not \"Bash: npm test\". If the sentence "
-                    + "already says everything, give no bullets at all. No other text.",
+                system: "You are writing one row of a status board for a coding agent working "
+                    + "unattended. The person reads the row instead of reading the terminal, so "
+                    + "it has to carry the substance of the turn — enough to know what happened "
+                    + "without going and looking.\n\n"
+                    + "First line: what it did, or what it needs, in one sentence of at most 30 "
+                    + "words, past tense, plain text, no markdown. Lead with the outcome, not "
+                    + "the process. If the agent is asking the person something, say what it "
+                    + "needs. If it hit an error it could not resolve, say so plainly.\n\n"
+                    + "Then three to five bullets on their own lines starting with \"- \", each "
+                    + "a full sentence of roughly 15 to 30 words explaining a piece of the work "
+                    + "the headline had no room for: what it changed and why, what it found, "
+                    + "what the numbers were, what the error actually said, what is still "
+                    + "unfinished and what it plans to do about it. Name files, components and "
+                    + "figures. Write about what came of the work, never about the tools that "
+                    + "did it: \"Rewrote the retry loop in Session.zig so a dropped socket "
+                    + "reconnects instead of killing the pane\" is a bullet; \"Bash: npm test\" "
+                    + "and \"Read daemon.zig\" are not — they are commands, and the person can "
+                    + "already see those in the terminal. Prefer explaining fewer things "
+                    + "properly over listing many things thinly. No other text.",
                 user: body,
-                maxTokens: 80)
+                maxTokens: 600)
             return parseBriefing(text)
         } catch {
             return nil
         }
+    }
+
+    /// What can be said about a pane from what is already known, with no model
+    /// involved.
+    ///
+    /// This is what a row shows until the summarizer answers, and *everything*
+    /// it shows where no LLM is configured, so it has to be worth reading on
+    /// its own.
+    ///
+    /// It used to be the message's opening sentence and then the last few tool
+    /// calls — "Read daemon.zig", "Bash zig build test". Those are commands,
+    /// and a command is the one thing the board does not need to carry: the
+    /// terminal one pane away is already showing it, and naming it says
+    /// nothing about what came of it. What the row is for is the substance of
+    /// the turn, so the detail lines are now the rest of what the agent
+    /// actually wrote — the paragraphs under its opening sentence, which is
+    /// where an agent puts what it found, what it changed and what is left.
+    /// Only the failures keep a line of their own, because a turn's errors are
+    /// an outcome rather than a command and the message often doesn't mention
+    /// them at all.
+    ///
+    /// Rebuilt from the live entry every time the board draws rather than
+    /// stored, so it cannot describe a turn that has moved on.
+    nonisolated static func localBriefing(for entry: Entry) -> Briefing {
+        let sentence = firstSentence(of: entry.message, limit: headlineLimit)
+        var bullets: [String] = []
+        if entry.errorCount > 0 {
+            let count = entry.errorCount == 1 ? "1 failed call" : "\(entry.errorCount) failed calls"
+            bullets.append(entry.errorText.map { "\(count): \($0)" } ?? "\(count) this turn")
+        }
+        bullets.append(contentsOf: detail(of: entry.message, after: sentence))
+        if bullets.isEmpty, let prompt = entry.prompt, !prompt.isEmpty {
+            bullets.append("You asked: \(firstSentence(of: prompt, limit: 160))")
+        }
+        return Briefing(sentence: sentence, bullets: Array(bullets.prefix(maxBullets)))
+    }
+
+    /// How many detail lines a briefing carries, from the model or from the
+    /// message itself. The board has the room, and the row is read instead of
+    /// the terminal rather than on the way to it.
+    static let maxBullets = 5
+
+    /// How long a briefing's headline may run. Two lines' worth: a sentence
+    /// that says what happened is longer than one that says a tool ran.
+    static let headlineLimit = 240
+
+    /// How long one of those lines may run before it is cut. Generous on
+    /// purpose: a sentence of an agent's own prose is worth three of the
+    /// clipped phrases this used to show.
+    static let detailLimit = 220
+
+    /// The agent's own words after its opening sentence, as whole sentences.
+    ///
+    /// Fenced code is dropped — a board row is prose, and a diff pasted into
+    /// one is unreadable at this size — and list markers come off while their
+    /// text stays, since an agent's list items are usually the very things
+    /// worth reading. Everything the headline already said is skipped, so the
+    /// detail starts where the sentence above it stopped.
+    nonisolated static func detail(
+        of message: String, after headline: String, limit: Int = maxBullets
+    ) -> [String] {
+        guard limit > 0 else { return [] }
+        var pieces = sentences(in: message)
+        // The headline may have been truncated, or joined from several lines,
+        // so it is matched by its opening rather than whole.
+        let head = headline.hasSuffix("…") ? String(headline.dropLast()) : headline
+        if !head.isEmpty {
+            while let first = pieces.first,
+                  first.hasPrefix(head) || head.hasPrefix(first) {
+                pieces.removeFirst()
+            }
+        }
+        return pieces.prefix(limit).map { truncate($0, limit: detailLimit) }
+    }
+
+    /// A message split into readable sentences: code fences dropped, block and
+    /// list markers stripped, paragraphs kept apart so a heading never runs
+    /// into the line under it.
+    nonisolated static func sentences(in message: String) -> [String] {
+        var out: [String] = []
+        var paragraph: [String] = []
+        var inFence = false
+
+        func flush() {
+            defer { paragraph = [] }
+            let joined = withoutInlineMarkdown(paragraph.joined(separator: " "))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !joined.isEmpty else { return }
+            var rest = joined
+            while let end = sentenceEnd(in: rest) {
+                let piece = String(rest[...end]).trimmingCharacters(in: .whitespaces)
+                if !piece.isEmpty { out.append(piece) }
+                rest = String(rest[rest.index(after: end)...])
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            if !rest.isEmpty { out.append(rest) }
+        }
+
+        for raw in message.components(separatedBy: .newlines) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("```") {
+                inFence.toggle()
+                flush()
+                continue
+            }
+            if inFence { continue }
+            guard !trimmed.isEmpty else { flush(); continue }
+            let line = withoutListMarker(withoutLeadingBlockMarkdown(trimmed))
+            guard !line.isEmpty else { continue }
+            // A heading, a list item and a lead-in ending in a colon are each
+            // a thought on their own; running them together loses the shape
+            // the agent wrote them in.
+            let standsAlone = trimmed.hasPrefix("#")
+                || line.count != withoutLeadingBlockMarkdown(trimmed).count
+                || line.hasSuffix(":")
+            if standsAlone {
+                flush()
+                paragraph = [line]
+                flush()
+            } else {
+                paragraph.append(line)
+            }
+        }
+        flush()
+        return out
+    }
+
+    /// A list marker at the head of a line — `-`, `*`, `•`, `1.`, `2)` — with
+    /// the item's own text left alone.
+    nonisolated static func withoutListMarker(_ line: String) -> String {
+        var rest = Substring(line)
+        if let first = rest.first, "-*•".contains(first) {
+            rest = rest.dropFirst()
+        } else {
+            let digits = rest.prefix { $0.isNumber }
+            if !digits.isEmpty, digits.count <= 2,
+               let after = rest.dropFirst(digits.count).first, ".)".contains(after) {
+                rest = rest.dropFirst(digits.count + 1)
+            } else {
+                return line
+            }
+        }
+        // "-- flag" and "**bold**" are not lists; only a marker followed by a
+        // space introduces an item.
+        guard let next = rest.first, next == " " || next == "\t" else { return line }
+        return rest.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Cut a line to length at a word boundary.
+    nonisolated static func truncate(_ text: String, limit: Int) -> String {
+        guard text.count > limit else { return text }
+        let cut = text.prefix(limit)
+        if let space = cut.lastIndex(of: " ") {
+            return String(cut[..<space]) + "…"
+        }
+        return String(cut) + "…"
     }
 
     /// Pull a briefing out of the model's reply: bullet lines, and the one
@@ -734,7 +933,7 @@ final class CommandCenterMonitor: ObservableObject {
         // last one stands in rather than showing nothing.
         let sentence = sentences.first ?? bullets.popLast() ?? ""
         guard !sentence.isEmpty else { return nil }
-        return Briefing(sentence: sentence, bullets: Array(bullets.prefix(3)))
+        return Briefing(sentence: sentence, bullets: Array(bullets.prefix(maxBullets)))
     }
 
     /// The opening sentence of a message, capped so a briefing stays one line
@@ -780,12 +979,7 @@ final class CommandCenterMonitor: ObservableObject {
         if !closed, let end = sentenceEnd(in: flat) {
             sentence = String(flat[...end])
         }
-        guard sentence.count > limit else { return sentence }
-        let cut = sentence.prefix(limit)
-        if let space = cut.lastIndex(of: " ") {
-            return String(cut[..<space]) + "…"
-        }
-        return String(cut) + "…"
+        return truncate(sentence, limit: limit)
     }
 
     /// Block-level markdown at the head of a line: heading hashes and

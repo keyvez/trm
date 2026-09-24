@@ -20,6 +20,7 @@
             <div class="nav-links">
                 <a href="/docs/installation">Install</a>
                 <a href="/docs/configuration">Config</a>
+                <a href="/docs/command-center">Command Center</a>
                 <a href="/docs/plugins">Plugins</a>
                 <a href="/docs/text-tap-api">API</a>
                 <a href="/docs/keyboard-shortcuts">Shortcuts</a>
@@ -49,7 +50,7 @@
     </aside>
     <article class="docs-content">
         <h1>Keyboard Shortcuts</h1>
-        <p>All keyboard shortcuts are hardcoded and cannot be customized via configuration. On macOS, <code>Cmd</code> refers to the Command key.</p>
+        <p>On macOS, <code>Cmd</code> refers to the Command key. The shortcuts below are the defaults; the ones that come from trm's Ghostty core can be rebound with <code>keybind = </code> lines in <code>config.toml</code> (for example <code>keybind = global:ctrl+alt+backquote=toggle_quick_terminal_remote</code>), while the ones attached to menu items are fixed.</p>
 <h2 id="pane-management">Pane Management</h2>
 <table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
 <tr><td><code>Cmd+N</code></td><td>Add a new pane to the right in the current row</td></tr>
@@ -79,10 +80,19 @@
 <tr><td><code>Cmd+Shift+B</code></td><td>Toggle broadcast mode (type in all terminal panes at once)</td></tr>
 <tr><td><code>Shift+Click+Drag</code></td><td>Rectangle-select multiple panes</td></tr>
 <tr><td><code>Cmd+Click</code></td><td>Toggle a single pane in/out of the selection</td></tr>
-<tr><td><code>Cmd+Shift+A</code></td><td>Select all panes</td></tr>
 <tr><td><code>Cmd+Shift+D</code></td><td>Deselect all panes</td></tr>
 </tbody></table>
 <p>When multiple panes are selected, the command overlay targets only those panes.</p>
+<h2 id="agents">Agents</h2>
+<table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
+<tr><td><code>Cmd+Shift+A</code></td><td>Toggle the <a href="/docs/command-center/">Command Center</a> — every agent in every window</td></tr>
+<tr><td><code>Ctrl+</code> <code>`</code></td><td>Drop down the quick terminal</td></tr>
+<tr><td><code>Ctrl+Option+</code> <code>`</code></td><td>Drop down the quick terminal <strong>on the remote machine</strong></td></tr>
+</tbody></table>
+<p>In the Command Center: click a row to reply to that agent, ⌘-click to open its
+Agent Overview, double-click a row's header to go to the pane. The panel header
+has a briefing toggle and a full-view button that gives the board the whole
+window.</p>
 <h2 id="command-palette">Command Palette</h2>
 <table><thead><tr><th>Shortcut</th><th>Action</th></tr></thead><tbody>
 <tr><td><code>Cmd+Shift+Enter</code></td><td>Open the command palette (AI mode by default)</td></tr>
@@ -161,6 +171,7 @@
                     <a href="/docs/installation">Installation</a>
                     <a href="/docs/configuration">Configuration</a>
                     <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                    <a href="/docs/command-center">Command Center</a>
                 </div>
                 <div class="footer-col">
                     <h4>Features</h4>

@@ -121,11 +121,19 @@ protocol TerminalViewModel: ObservableObject {
     /// Panes parked in the sidebar: running, but not laid out in the grid.
     var sidebarTiles: [GridPane] { get }
 
+    /// The same panes, every one of them, including an overview parked beside
+    /// its terminal. The grid needs all of them to expand a parked pane.
+    var sidebarGridPanes: [GridPane] { get }
+
     /// Whether the sidebar shelf is expanded rather than collapsed to its rail.
     var sidebarIsShowing: Bool { get }
 
     /// Whether the Command Center panel is open along the window's edge.
     var commandCenterIsShowing: Bool { get }
+
+    /// Whether the Command Center is taking the whole window rather than a
+    /// strip along its edge.
+    var commandCenterIsFullScreen: Bool { get }
 
     /// Width of the Command Center panel in points.
     var commandCenterWidth: CGFloat { get }
@@ -309,6 +317,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                             (delegate as? BaseTerminalController)?
                                 .reconnectDisconnectedRemotePanes()
                         },
+                        offGridPanes: viewModel.sidebarGridPanes,
                         selectedNonSurfacePane: viewModel.selectedNonSurfacePane,
                         onSelectNonSurfacePane: { id in
                             (self.delegate as? BaseTerminalController)?.selectNonSurfacePane(id)
@@ -366,6 +375,8 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                 }
                 // Ignore safe area to extend up in to the titlebar region if we have the "hidden" titlebar style
                 .ignoresSafeArea(.container, edges: ghostty.config.macosTitlebarStyle == "hidden" ? .top : [])
+
+                commandCenterFullScreen
 
                 if let surfaceView = lastFocusedSurface.value {
                     TerminalCommandPaletteView(
@@ -443,55 +454,118 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
     /// Outermost in the row, past the parked-pane shelf: the shelf belongs to
     /// this window's layout, while this is a view across every window, so it
     /// reads as the outer frame rather than part of the grid.
+    ///
+    /// Nothing is drawn here in full view — the board is over the whole window
+    /// then, drawn by `commandCenterFullScreen`.
     @ViewBuilder
     private var commandCenterPanel: some View {
-        if viewModel.commandCenterIsShowing {
+        if viewModel.commandCenterIsShowing, !viewModel.commandCenterIsFullScreen {
             SidebarResizeHandle { delta in
                 guard let controller = delegate as? BaseTerminalController else { return }
                 controller.setCommandCenterWidth(controller.commandCenterWidth - delta)
             }
 
             VStack(spacing: 0) {
-                HStack(spacing: 6) {
-                    Image(systemName: "list.bullet.rectangle")
-                        .foregroundStyle(.secondary)
-                    Text("Command Center")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    // Briefing mode lives in the header rather than a menu:
-                    // it's a way of reading the same board, switched as often
-                    // as the work changes shape.
-                    Toggle(isOn: $commandCenterBriefingMode) {
-                        Image(systemName: "target")
-                            .font(.system(size: 11))
-                    }
-                    .toggleStyle(.button)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(commandCenterBriefingMode ? Color.accentColor : .secondary)
-                    .help("Briefing mode — one sentence per agent, sized to act on")
-                    Button {
-                        (delegate as? BaseTerminalController)?.commandCenterIsShowing = false
-                    } label: {
-                        Image(systemName: "sidebar.right")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Hide Command Center (⌘⇧A)")
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
+                commandCenterHeader
 
                 Divider().opacity(0.5)
 
-                CommandCenterView(onSendToPane: { surface, text in
-                    (delegate as? BaseTerminalController)?.sendMessageToSurface(surface, text: text)
-                })
+                commandCenterBoard
             }
             .frame(width: viewModel.commandCenterWidth)
             .background(.background.opacity(0.35))
             .transition(.move(edge: .trailing))
         }
+    }
+
+    /// The Command Center with the window to itself: no terminals, no shelf,
+    /// the board laid out as a grid of cards across the full width.
+    ///
+    /// Drawn over the grid rather than in place of it. The panes underneath
+    /// stay mounted at the size they already had, so going full view and back
+    /// costs no reflow — the alternative, taking the grid out of the view
+    /// tree, resizes every terminal in the window twice.
+    @ViewBuilder
+    private var commandCenterFullScreen: some View {
+        if viewModel.commandCenterIsShowing, viewModel.commandCenterIsFullScreen {
+            VStack(spacing: 0) {
+                commandCenterHeader
+
+                Divider().opacity(0.5)
+
+                commandCenterBoard
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Opaque, unlike the panel: this is the window's contents now, and
+            // terminal text showing faintly through a board you are reading is
+            // just noise.
+            .background(.background)
+            .transition(.opacity)
+        }
+    }
+
+    /// The board itself, wired to send what you type back to the pane it came
+    /// from. Shared by the panel and the full view so the two cannot drift.
+    private var commandCenterBoard: some View {
+        CommandCenterView(onSendToPane: { surface, text in
+            (delegate as? BaseTerminalController)?.sendMessageToSurface(surface, text: text)
+        })
+    }
+
+    /// The Command Center's own title bar: what it is, how it is being read,
+    /// how big it is, and how to put it away.
+    private var commandCenterHeader: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "list.bullet.rectangle")
+                .foregroundStyle(.secondary)
+            Text("Command Center")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            // Briefing mode lives in the header rather than a menu:
+            // it's a way of reading the same board, switched as often
+            // as the work changes shape.
+            Toggle(isOn: $commandCenterBriefingMode) {
+                Image(systemName: "target")
+                    .font(.system(size: 11))
+            }
+            .toggleStyle(.button)
+            .buttonStyle(.plain)
+            .foregroundStyle(commandCenterBriefingMode ? Color.accentColor : .secondary)
+            .help("Briefing mode — one sentence per agent, sized to act on")
+            // Full view: the board over the whole window, with no terminal
+            // panes behind it. Beside the briefing toggle because it is the
+            // same kind of switch — how much of your attention the board is
+            // getting, not what it contains.
+            Button {
+                (delegate as? BaseTerminalController)?.toggleCommandCenterFullScreen()
+            } label: {
+                Image(systemName: viewModel.commandCenterIsFullScreen
+                    ? "arrow.down.right.and.arrow.up.left"
+                    : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(viewModel.commandCenterIsFullScreen ? Color.accentColor : .secondary)
+            .help(viewModel.commandCenterIsFullScreen
+                ? "Back to the panel — show the terminal panes again"
+                : "Full view — the board over the whole window")
+            Button {
+                guard let controller = delegate as? BaseTerminalController else { return }
+                // Closing from full view leaves the window on its panes, not
+                // on a board that is merely invisible: the next ⌘⇧A should
+                // give back the strip it was before, not the takeover.
+                controller.commandCenterIsFullScreen = false
+                controller.commandCenterIsShowing = false
+            } label: {
+                Image(systemName: "sidebar.right")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .help("Hide Command Center (⌘⇧A)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
     }
 
     /// The parked-pane shelf, to the right of the grid.
@@ -528,6 +602,9 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                     },
                     onClose: { pane in
                         (delegate as? BaseTerminalController)?.closePane(pane)
+                    },
+                    onPeek: { pane in
+                        (delegate as? BaseTerminalController)?.peekPane(pane)
                     },
                     onRestoreAll: {
                         (delegate as? BaseTerminalController)?.restoreAllPanesFromSidebar()

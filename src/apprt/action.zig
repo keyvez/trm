@@ -109,6 +109,10 @@ pub const Action = union(Key) {
     /// Toggle the quick terminal in or out.
     toggle_quick_terminal,
 
+    /// Toggle the quick terminal in or out, with its shell on a remote
+    /// machine. macOS only.
+    toggle_quick_terminal_remote,
+
     /// Toggle the command palette. This currently only works on macOS.
     toggle_command_palette,
 
@@ -343,6 +347,7 @@ pub const Action = union(Key) {
         toggle_tab_overview,
         toggle_window_decorations,
         toggle_quick_terminal,
+        toggle_quick_terminal_remote,
         toggle_command_palette,
         toggle_visibility,
         toggle_background_opacity,

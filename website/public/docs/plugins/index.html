@@ -20,6 +20,7 @@
             <div class="nav-links">
                 <a href="/docs/installation">Install</a>
                 <a href="/docs/configuration">Config</a>
+                <a href="/docs/command-center">Command Center</a>
                 <a href="/docs/plugins">Plugins</a>
                 <a href="/docs/text-tap-api">API</a>
                 <a href="/docs/keyboard-shortcuts">Shortcuts</a>
@@ -49,7 +50,7 @@
     </aside>
     <article class="docs-content">
         <h1>Plugins</h1>
-        <p>trm supports 10 built-in pane plugin types managed by an extensible plugin registry. Each pane in the grid can be a different type, configured via <code>[[panes]]</code> blocks in your session file.</p>
+        <p>trm supports 10 built-in pane plugin types managed by an extensible plugin registry, plus automatic server URL detection across all terminal panes. Each pane in the grid can be a different type, configured via <code>[[panes]]</code> blocks in your session file.</p>
 <p>All plugins share these common fields:</p>
 <table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>type</code></td><td>String</td><td><code>"terminal"</code></td><td>The plugin type identifier</td></tr>
@@ -65,7 +66,7 @@
 <hr />
 <h2 id="terminal">terminal</h2>
 <p>Full VT100/VT220 terminal emulator with a PTY-backed shell. This is the default pane type.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Dev Shell</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>command</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/bin/zsh</span><span style="color: #89DDFF;">&quot;</span></span>
@@ -92,7 +93,7 @@
 <hr />
 <h2 id="webview">webview</h2>
 <p>Embedded web browser using macOS WKWebView. Click inside the pane to interact -- keyboard input is handled natively by WKWebView when focused.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">webview</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Documentation</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>url</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">https://docs.rs</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
@@ -111,54 +112,42 @@
 </blockquote>
 <hr />
 <h2 id="notes">notes</h2>
-<p>Editable text area using macOS NSTextView. Supports both in-memory scratch pads and file-backed persistent notes.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># In-memory scratch pad</span></span>
+<p>Editable in-pane scratch pad for quick notes.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># In-memory scratch pad</span></span>
 <span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">notes</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Scratch Pad</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>content</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Type anything here...</span><span style="color: #89DDFF;">&quot;</span></span>
-<span class="giallo-l"></span>
-<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># File-backed persistent notes</span></span>
-<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
-<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">notes</span><span style="color: #89DDFF;">&quot;</span></span>
-<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">TODO List</span><span style="color: #89DDFF;">&quot;</span></span>
-<span class="giallo-l"><span>file</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/trm-todo.md</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>content</code></td><td>String?</td><td>None</td><td>Initial content (used when no <code>file</code> is specified)</td></tr>
-<tr><td><code>file</code></td><td>String?</td><td>None</td><td>File path for persistent storage. Content is loaded on startup and auto-saved on close</td></tr>
+<span class="giallo-l"></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>content</code></td><td>String?</td><td>None</td><td>Initial note content</td></tr>
+<tr><td><code>file</code></td><td>String?</td><td>None</td><td>Reserved for future file-backed notes support</td></tr>
 </tbody></table>
 <p><strong>Features:</strong></p>
 <ul>
-<li>Native macOS text editing</li>
-<li>File persistence (when <code>file</code> is specified)</li>
-<li>Content manipulation via the Text Tap API (<code>set_content</code> action)</li>
+<li>In-place editing directly in the pane</li>
+<li>Starts with <code>content</code> when provided</li>
 </ul>
 <blockquote>
 <p><strong>Note:</strong> Notes panes are macOS-only.</p>
 </blockquote>
 <hr />
 <h2 id="screen-capture">screen_capture</h2>
-<p>Mirrors another application's window into a trm pane. Uses macOS ScreenCaptureKit.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># By application bundle ID</span></span>
-<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<p>Captures the main display and shows a periodically refreshed screenshot inside a pane.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">screen_capture</span><span style="color: #89DDFF;">&quot;</span></span>
-<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Safari Mirror</span><span style="color: #89DDFF;">&quot;</span></span>
-<span class="giallo-l"><span>target</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">com.apple.Safari</span><span style="color: #89DDFF;">&quot;</span></span>
-<span class="giallo-l"></span>
-<span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># By window title</span></span>
-<span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
-<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">screen_capture</span><span style="color: #89DDFF;">&quot;</span></span>
-<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">VS Code Mirror</span><span style="color: #89DDFF;">&quot;</span></span>
-<span class="giallo-l"><span>target_title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">trm</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>target</code></td><td>String?</td><td>None</td><td>Application bundle ID to capture (e.g., <code>"com.apple.Safari"</code>)</td></tr>
-<tr><td><code>target_title</code></td><td>String?</td><td>None</td><td>Target a specific window by its title string</td></tr>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Display Capture</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>refresh_ms</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2000</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>refresh_ms</code></td><td>Integer?</td><td><code>2000</code></td><td>Refresh interval in milliseconds</td></tr>
+<tr><td><code>target</code></td><td>String?</td><td>None</td><td>Reserved for future targeted-window capture</td></tr>
+<tr><td><code>target_title</code></td><td>String?</td><td>None</td><td>Reserved for future targeted-window capture</td></tr>
 </tbody></table>
 <blockquote>
-<p><strong>Note:</strong> This plugin is a work in progress. macOS-only.</p>
+<p><strong>Note:</strong> Requires macOS Screen Recording permission.</p>
 </blockquote>
 <hr />
 <h2 id="file-browser">file_browser</h2>
-<p>Interactive file browser that displays a directory tree.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<p>Directory listing pane for quick file browsing context.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">file_browser</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Project Files</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>path</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
@@ -166,15 +155,13 @@
 </tbody></table>
 <p><strong>Features:</strong></p>
 <ul>
-<li>Tree view with expandable directories</li>
-<li>File size display</li>
-<li>Keyboard navigation (arrow keys, Enter to expand/collapse)</li>
-<li>Auto-refresh on changes</li>
+<li>Lists files and directories for <code>path</code> (or <code>cwd</code>)</li>
+<li>Directory entries are grouped in a scrollable text view</li>
 </ul>
 <hr />
 <h2 id="process-monitor">process_monitor</h2>
-<p>Displays a list of running processes sorted by CPU usage, similar to <code>top</code>.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<p>Shows process snapshots using <code>ps</code>.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">process_monitor</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Processes</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>refresh_ms</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2000</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
@@ -182,30 +169,27 @@
 </tbody></table>
 <p><strong>Features:</strong></p>
 <ul>
-<li>PID, user, CPU %, memory %, and command columns</li>
-<li>Sorted by CPU usage</li>
-<li>Scrollable list</li>
+<li>PID, parent PID, CPU %, memory %, and command columns</li>
 <li>Auto-refresh at the configured interval</li>
 </ul>
 <hr />
 <h2 id="log-viewer">log_viewer</h2>
-<p>Tails a log file and displays its contents with auto-scroll.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<p>Reads and displays the tail of a log file.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">log_viewer</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">System Log</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>file</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">/var/log/system.log</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>file</code></td><td>String?</td><td><code>"/var/log/system.log"</code></td><td>Path to the log file to tail. Also accepts <code>path</code> as an alias</td></tr>
+<tr><td><code>file</code></td><td>String?</td><td>None</td><td>Path to the log file to read. Also accepts <code>path</code> as an alias</td></tr>
 </tbody></table>
 <p><strong>Features:</strong></p>
 <ul>
-<li>Tails the file (reads new content as it appears)</li>
-<li>Scrollable history (up to 10,000 lines)</li>
-<li>Incremental reads (efficient for large log files)</li>
+<li>Shows the last ~300 lines of the target file</li>
+<li>Auto-refresh at the configured interval</li>
 </ul>
 <hr />
 <h2 id="markdown-preview">markdown_preview</h2>
 <p>Renders Markdown content with syntax highlighting for headings, code blocks, lists, and emphasis.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># From a file</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #464B5D;font-style: italic;"># From a file</span></span>
 <span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">markdown_preview</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">README</span><span style="color: #89DDFF;">&quot;</span></span>
@@ -228,8 +212,8 @@
 </ul>
 <hr />
 <h2 id="system-info">system_info</h2>
-<p>Displays live system information including hostname, OS version, CPU, memory, disk, and network statistics.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<p>Displays live host/system details.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">system_info</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">System</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>refresh_ms</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3000</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
@@ -238,16 +222,14 @@
 <p><strong>Features:</strong></p>
 <ul>
 <li>Hostname and OS version</li>
-<li>System uptime and load averages</li>
-<li>CPU usage percentage</li>
-<li>Memory usage</li>
-<li>Disk usage</li>
-<li>Network interface information</li>
+<li>CPU count</li>
+<li>Total memory</li>
+<li>System uptime</li>
 </ul>
 <hr />
 <h2 id="git-status">git_status</h2>
-<p>Displays Git repository status, including branch, modified files, and recent log.</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<p>Displays <code>git status --short --branch</code> output for a repository.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
 <span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">git_status</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Git</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>repo</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">~/projects/myapp</span><span style="color: #89DDFF;">&quot;</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
@@ -255,16 +237,154 @@
 </tbody></table>
 <p><strong>Features:</strong></p>
 <ul>
-<li>Current branch display</li>
-<li>Modified/staged/untracked file listing with status indicators</li>
-<li>Recent commit log</li>
-<li>Multiple views: Status, Log, Diff</li>
-<li>Auto-refresh on changes</li>
+<li>Current branch and working-tree summary</li>
+<li>Modified/staged/untracked file listing</li>
+<li>Auto-refresh at the configured interval</li>
 </ul>
+<hr />
+<h2 id="server-url-detection">Server URL Detection</h2>
+<p>trm automatically scans terminal output for local dev-server URLs (e.g. <code>localhost:3000</code>, <code>127.0.0.1:8080</code>) and shows them in a banner at the top of the pane. This works across all terminal panes without any configuration.</p>
+<p>When a single URL is detected, a blue pill appears at the top of the pane. Click it to open the URL in an inline webview pane, or shift-click to copy the URL to your clipboard.</p>
+<p>When multiple URLs are detected, clicking the pill opens a dropdown listing each URL. Click any row to open it, or shift-click to copy.</p>
+<h3 id="custom-patterns">Custom patterns</h3>
+<p>By default, trm matches <code>localhost</code>, <code>127.0.0.1</code>, <code>0.0.0.0</code>, and <code>[::1]</code> URLs with a port number. You can add extra regex patterns via the <code>patterns</code> field on any <code>[[panes]]</code> block. Custom patterns are checked before the built-in ones.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span style="color: #89DDFF;">[[</span><span style="color: #FFCB6B;">panes</span><span style="color: #89DDFF;">]]</span></span>
+<span class="giallo-l"><span>type</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">terminal</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Tunnel</span><span style="color: #89DDFF;">&quot;</span></span>
+<span class="giallo-l"><span>patterns</span><span style="color: #89DDFF;"> = [</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  &quot;</span><span style="color: #C3E88D;">https?://</span><span>\\</span><span style="color: #C3E88D;">S+</span><span>\\</span><span style="color: #C3E88D;">.ngrok</span><span>\\</span><span style="color: #C3E88D;">.io</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  &quot;</span><span style="color: #C3E88D;">https?://[</span><span>\\</span><span style="color: #C3E88D;">w-]+</span><span>\\</span><span style="color: #C3E88D;">.loca</span><span>\\</span><span style="color: #C3E88D;">.lt</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">  &quot;</span><span style="color: #C3E88D;">https?://</span><span>\\</span><span style="color: #C3E88D;">S+</span><span>\\</span><span style="color: #C3E88D;">.trycloudflare</span><span>\\</span><span style="color: #C3E88D;">.com</span><span style="color: #89DDFF;">&quot;,</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">]</span></span></code></pre><table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>patterns</code></td><td>String[]?</td><td>None</td><td>Extra regex patterns for server URL detection. Each string is a case-insensitive regular expression. Matches are normalized to include an <code>http://</code> scheme if missing</td></tr>
+</tbody></table>
+<p><strong>Features:</strong></p>
+<ul>
+<li>Automatic detection of <code>localhost</code>, <code>127.0.0.1</code>, <code>0.0.0.0</code>, <code>[::1]</code> URLs with ports</li>
+<li>Custom regex patterns via config for tunnels, ngrok, localtunnel, etc.</li>
+<li>Multiple URLs per pane with dropdown selector</li>
+<li>Click to open in inline webview pane</li>
+<li>Shift-click to copy URL to clipboard</li>
+<li>URLs persist even after server output scrolls off screen</li>
+<li><code>0.0.0.0</code> is automatically normalized to <code>localhost</code></li>
+</ul>
+<hr />
+<h2 id="service-plugin-architecture">Service Plugin Architecture</h2>
+<p>Service plugins are overlay plugins that monitor terminal output and optionally render floating UI on top of terminal panes. Unlike pane plugins (which occupy a grid cell), service plugins run alongside terminal panes without taking up any layout space. They are used for ambient features such as detecting server URLs, signaling when Claude Code needs attention, or showing which panes have a watched process running.</p>
+<h3 id="protocols">Protocols</h3>
+<p>The service plugin system is built on four protocols and a capability enum.</p>
+<p><strong><code>ServicePlugin</code></strong> is the base protocol. Every service plugin must provide a <code>pluginId</code>, a <code>displayName</code>, and a set of <code>requiredCapabilities</code>. It defines a three-step lifecycle:</p>
+<ol>
+<li><code>configure(registry:)</code> -- called once after registration so the plugin can store a reference to the registry.</li>
+<li><code>start()</code> -- called after all plugins are registered, so the plugin can begin work.</li>
+<li><code>stop()</code> -- called to release resources when the plugin is torn down.</li>
+</ol>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="swift"><span class="giallo-l"><span style="color: #89DDFF;">@</span><span style="color: #C792EA;">MainActor</span></span>
+<span class="giallo-l"><span style="color: #C792EA;">protocol</span><span style="color: #FFCB6B;"> ServicePlugin</span><span style="color: #89DDFF;">:</span><span style="color: #FFCB6B;"> AnyObject</span><span style="color: #89DDFF;"> {</span></span>
+<span class="giallo-l"><span style="color: #F78C6C;">    var</span><span> pluginId:</span><span style="color: #FFCB6B;"> String</span><span style="color: #89DDFF;"> {</span><span style="color: #C792EA;"> get</span><span style="color: #89DDFF;"> }</span></span>
+<span class="giallo-l"><span style="color: #F78C6C;">    var</span><span> displayName:</span><span style="color: #FFCB6B;"> String</span><span style="color: #89DDFF;"> {</span><span style="color: #C792EA;"> get</span><span style="color: #89DDFF;"> }</span></span>
+<span class="giallo-l"><span style="color: #C792EA;">    static</span><span style="color: #F78C6C;"> var</span><span> requiredCapabilities:</span><span style="color: #FFCB6B;"> Set</span><span style="color: #89DDFF;">&lt;</span><span>PluginCapability</span><span style="color: #89DDFF;">&gt; {</span><span style="color: #C792EA;"> get</span><span style="color: #89DDFF;"> }</span></span>
+<span class="giallo-l"><span style="color: #C792EA;">    func</span><span style="color: #82AAFF;"> configure</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;font-style: italic;">registry</span><span>: ServicePluginRegistry</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span style="color: #C792EA;">    func</span><span style="color: #82AAFF;"> start</span><span style="color: #89DDFF;">()</span></span>
+<span class="giallo-l"><span style="color: #C792EA;">    func</span><span style="color: #82AAFF;"> stop</span><span style="color: #89DDFF;">()</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">}</span></span></code></pre>
+<p><strong><code>ObservableServicePlugin</code></strong> is adopted by plugins that are also <code>ObservableObject</code>. When a plugin's <code>@Published</code> state changes, the registry forwards the change via <code>objectWillChange</code> so that SwiftUI views observing the registry automatically re-render.</p>
+<p><strong><code>TerminalOutputSubscriber</code></strong> receives callbacks from the shared <code>TerminalOutputScanner</code> whenever the visible text of a terminal pane changes. The scanner polls pane content on a 2-second timer, computes per-pane SHA-256 hashes, and only notifies subscribers when content actually differs from the last poll.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="swift"><span class="giallo-l"><span style="color: #89DDFF;">@</span><span style="color: #C792EA;">MainActor</span></span>
+<span class="giallo-l"><span style="color: #C792EA;">protocol</span><span style="color: #FFCB6B;"> TerminalOutputSubscriber</span><span style="color: #89DDFF;">:</span><span style="color: #FFCB6B;"> AnyObject</span><span style="color: #89DDFF;"> {</span></span>
+<span class="giallo-l"><span style="color: #C792EA;">    func</span><span style="color: #82AAFF;"> terminalOutputDidChange</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;font-style: italic;">paneIndex</span><span>: </span><span style="color: #FFCB6B;">Int</span><span>, </span><span style="color: #82AAFF;font-style: italic;">text</span><span>: </span><span style="color: #FFCB6B;">String</span><span>, </span><span style="color: #82AAFF;font-style: italic;">hash</span><span>: </span><span style="color: #FFCB6B;">String</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span style="color: #C792EA;">    func</span><span style="color: #82AAFF;"> terminalPaneDidClose</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;font-style: italic;">paneIndex</span><span>: </span><span style="color: #FFCB6B;">Int</span><span style="color: #89DDFF;">)</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">}</span></span></code></pre>
+<p><strong><code>ServicePluginOverlayProvider</code></strong> allows a plugin to render a SwiftUI overlay on top of a terminal pane. The plugin returns an <code>AnyView?</code> for each pane index and declares an <code>overlayAlignment</code> (e.g. <code>.top</code>, <code>.topLeading</code>, <code>.bottomLeading</code>) that controls where the overlay is anchored within the pane.</p>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="swift"><span class="giallo-l"><span style="color: #89DDFF;">@</span><span style="color: #C792EA;">MainActor</span></span>
+<span class="giallo-l"><span style="color: #C792EA;">protocol</span><span style="color: #FFCB6B;"> ServicePluginOverlayProvider</span><span style="color: #89DDFF;">:</span><span style="color: #FFCB6B;"> ServicePlugin</span><span style="color: #89DDFF;"> {</span></span>
+<span class="giallo-l"><span style="color: #C792EA;">    func</span><span style="color: #82AAFF;"> overlayView</span><span style="color: #89DDFF;">(</span><span style="color: #82AAFF;">forPane</span><span style="font-style: italic;"> index</span><span>: </span><span style="color: #FFCB6B;">Int</span><span style="color: #89DDFF;">) -&gt;</span><span> AnyView</span><span style="color: #89DDFF;">?</span></span>
+<span class="giallo-l"><span style="color: #F78C6C;">    var</span><span> overlayAlignment: Alignment </span><span style="color: #89DDFF;">{</span><span style="color: #C792EA;"> get</span><span style="color: #89DDFF;"> }</span></span>
+<span class="giallo-l"><span style="color: #89DDFF;">}</span></span></code></pre><h3 id="plugin-capabilities">Plugin Capabilities</h3>
+<p>Each plugin declares the capabilities it needs via <code>requiredCapabilities</code>. At registration time, the registry grants all requested capabilities except <code>networkAccess</code>, which is denied by default. Plugins can check at runtime whether a specific capability was granted via <code>registry.hasCapability(_:pluginId:)</code>.</p>
+<hr />
+<h2 id="service-plugin-registry">Service Plugin Registry</h2>
+<p>The <code>ServicePluginRegistry</code> manages all service plugins for a window. It is an <code>ObservableObject</code> so SwiftUI views can observe it directly. The registry:</p>
+<ul>
+<li><strong>Registers plugins</strong> -- stores each plugin by its <code>pluginId</code>, computes granted capabilities, calls <code>configure(registry:)</code>, and auto-subscribes <code>TerminalOutputSubscriber</code> conformers to the shared <code>TerminalOutputScanner</code>.</li>
+<li><strong>Forwards <code>objectWillChange</code></strong> -- when any <code>ObservableServicePlugin</code> publishes a change, the registry re-publishes it so a single <code>@ObservedObject</code> binding in SwiftUI is sufficient.</li>
+<li><strong>Discovers overlay providers</strong> -- the <code>overlayProviders</code> property returns all registered plugins that conform to <code>ServicePluginOverlayProvider</code>, so the view layer can iterate and render overlays.</li>
+<li><strong>Manages lifecycle</strong> -- <code>startAll()</code> starts every registered plugin, <code>stopAll()</code> stops them and removes scanner subscriptions, and <code>unregisterAll()</code> tears down everything and clears all state.</li>
+</ul>
+<hr />
+<h2 id="built-in-service-plugins">Built-in Service Plugins</h2>
+<p>trm ships with three service plugins that are registered automatically when a window opens.</p>
+<h3 id="server-url-detector-server-url-detector">Server URL Detector (<code>server_url_detector</code>)</h3>
+<p>Scans terminal output for local dev-server URLs and shows a clickable banner at the top of the pane.</p>
+<table><thead><tr><th>Property</th><th>Value</th></tr></thead><tbody>
+<tr><td>Plugin ID</td><td><code>server_url_detector</code></td></tr>
+<tr><td>Required capabilities</td><td><code>terminalOutputRead</code></td></tr>
+<tr><td>Overlay alignment</td><td><code>.top</code></td></tr>
+</tbody></table>
+<p><strong>How it works:</strong></p>
+<p>The plugin receives terminal content changes via <code>TerminalOutputSubscriber</code>. On each change it runs all regex patterns against the visible text and extracts unique URLs ordered by position.</p>
+<p>Built-in regex patterns match:</p>
+<ul>
+<li>Full URLs: <code>http(s)://localhost:PORT</code>, <code>http(s)://127.0.0.1:PORT</code>, <code>http(s)://0.0.0.0:PORT</code>, <code>http(s)://[::1]:PORT</code></li>
+<li>WebSocket URLs: <code>ws(s)://</code> variants of the above</li>
+<li>Bare host:port: <code>localhost:PORT</code>, <code>127.0.0.1:PORT</code>, <code>0.0.0.0:PORT</code></li>
+</ul>
+<p>URL normalization rules:</p>
+<ul>
+<li>Trailing punctuation (<code>.</code>, <code>,</code>, <code>;</code>) is stripped.</li>
+<li>A bare host:port without a scheme gets <code>http://</code> prepended.</li>
+<li><code>0.0.0.0</code> is rewritten to <code>localhost</code>.</li>
+</ul>
+<p>Custom patterns can be added via <code>setCustomPatterns()</code>, which compiles user-supplied regex strings from the <code>patterns</code> field in <code>trm.toml</code>. Custom patterns are checked before the built-in ones.</p>
+<p><strong>Overlay:</strong> A blue pill at the top of the pane. Click to open the URL in an inline webview pane. Shift-click to copy the URL to the clipboard. When multiple URLs are detected, clicking the pill opens a dropdown listing each URL.</p>
+<h3 id="claude-attention-claude-attention">Claude Attention (<code>claude_attention</code>)</h3>
+<p>Shows a pulsing sparkle icon when Claude Code finishes generating and is waiting for user input.</p>
+<table><thead><tr><th>Property</th><th>Value</th></tr></thead><tbody>
+<tr><td>Plugin ID</td><td><code>claude_attention</code></td></tr>
+<tr><td>Required capabilities</td><td><code>terminalOutputRead</code></td></tr>
+<tr><td>Overlay alignment</td><td><code>.topLeading</code></td></tr>
+</tbody></table>
+<p><strong>How it works:</strong></p>
+<p>On <code>start()</code>, the plugin subscribes to <code>.trmClaudeNeedsAttention</code> notifications. When a notification arrives with a <code>paneIndex</code> in its <code>userInfo</code>, that pane is added to the <code>attentionPanes</code> set. The icon auto-dismisses when terminal output changes for that pane (i.e., the user types something), detected via <code>terminalOutputDidChange</code>.</p>
+<p><strong>Overlay:</strong> An orange rounded-rectangle badge with a sparkle icon (<code>SF Symbols: sparkle</code>), anchored at the top-leading corner of the pane. The icon pulses continuously with a scale and opacity animation.</p>
+<h3 id="send-text-indicator-send-text-indicator">Send Text Indicator (<code>send_text_indicator</code>)</h3>
+<p>Shows an indicator pill when a watched process (e.g. <code>claude</code>) is running in a pane, signaling that text can be sent to that pane via the Text Tap socket.</p>
+<table><thead><tr><th>Property</th><th>Value</th></tr></thead><tbody>
+<tr><td>Plugin ID</td><td><code>send_text_indicator</code></td></tr>
+<tr><td>Required capabilities</td><td><code>terminalOutputRead</code></td></tr>
+<tr><td>Overlay alignment</td><td><code>.bottomLeading</code></td></tr>
+</tbody></table>
+<p><strong>How it works:</strong></p>
+<p>Each time terminal output changes, the plugin runs asynchronous process detection. It looks up the shell PID for the pane, then uses <code>pgrep -P &lt;pid&gt;</code> to find child processes and <code>ps -o comm=</code> to get their names. The search is recursive -- grandchild processes are checked too. If any process name matches an entry in <code>watchedProcessNames</code> (currently hardcoded to <code>["claude"]</code>), the pane is marked as active.</p>
+<p><strong>Overlay:</strong> A teal capsule pill at the bottom-leading corner of the pane showing the matched process name (e.g. "claude") with a link icon.</p>
+<hr />
+<h2 id="hot-reload">Hot-Reload</h2>
+<p>When <code>trm.toml</code> changes on disk, service plugins are automatically torn down and re-created with the updated configuration. No restart is required.</p>
+<p><strong>File watching:</strong> A <code>DispatchSource</code> file system object source monitors the config file for <code>.write</code>, <code>.rename</code>, and <code>.delete</code> events.</p>
+<p><strong>Debouncing:</strong> A 300ms debounce timer coalesces rapid saves so the reload only fires once.</p>
+<p><strong>Atomic save handling:</strong> Editors like vim save files atomically by deleting the original and renaming a temporary file. When a <code>.delete</code> or <code>.rename</code> event is detected, the watcher tears itself down and re-opens the file after a 500ms delay, giving the editor time to finish writing.</p>
+<p><strong>Reload sequence:</strong></p>
+<ol>
+<li><code>reloadServicePlugins()</code> calls <code>servicePluginRegistry.unregisterAll()</code>, which stops all plugins, removes scanner subscriptions, and clears all state.</li>
+<li>The config file is re-read from disk.</li>
+<li><code>setupServicePlugins()</code> creates fresh plugin instances with the new configuration.</li>
+<li><code>servicePluginRegistry.startAll()</code> starts the new plugins.</li>
+</ol>
+<p>The <code>TerminalOutputScanner</code> continues running throughout the reload -- only its subscriber list changes. SwiftUI views update automatically because <code>unregisterAll()</code> and the subsequent registrations trigger <code>objectWillChange</code> on the registry.</p>
+<hr />
+<h2 id="plugin-capability-reference">Plugin Capability Reference</h2>
+<table><thead><tr><th>Capability</th><th>Description</th><th>Default</th></tr></thead><tbody>
+<tr><td><code>terminalOutputRead</code></td><td>Read terminal pane output via the shared scanner</td><td>Granted</td></tr>
+<tr><td><code>networkAccess</code></td><td>Make outbound network requests</td><td><strong>Denied</strong></td></tr>
+<tr><td><code>fileSystemRead</code></td><td>Read from the local file system</td><td>Granted</td></tr>
+<tr><td><code>clipboardWrite</code></td><td>Write to the system clipboard</td><td>Granted</td></tr>
+<tr><td><code>userNotifications</code></td><td>Post user-facing notifications</td><td>Granted</td></tr>
+</tbody></table>
+<p>All capabilities except <code>networkAccess</code> are granted automatically when a plugin is registered. The registry removes <code>networkAccess</code> from every plugin's requested set at registration time. Plugins can check at runtime whether a capability was granted via <code>registry.hasCapability(_:pluginId:)</code>.</p>
 <hr />
 <h2 id="mixing-plugin-types">Mixing Plugin Types</h2>
 <p>You can combine any plugin types in a single session. Here is an example that uses five different types in a 2x3 grid:</p>
-<pre class="giallo" style="color: #BABED8; background-color: #0F111A;"><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Full Stack Dev</span><span style="color: #89DDFF;">&quot;</span></span>
+<pre class="giallo" style="color: #BABED8; background-color: #0F111A;" ><code data-lang="toml"><span class="giallo-l"><span>title</span><span style="color: #89DDFF;"> = &quot;</span><span style="color: #C3E88D;">Full Stack Dev</span><span style="color: #89DDFF;">&quot;</span></span>
 <span class="giallo-l"><span>rows</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 2</span></span>
 <span class="giallo-l"><span>cols</span><span style="color: #89DDFF;"> =</span><span style="color: #F78C6C;"> 3</span></span>
 <span class="giallo-l"></span>
@@ -310,6 +430,7 @@
                     <a href="/docs/installation">Installation</a>
                     <a href="/docs/configuration">Configuration</a>
                     <a href="/docs/keyboard-shortcuts">Keyboard Shortcuts</a>
+                    <a href="/docs/command-center">Command Center</a>
                 </div>
                 <div class="footer-col">
                     <h4>Features</h4>
