@@ -56,6 +56,22 @@ final class CommandCenterMonitor: ObservableObject {
         /// is about — the board's text — without having to hand over blocks
         /// it has no opinion on.
         var messageBlocks: [AgentTranscript.Block] = []
+        /// The question a finished reply ends on — "Want me to deploy?" —
+        /// read from the whole reply, never the capped `message`.
+        ///
+        /// It is usually the last sentence of a long reply, which is exactly
+        /// the part a capped message and a one-line summary both lose, and it
+        /// is the one sentence on the row you have to act on.
+        var closingQuestion: String? = nil
+        /// Claude Code's own recap of where the session stands, while it is
+        /// still current. See `AgentTranscript.recap`.
+        var recap: String? = nil
+
+        /// Whether the row is waiting on you: a question on screen, or a
+        /// finished reply that ends by asking one. The second is the common
+        /// case — "Want me to deploy?" — and reads as idle otherwise, which is
+        /// the one state a board has to tell apart from "done, nothing to do".
+        var isAskingYou: Bool { needsAttention || closingQuestion != nil }
         /// The last thing the human asked, for context when the reply is terse.
         let prompt: String?
         /// Everything this person has said to this agent, oldest first, as the
@@ -380,6 +396,9 @@ final class CommandCenterMonitor: ObservableObject {
             host: surface.remoteHost,
             message: message,
             messageBlocks: messageBlocks,
+            closingQuestion: transcript.isWorking || !questions.isEmpty
+                ? nil : Self.closingQuestion(in: messageBlocks),
+            recap: transcript.recap,
             prompt: transcript.lastUserPrompt,
             promptHistory: Self.promptHistory(transcript),
             activity: Self.activityLines(transcript),
@@ -676,7 +695,7 @@ final class CommandCenterMonitor: ObservableObject {
     /// account of its own turn — what it changed, what it found, what is left
     /// — is usually two or three paragraphs in. Cut it at a paragraph and the
     /// board ends up reporting the throat-clearing.
-    static func summarize(_ blocks: [AgentTranscript.Block], limit: Int = 2000) -> String {
+    nonisolated static func summarize(_ blocks: [AgentTranscript.Block], limit: Int = 2000) -> String {
         var parts: [String] = []
         for block in blocks {
             guard case .paragraph(let text) = block else { continue }
@@ -684,13 +703,49 @@ final class CommandCenterMonitor: ObservableObject {
             if !trimmed.isEmpty { parts.append(trimmed) }
         }
         let joined = withoutInlineMarkdown(parts.joined(separator: "\n\n"))
-        guard joined.count > limit else { return joined }
-        let cut = joined.prefix(limit)
-        // Break at the last sentence end so the summary doesn't stop mid-word.
-        if let stop = cut.lastIndex(where: { ".!?".contains($0) }) {
-            return String(cut[...stop])
+        return keepingEnds(joined, limit: limit)
+    }
+
+    /// Cut a long reply to `limit` by dropping its middle, not its end.
+    ///
+    /// Keeping only the start lost the part of a reply that matters most on a
+    /// board: agents close on what they need from you — "Want me to deploy?"
+    /// — and a reply of a few thousand characters had that cut off before the
+    /// summarizer or the row ever saw it. The opening says what happened; the
+    /// ending says what happens next. Both survive, each cut at a sentence.
+    nonisolated static func keepingEnds(_ text: String, limit: Int) -> String {
+        guard text.count > limit else { return text }
+        let headBudget = limit * 3 / 5
+        let tailBudget = limit - headBudget
+
+        var head = String(text.prefix(headBudget))
+        if let stop = head.lastIndex(where: { ".!?".contains($0) }) {
+            head = String(head[...stop])
         }
-        return String(cut) + "…"
+        var tail = Substring(text.suffix(tailBudget))
+        // Start the tail at a sentence rather than halfway through a word.
+        if let start = tail.firstIndex(where: { ".!?\n".contains($0) }) {
+            let rest = tail[tail.index(after: start)...]
+                .drop { $0 == " " || $0 == "\n" }
+            if !rest.isEmpty { tail = rest }
+        }
+        return head + "\n\n…\n\n" + tail
+    }
+
+    /// The question a reply ends on, if it ends on one.
+    ///
+    /// The last sentence of the agent's prose, when it asks something. Only
+    /// the last: a question in the middle of a reply is usually rhetorical or
+    /// already answered by the paragraph under it, while the one it closes on
+    /// is what it is waiting for.
+    nonisolated static func closingQuestion(in blocks: [AgentTranscript.Block]) -> String? {
+        let prose = blocks.compactMap { block -> String? in
+            guard case .paragraph(let text) = block else { return nil }
+            return text
+        }.joined(separator: "\n\n")
+        guard let last = sentences(in: prose).last,
+              last.hasSuffix("?") else { return nil }
+        return truncate(last, limit: headlineLimit)
     }
 
     // MARK: - Briefings
@@ -787,7 +842,12 @@ final class CommandCenterMonitor: ObservableObject {
                     + "First line: what it did, or what it needs, in one sentence of at most 30 "
                     + "words, past tense, plain text, no markdown. Lead with the outcome, not "
                     + "the process. If the agent is asking the person something, say what it "
-                    + "needs. If it hit an error it could not resolve, say so plainly.\n\n"
+                    + "needs. If the message ends by asking the person a question or offering "
+                    + "a next step (\"Want me to deploy?\", \"Should I commit this?\"), the "
+                    + "first line must end with that question, because it is what the person "
+                    + "has to answer. The message may have its middle cut, marked with …; the "
+                    + "end is always the real end. If it hit an error it could not resolve, "
+                    + "say so plainly.\n\n"
                     + "Then three to five bullets on their own lines starting with \"- \", each "
                     + "a full sentence of roughly 15 to 30 words explaining a piece of the work "
                     + "the headline had no room for: what it changed and why, what it found, "

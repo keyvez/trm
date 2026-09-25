@@ -634,6 +634,26 @@ struct CommandCenterView: View {
                     .lineLimit(fixedHeight == nil ? nil : 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
+                // What the reply ends by asking, in the agent's words. The
+                // sentence above is a summary and may not carry it — the
+                // question closing a long reply is the part both a capped
+                // message and a one-line summary lose, and the only part
+                // you have to act on.
+                if let question = entry.closingQuestion,
+                   entry.pendingPrompt == nil,
+                   !briefingSentence(entry).contains(question) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "arrowshape.turn.up.left.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color.orange.opacity(0.9))
+                        Text(question)
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .help("The question this reply ends on")
+                }
+
                 // The escalation line: only drawn when something actually
                 // wants a decision, so its presence is the signal.
                 if let detail = Self.escalation(for: entry) {
@@ -785,8 +805,13 @@ struct CommandCenterView: View {
 
     /// The headline for a row: the model's sentence when it has answered, the
     /// message's own opening sentence until then.
+    ///
+    /// The agent's own recap comes first when there is a current one: it is
+    /// Claude summing up its session with everything it knows, which beats a
+    /// summary of it written from the outside.
     private func briefingSentence(_ entry: CommandCenterMonitor.Entry) -> String {
-        monitor.briefings[entry.id]?.sentence
+        entry.recap
+            ?? monitor.briefings[entry.id]?.sentence
             ?? CommandCenterMonitor.localBriefing(for: entry).sentence
     }
 
@@ -825,7 +850,7 @@ struct CommandCenterView: View {
         // is the same agent, stopped for the same reason. It is checked first
         // because it is the earlier of the two: the box is drawn while the
         // transcript still says the turn is running.
-        if entry.needsAttention || entry.pendingPrompt != nil {
+        if entry.isAskingYou || entry.pendingPrompt != nil {
             return Status(label: "needs you", color: .orange, emphasis: 0.14)
         }
         if entry.errorCount > 0 {
@@ -857,11 +882,11 @@ struct CommandCenterView: View {
 
     @ViewBuilder
     private func statusDot(_ entry: CommandCenterMonitor.Entry) -> some View {
-        let color: Color = entry.needsAttention ? .orange : (entry.isWorking ? .green : .secondary)
+        let color: Color = entry.isAskingYou ? .orange : (entry.isWorking ? .green : .secondary)
         Circle()
-            .fill(color.opacity(entry.isWorking || entry.needsAttention ? 0.9 : 0.35))
+            .fill(color.opacity(entry.isWorking || entry.isAskingYou ? 0.9 : 0.35))
             .frame(width: 7, height: 7)
-            .help(entry.needsAttention ? "Waiting on you"
+            .help(entry.isAskingYou ? "Waiting on you"
                   : (entry.isWorking ? "Working" : "Idle"))
     }
 

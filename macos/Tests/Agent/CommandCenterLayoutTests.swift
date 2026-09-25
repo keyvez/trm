@@ -114,6 +114,14 @@ struct CommandCenterLayoutTests {
         #expect(CommandCenterView.status(for: entry(id: 4)).label == "idle")
     }
 
+    @Test func aReplyEndingOnAQuestionNeedsYou() {
+        var asking = entry(id: 5)
+        asking.closingQuestion = "Want me to deploy?"
+        #expect(CommandCenterView.status(for: asking).label == "needs you")
+        // The question has its own line on the row; no second one saying so.
+        #expect(CommandCenterView.escalation(for: asking) == nil)
+    }
+
     @Test func escalationOnlyAppearsWhenSomethingWantsADecision() {
         #expect(CommandCenterView.escalation(for: entry(id: 1)) == nil)
         #expect(CommandCenterView.escalation(for: entry(id: 2, working: true)) == nil)

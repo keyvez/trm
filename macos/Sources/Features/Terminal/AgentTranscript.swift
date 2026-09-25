@@ -46,6 +46,14 @@ struct AgentTranscript: Equatable {
     /// The last thing the human asked, for context at the top of the view.
     var lastUserPrompt: String? = nil
 
+    /// Claude Code's own recap of the session — the "※ recap" it writes when
+    /// you have been away (`system` / `away_summary` in the transcript): where
+    /// things stand and what comes next, in a sentence or two.
+    ///
+    /// Only while it is still true: a reply or a new prompt after it means
+    /// the session has moved past what it describes, and it is dropped.
+    var recap: String? = nil
+
     /// The prompt in renderable form: prose, fenced code (laid out like the
     /// reply's code blocks), and attached-image thumbnails. `lastUserPrompt`
     /// stays the plain-text form for copying and compact contexts.
@@ -763,6 +771,8 @@ enum AgentTranscriptReader {
         // Context tokens in the newest assistant entry that reported usage:
         // input + cache creation + cache read is what occupies the window.
         var latestContextTokens: Int? = nil
+        /// The newest recap, cleared by anything the session says after it.
+        var recap: String? = nil
 
         for line in lines {
             guard !line.isEmpty,
@@ -771,6 +781,14 @@ enum AgentTranscriptReader {
             else { continue }
 
             let type = obj["type"] as? String
+            // The recap has no `message`; it is read before the guard that
+            // skips everything else without one.
+            if type == "system", obj["subtype"] as? String == "away_summary" {
+                let text = (obj["content"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !text.isEmpty { recap = bounded(text, maxCharacters: 1200) }
+                continue
+            }
             guard let message = obj["message"] as? [String: Any] else { continue }
 
             switch type {
@@ -858,7 +876,10 @@ enum AgentTranscriptReader {
                         // A tool_result entry with embedded text is the
                         // harness replying to the agent, not a new human
                         // turn, so it must not close out the turn in flight.
-                        if !sawToolResult { finalizeCurrentTurn() }
+                        if !sawToolResult {
+                            finalizeCurrentTurn()
+                            recap = nil
+                        }
                         let collapsed = textPrompt.map { collapsedPrompt($0) }
                         var parts: [String] = []
                         if let collapsed { parts.append(collapsed) }
@@ -919,6 +940,7 @@ enum AgentTranscriptReader {
                     // away as it went.
                     current.blocks.append(contentsOf: blocks)
                     current.latestBlocks = blocks
+                    recap = nil
                 }
 
             default:
@@ -939,6 +961,7 @@ enum AgentTranscriptReader {
         result.isWorking = result.activity.contains { !$0.finished } ||
             result.questions.contains { !$0.finished }
         result.contextUsedPercent = latestContextTokens.map(contextPercent(usedTokens:))
+        result.recap = recap
         return result
     }
 
