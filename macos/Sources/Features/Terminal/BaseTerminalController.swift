@@ -1301,6 +1301,23 @@ class BaseTerminalController: NSWindowController,
         return Trm.shared.allocPaneId()
     }
 
+    /// Grid-slot pane ids already handed out in this process.
+    private static var claimedGridSlotPaneIds = Set<UInt32>()
+
+    /// The Zig grid's id for slot `gridIndex`, the first time anyone asks.
+    ///
+    /// The grid reserves ids 0…N−1 for its slots once per process, and every
+    /// restored window used to take them again: two windows' first panes both
+    /// id 0, sharing one watermark. Restoring or opening a second window then
+    /// wrote its names — or its default letters — over the first window's, and
+    /// closing a pane in one erased the name in the other. A slot's id now
+    /// goes to one pane; later windows get fresh ids.
+    private static func claimGridSlotPaneId(gridIndex: Int) -> Int? {
+        guard let id = Trm.shared.rawGridSlotPaneId(gridIndex: gridIndex),
+              claimedGridSlotPaneIds.insert(id).inserted else { return nil }
+        return Int(id)
+    }
+
     /// Assign a default letter watermark (A, B, C, …) based on the pane ID.
     /// Only sets if no watermark has been explicitly configured.
     static func setDefaultWatermark(forPaneId paneId: Int) {
@@ -7824,8 +7841,7 @@ class BaseTerminalController: NSWindowController,
         var terminalConfigsWithPaneId: [(paneId: Int, config: Trm.TrmPaneConfig)] = []
         for (i, paneConfig) in paneConfigs.enumerated() {
             if normalizedPaneType(paneConfig.paneType) == "terminal" {
-                let zigId = Trm.shared.rawGridSlotPaneId(gridIndex: i)
-                let paneId = zigId != nil ? Int(zigId!) : Trm.shared.allocPaneId()
+                let paneId = Self.claimGridSlotPaneId(gridIndex: i) ?? Trm.shared.allocPaneId()
                 terminalConfigsWithPaneId.append((paneId: paneId, config: paneConfig))
             }
         }
@@ -8260,9 +8276,24 @@ class BaseTerminalController: NSWindowController,
             let surface = surfaces[surfaceIndex]
             let id = surface.paneId ?? surfaceIndex
 
-            // Set watermark
-            if let watermark = paneConfig.watermark, !watermark.isEmpty {
-                Trm.shared.setWatermark(forPaneId: UInt32(id), text: watermark)
+            // Set watermark: the one saved with the window, else the one the
+            // session was last known by. A window restored from something
+            // that never carried names — the Session Browser's group, the
+            // orphan-session dialog, a crash that took the TOML — still gets
+            // them back from the session they belong to.
+            // A saved single letter is usually a default that was checkpointed
+            // (the window file records whatever the pane showed), so a real
+            // remembered name beats it; with nothing remembered it stands, in
+            // case someone did name a pane "S".
+            let saved = paneConfig.watermark.flatMap { $0.isEmpty ? nil : $0 }
+            let remembered = (surface.remoteZmxSession ?? surface.zmxSessionName)
+                .flatMap { ZmxSessionManager.rememberedWatermark(forSession: $0) }
+            let name: String? = {
+                if let saved, !ZmxSessionManager.isPlaceholderWatermark(saved) { return saved }
+                return remembered ?? saved
+            }()
+            if let name {
+                Trm.shared.setWatermark(forPaneId: UInt32(id), text: name)
             }
 
             // Store initial commands on the surface for round-tripping

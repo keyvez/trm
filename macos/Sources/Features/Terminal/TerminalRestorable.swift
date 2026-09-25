@@ -110,6 +110,18 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
             return
         }
 
+        // trm restores its own windows, from its own autosave. What AppKit
+        // saved is the split tree and each pane's folder — no zmx session, no
+        // remote machine, no name — so letting it restore after an unclean
+        // exit put up a window of plain shells. That window's existence then
+        // stopped trm's restore from running, and thirty seconds later the
+        // autosave checkpoint replaced the good snapshot with it: the panes
+        // came back from zmx only by hand, and their names not at all.
+        if MainActor.assumeIsolated({ SessionManager.peekAutoSave() != nil }) {
+            completionHandler(nil, nil)
+            return
+        }
+
         // Decode the state. If we can't decode the state, then we can't restore.
         guard let state = TerminalRestorableState(coder: state) else {
             completionHandler(nil, TerminalRestoreError.stateDecodeFailed)

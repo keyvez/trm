@@ -588,7 +588,22 @@ enum ZmxSessionManager {
     nonisolated static func rememberedWatermarks() -> [String: String] {
         watermarkLock.lock()
         defer { watermarkLock.unlock() }
-        return loadLocked()
+        return loadLocked().filter { !isPlaceholderWatermark($0.value) }
+    }
+
+    /// A single capital letter: the name trm gives a pane nobody has named
+    /// (`setDefaultWatermark`), not a name.
+    ///
+    /// The store used to record these like any other. Restoring set every
+    /// pane's letter before the saved names were applied, and each letter was
+    /// written here as it landed — so the store lost the real names at exactly
+    /// the moment it existed for, and the next restore read the letters back.
+    /// They are neither stored nor read now, which also retires the ones
+    /// already on disk.
+    nonisolated static func isPlaceholderWatermark(_ mark: String) -> Bool {
+        let trimmed = mark.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count == 1
+            && trimmed.unicodeScalars.allSatisfy { $0.value >= 65 && $0.value <= 90 }
     }
 
     nonisolated private static func loadLocked() -> [String: String] {
@@ -607,7 +622,7 @@ enum ZmxSessionManager {
     /// its name too. Keyed by session name because that is what survives.
     nonisolated static func rememberWatermark(_ watermark: String, forSession name: String) {
         let trimmed = watermark.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
+        guard !name.isEmpty, !isPlaceholderWatermark(trimmed) else { return }
         watermarkLock.lock()
         defer { watermarkLock.unlock() }
         var map = loadLocked()

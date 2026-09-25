@@ -288,6 +288,7 @@ enum SessionManager {
             return
         }
 
+        preservePreviousLaunchAutoSave()
         clearAutoSaves()
 
         let dir = sessionsDirectory
@@ -346,6 +347,34 @@ enum SessionManager {
             try toml.write(to: fileURL, atomically: true, encoding: .utf8)
         } catch {
             logger.error("Failed to auto-save single window: \(error.localizedDescription)")
+        }
+    }
+
+    /// Whether this launch has already set aside the snapshot it started with.
+    private static var didPreservePreviousLaunch = false
+
+    /// Once per launch, before the first checkpoint replaces it, copy the
+    /// autosave this launch started from into `previous-launch/`.
+    ///
+    /// Every checkpoint deletes the last one and writes the windows as they
+    /// are now, so a launch that comes up wrong — plain shells after a crash,
+    /// a window missing its names — destroyed the only record of how things
+    /// were within thirty seconds. This keeps that record until the next
+    /// launch: the layout, the sessions and the watermarks as trm last had
+    /// them before this run began.
+    private static func preservePreviousLaunchAutoSave() {
+        guard !didPreservePreviousLaunch else { return }
+        didPreservePreviousLaunch = true
+        let dir = sessionsDirectory
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: dir.path) else { return }
+        let snapshot = files.filter { $0.hasPrefix("_autosave_") && ($0.hasSuffix(".toml") || $0.hasSuffix(".json")) }
+        guard !snapshot.isEmpty else { return }
+        let backup = dir.appendingPathComponent("previous-launch", isDirectory: true)
+        try? fm.removeItem(at: backup)
+        try? fm.createDirectory(at: backup, withIntermediateDirectories: true)
+        for file in snapshot {
+            try? fm.copyItem(at: dir.appendingPathComponent(file), to: backup.appendingPathComponent(file))
         }
     }
 
