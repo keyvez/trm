@@ -160,4 +160,31 @@ struct PanePromptDetectorTests {
         #expect(PanePromptDetector.unframed("│   2. No") == "  2. No")
         #expect(PanePromptDetector.unframed("plain text") == "plain text")
     }
+
+    // MARK: A prompt taller than its pane
+
+    /// The grid cell shows only the bottom of the prompt: its question has
+    /// scrolled up out of the viewport.
+    private var cutOffViewport: String {
+        withDiff.components(separatedBy: "\n").suffix(3).joined(separator: "\n")
+    }
+
+    @Test func aMenuWhoseQuestionScrolledOffIsNotReadFromTheViewport() {
+        #expect(PanePromptDetector.detect(inViewport: cutOffViewport) == nil)
+        #expect(PanePromptDetector.showsMenuCursor(cutOffViewport))
+    }
+
+    @Test func itIsReadFromTheBottomOfTheWholeScreen() {
+        let screen = "earlier output\n" + withDiff + "\n\n\n"
+        let prompt = PanePromptDetector.detect(inScreenTail: screen)
+        #expect(prompt?.question == "Do you want to make this edit to Session.zig?")
+        #expect(prompt?.options.map(\.number) == [1, 2])
+        // Rows from the whole screen don't address the viewport's cells.
+        #expect(prompt?.previewRows == nil)
+        #expect(prompt?.previewText.isEmpty == false)
+    }
+
+    @Test func noCursorNoFallback() {
+        #expect(!PanePromptDetector.showsMenuCursor("1. first\n2. second"))
+    }
 }

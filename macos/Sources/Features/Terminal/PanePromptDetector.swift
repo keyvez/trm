@@ -82,6 +82,42 @@ enum PanePromptDetector {
         detect(inRows: text.components(separatedBy: "\n"))
     }
 
+    /// Whether the text shows a menu's cursor resting on a numbered choice —
+    /// `❯ 1. Yes` — whatever else is or isn't visible.
+    ///
+    /// The cheap test for a prompt taller than its pane. In a small grid cell
+    /// the agent's menu is drawn at the bottom and its question has scrolled
+    /// up out of the viewport, so the viewport alone reads as no prompt at
+    /// all — until the pane is peeked, made tall enough to hold it, and the
+    /// question appears on the board.
+    static func showsMenuCursor(_ text: String) -> Bool {
+        text.split(separator: "\n", omittingEmptySubsequences: true).contains { raw in
+            let line = unframed(String(raw)).trimmingCharacters(in: .whitespaces)
+            guard let first = line.first, cursors.contains(first) else { return false }
+            let rest = line.dropFirst().drop { $0 == " " }
+            return rest.first?.isNumber == true
+        }
+    }
+
+    /// Read a prompt from the bottom of a pane's whole screen, scrollback
+    /// included, for when the viewport shows only its lower half.
+    ///
+    /// Its rows count from the top of that text rather than the viewport, so
+    /// the preview is not drawn from cells — `previewRows` is dropped — but
+    /// the question, the choices and the preview's text all come through.
+    static func detect(inScreenTail text: String) -> PanePrompt? {
+        var lines = text.components(separatedBy: "\n")
+        while let last = lines.last, isBlank(last) { lines.removeLast() }
+        let tail = Array(lines.suffix(searchDepth + tailSlack))
+        guard let found = detect(inRows: tail) else { return nil }
+        return PanePrompt(
+            question: found.question,
+            options: found.options,
+            rows: found.rows,
+            previewRows: nil,
+            previewText: found.previewText)
+    }
+
     static func detect(inRows rows: [String]) -> PanePrompt? {
         guard !rows.isEmpty else { return nil }
 

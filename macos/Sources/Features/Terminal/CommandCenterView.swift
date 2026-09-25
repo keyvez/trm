@@ -60,6 +60,10 @@ struct CommandCenterView: View {
     /// What each pane's box is doing about an attachment right now: copying
     /// it, or why it couldn't.
     @State private var attachmentStatus: [ObjectIdentifier: String] = [:]
+    /// The option picked on each row's on-screen question, before it is
+    /// sent. Keyed by the question too, so a new prompt starts from the
+    /// agent's own cursor rather than a choice made for the last one.
+    @State private var promptChoices: [ObjectIdentifier: (question: String, number: Int)] = [:]
 
     /// Set briefly after a link is tapped, driving the "copied" pill — the
     /// same confirmation the Agent Overview uses.
@@ -745,18 +749,30 @@ struct CommandCenterView: View {
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // One button per choice, sending the digit the menu offers it
-            // under. Wrapped rather than in a row: these are whole sentences
-            // ("No, and tell Claude what to do differently"), not "OK".
+            // One button per choice. A click picks it and Submit sends it —
+            // the way the agent's own menu works, and a mis-click on a board
+            // must not approve an edit. ⌘-click sends it at once, for when
+            // the answer is obvious. Wrapped rather than in a row: these are
+            // whole sentences ("No, and tell Claude what to do
+            // differently"), not "OK".
+            let chosen = chosenOption(entry, prompt: prompt)
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(prompt.options) { option in
+                    let isChosen = option.number == chosen?.number
                     Button {
-                        monitor.answer(option, for: entry)
+                        // Read from the click itself: a Button's action runs
+                        // on mouse-up, and this is that event.
+                        let flags = NSApp.currentEvent?.modifierFlags ?? []
+                        if flags.contains(.command) {
+                            monitor.answer(option, for: entry)
+                        } else {
+                            promptChoices[entry.id] = (prompt.question, option.number)
+                        }
                     } label: {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
                             Text("\(option.number)")
                                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(option.isSelected ? Color.orange : .secondary)
+                                .foregroundStyle(isChosen ? Color.orange : .secondary)
                                 .frame(width: 12, alignment: .trailing)
                             Text(option.label)
                                 .font(.system(size: 12, design: .monospaced))
@@ -771,18 +787,41 @@ struct CommandCenterView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
                             RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(option.isSelected
+                                .fill(isChosen
                                       ? Color.orange.opacity(0.14)
                                       : Color.primary.opacity(0.05)))
                         .overlay(
                             RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .strokeBorder(option.isSelected
+                                .strokeBorder(isChosen
                                               ? Color.orange.opacity(0.5)
                                               : Color.clear))
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help("Answer the pane with \(option.number)")
+                    .help("Click to choose \(option.number) · ⌘-click to answer with it now")
                 }
+            }
+
+            HStack {
+                Spacer()
+                Button {
+                    if let chosen {
+                        monitor.answer(chosen, for: entry)
+                        promptChoices[entry.id] = nil
+                    }
+                } label: {
+                    Text(chosen.map { "Submit \($0.number)" } ?? "Submit")
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.orange.opacity(chosen == nil ? 0.15 : 0.85)))
+                        .foregroundStyle(chosen == nil ? Color.secondary : Color.white)
+                }
+                .buttonStyle(.plain)
+                .disabled(chosen == nil)
+                .help("Send the chosen answer to the pane")
             }
         }
         .padding(9)
@@ -793,6 +832,18 @@ struct CommandCenterView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .strokeBorder(Color.orange.opacity(0.28)))
+    }
+
+    /// The option a row's question will be answered with: the one picked
+    /// here for this question, else the one the agent's cursor is on.
+    private func chosenOption(
+        _ entry: CommandCenterMonitor.Entry, prompt: PanePrompt
+    ) -> PanePrompt.Option? {
+        if let choice = promptChoices[entry.id], choice.question == prompt.question,
+           let option = prompt.options.first(where: { $0.number == choice.number }) {
+            return option
+        }
+        return prompt.selected ?? prompt.options.first
     }
 
     /// Briefing tiles: up to five detail lines of three lines each, the

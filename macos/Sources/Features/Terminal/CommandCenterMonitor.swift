@@ -289,7 +289,12 @@ final class CommandCenterMonitor: ObservableObject {
         guard !entry.isWorking else { return nil }
         let viewport = surface.cachedVisibleContents.get()
         guard !viewport.isEmpty else { return nil }
-        return PanePromptDetector.detect(inViewport: viewport)
+        if let prompt = PanePromptDetector.detect(inViewport: viewport) { return prompt }
+        // A menu at the bottom with its question scrolled out of a small
+        // pane: read further up. Only then — the whole screen is the
+        // scrollback too, and most scans have no menu on screen at all.
+        guard PanePromptDetector.showsMenuCursor(viewport) else { return nil }
+        return PanePromptDetector.detect(inScreenTail: surface.cachedScreenContents.get())
     }
 
     /// The pane's screen, for drawing the region a prompt occupies.
