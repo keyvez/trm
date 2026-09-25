@@ -17,6 +17,8 @@ retroactively.
 
 ### Fixed
 
+- **Overviews stuck on a conversation days old while the agent had moved on.** Finding which transcript an agent is writing leaned on the SessionStart hook's record and, failing that, on "the first file born after the process started". A long-lived Claude process that had resumed a conversation older than itself defeated both: the hook's record was from another agent or another day, and the file it was really writing was born before the process started, so the rule passed over it and settled on a stub from the day it launched — one pane sat on September 13 while its agent worked on. Claude keeps `~/.claude/sessions/<pid>.json` naming the conversation each process is on, rewritten when it changes; that is now read first, for local and remote panes and for the Session Browser alike, and the rules that used to guess are only the fallback.
+
 - **A pane's on-screen question showed on the Command Center only while the pane was peeked.** The board reads the question off the pane's visible screen, and in a grid cell a permission prompt is taller than the pane: the menu sits at the bottom and the question above it has scrolled out of view, so there was nothing to read until peeking made the pane tall enough. When the screen shows a menu cursor on a numbered choice but no whole prompt, the board now reads the bottom of the pane's scrollback too. The question and choices come through; the drawn preview only when the prompt fits the pane.
 
 - **Clicking a choice on the board answered the pane at once.** A mis-click approved an edit. A click now picks the choice — starting from the one the agent's cursor is on — and **Submit** sends it, the way the agent's own menu works; ⌘-click still answers immediately.

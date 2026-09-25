@@ -45,6 +45,29 @@ enum AgentSessionLocator {
         return nil
     }
 
+    /// The conversation a running Claude process is on, in its own words.
+    ///
+    /// Claude keeps `~/.claude/sessions/<pid>.json` — its session id and
+    /// working directory — and rewrites it when the conversation changes:
+    /// resumed at launch, `/clear`, `/resume`. That is exact where everything
+    /// else here is inference, and it follows the one case inference cannot:
+    /// a process that resumed a conversation older than itself, whose file was
+    /// born before the process started and so never matched a birth-time rule.
+    static func claudeSessionTranscript(pid: pid_t) -> URL? {
+        guard pid > 0 else { return nil }
+        let file = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".claude/sessions/\(pid).json")
+        guard let data = try? Data(contentsOf: file),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sessionId = object["sessionId"] as? String, !sessionId.isEmpty,
+              !sessionId.contains("/"),
+              let cwd = object["cwd"] as? String, !cwd.isEmpty
+        else { return nil }
+        let url = AgentTranscriptReader.projectDir(forCwd: cwd)
+            .appendingPathComponent("\(sessionId).jsonl")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     static func locate(
         shellPid: pid_t,
         paneCwd: String?,
@@ -52,6 +75,10 @@ enum AgentSessionLocator {
     ) -> Located? {
         guard shellPid > 0 else { return nil }
         guard let agent = agentProcess(underShell: shellPid) else { return nil }
+
+        if agent.kind == .claude, let url = claudeSessionTranscript(pid: agent.pid) {
+            return Located(kind: .claude, url: url)
+        }
 
         // An exact answer, when the agent's SessionStart hook has recorded one:
         // the transcript path the agent itself reported. Everything below is a

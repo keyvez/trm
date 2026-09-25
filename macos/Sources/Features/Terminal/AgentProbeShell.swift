@@ -168,6 +168,24 @@ enum AgentProbeShell {
         "  SP=\"$1\"; [ -n \"$SP\" ] || return 0;",
         "  AG=\"$(agent_under \"$SP\")\"; [ -n \"$AG\" ] || return 0;",
         "  AP=\"${AG%% *}\"; AK=\"${AG##* }\";",
+        // Claude keeps `~/.claude/sessions/<pid>.json` naming the conversation
+        // each running process is on, rewritten when it changes — a resumed
+        // conversation, `/clear`, `/resume`. It is Claude's own answer, so it
+        // goes first. Everything below was inferred, and could not follow a
+        // process that resumed a conversation older than itself: the file it
+        // writes was born before it started, so the birth-time rule skipped it
+        // and bound the pane to a days-old stub.
+        "  if [ \"$AK\" = claude ] && [ -f \"$HOME/.claude/sessions/$AP.json\" ]; then",
+        "    SJ=\"$(tr -d '\\n' < \"$HOME/.claude/sessions/$AP.json\" 2>/dev/null)\";",
+        // The first occurrence of each key: the file also lists earlier
+        // sessions, each with its own `sessionId`, further down.
+        "    SID=\"$(printf %s \"$SJ\" | grep -o '\"sessionId\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"$/\\1/')\";",
+        "    SCWD=\"$(printf %s \"$SJ\" | grep -o '\"cwd\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"$/\\1/')\";",
+        "    if [ -n \"$SID\" ] && [ -n \"$SCWD\" ]; then",
+        "      SP2=\"$HOME/.claude/projects/$(printf %s \"$SCWD\" | tr './_' '---')/$SID.jsonl\";",
+        "      [ -f \"$SP2\" ] && { echo \"claude $SP2\"; return 0; };",
+        "    fi;",
+        "  fi;",
         // The hook's record when there is one: the agent's own word about
         // where it writes beats anything inferred from timestamps. Records
         // outlive processes, though, so require both a fresh record and a path

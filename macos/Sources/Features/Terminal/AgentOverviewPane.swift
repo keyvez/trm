@@ -771,7 +771,16 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
             // The agent reports its own transcript through the SessionStart
             // hook, and `/clear` fires that hook again. Reading the record is
             // one small file read per refresh, and it is authoritative.
-            if cachedPidAlive, let expectedKind = session?.kind,
+            // Claude's own record of the conversation this process is on,
+            // first: it follows `/clear`, `/resume` and a resumed launch
+            // exactly, where the hook below can go stale and the bridge
+            // lookup only knows about `/clear`.
+            if cachedPidAlive, session?.kind == .claude,
+               let current = AgentSessionLocator.claudeSessionTranscript(pid: cachedAgentPid) {
+                if current != session?.url {
+                    session = AgentSessionLocator.Located(kind: .claude, url: current)
+                }
+            } else if cachedPidAlive, let expectedKind = session?.kind,
                let sessionRecordKey,
                let started = AgentSessionLocator.processStartDate(pid: cachedAgentPid),
                let recorded = AgentSessionHook.recordedTranscript(

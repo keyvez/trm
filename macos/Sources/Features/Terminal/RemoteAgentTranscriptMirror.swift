@@ -376,7 +376,7 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     /// session's shell, find the agent process under it, and print
     /// `OK <kind> <transcript-path>`. Runs on the remote machine via
     /// `bash -s`, so the remote needs no particular trm version installed.
-    private static let locateScript = """
+    static let locateScript = """
     S="$1"
     # Same socket-dir fallback order as zmx itself: trm's pinned dir first,
     # then zmx's defaults — remote panes created before ZMX_DIR was pinned
@@ -423,6 +423,24 @@ final class RemoteAgentTranscriptMirror: @unchecked Sendable {
     }
 
     \(AgentProbeShell.claudeBridgeFunctions)
+
+    # Claude's own answer comes first: ~/.claude/sessions/<pid>.json names the
+    # conversation the process is on and is rewritten when it changes — a
+    # resumed conversation, /clear, /resume. The rules below are inference,
+    # and could not follow a process that resumed a conversation older than
+    # itself: its file was born before it started, so the pane was bound to a
+    # days-old stub and never moved.
+    if [ "$AGENT_KIND" = claude ] && [ -f "$HOME/.claude/sessions/$AGENT_PID.json" ]; then
+      SJ="$(tr -d '\\n' < "$HOME/.claude/sessions/$AGENT_PID.json" 2>/dev/null)"
+      # The first occurrence of each key: the file also lists earlier
+      # sessions, each with its own sessionId, further down.
+      SID="$(printf %s "$SJ" | grep -o '"sessionId"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\\([^"]*\\)"$/\\1/')"
+      SCWD="$(printf %s "$SJ" | grep -o '"cwd"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\\([^"]*\\)"$/\\1/')"
+      if [ -n "$SID" ] && [ -n "$SCWD" ]; then
+        SP2="$HOME/.claude/projects/$(printf %s "$SCWD" | tr './_' '---')/$SID.jsonl"
+        [ -f "$SP2" ] && { echo "OK claude $SP2"; exit 0; }
+      fi
+    fi
 
     # Exact answer: the SessionStart hook names the transcript, but its record
     # can outlive the process that wrote it. Accept it only when it is fresh
