@@ -237,6 +237,33 @@ final class AgentOverviewPane: ObservableObject, Identifiable {
     /// screen draws from it.
     var isPointerOver = false
 
+    /// The scroll view the reading is drawn in, so the keyboard can move it
+    /// while this overview holds the selection. Set by the view; weak because
+    /// the view owns it.
+    weak var readingScrollView: NSScrollView?
+
+    /// Scroll the reading by `points` (positive is further down), clamped to
+    /// the content.
+    func scrollReading(by points: CGFloat) {
+        guard let scrollView = readingScrollView,
+              let document = scrollView.documentView else { return }
+        let clip = scrollView.contentView
+        let room = max(0, document.frame.height - clip.bounds.height)
+        // SwiftUI's document view is flipped (y grows downward); handle the
+        // other case rather than scroll backwards if that ever changes.
+        let step = document.isFlipped ? points : -points
+        var origin = clip.bounds.origin
+        origin.y = min(max(0, origin.y + step), room)
+        clip.scroll(to: origin)
+        scrollView.reflectScrolledClipView(clip)
+    }
+
+    /// One page of the reading, less a line of overlap so the eye has
+    /// somewhere to land.
+    var readingPageHeight: CGFloat {
+        max(40, (readingScrollView?.contentView.bounds.height ?? 400) - 40)
+    }
+
     var canShowPreviousTurn: Bool { canGoOlderTurn }
     var canShowNextTurn: Bool { canGoNewerTurn }
     func showPreviousTurn() { goToOlderTurn() }

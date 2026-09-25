@@ -79,6 +79,15 @@ class BaseTerminalController: NSWindowController,
     func selectNonSurfacePane(_ id: ObjectIdentifier) {
         guard selectedNonSurfacePane != id else { return }
         selectedNonSurfacePane = id
+        // And the keyboard with it. Selection used to be only a ring: the
+        // terminal stayed first responder, so every key — the arrows meant for
+        // the overview you had just selected among them — still went to the
+        // shell beside it. A pane that takes first responder itself (a
+        // webview's page) already has it by the time this runs and is left
+        // alone; only a terminal is asked to let go.
+        if window?.firstResponder is Ghostty.SurfaceView {
+            window?.makeFirstResponder(nil)
+        }
         // Drop terminal keyboard focus so only one pane reads as selected.
         // Assigning nil goes through the observer above, which would clear the
         // selection we just set, so restore it afterwards.
@@ -5007,6 +5016,40 @@ class BaseTerminalController: NSWindowController,
         // The key is only swallowed when that overview can actually move —
         // at the newest turn, right goes back to the terminal untouched — so
         // the cost of pointing at an overview by accident is nothing.
+        // An overview that holds the selection holds the keyboard: nothing
+        // behind it is listening any more, so its arrows are its own whether
+        // or not there is a turn to move to. Left and right page turns; up
+        // and down, and Page Up / Page Down, move through the reading.
+        if window?.isKeyWindow == true,
+           !(window?.firstResponder is NSText),
+           !(window?.firstResponder is Ghostty.SurfaceView),
+           let selected = selectedNonSurfacePane,
+           let overview = agentOverviewPanes.first(where: { ObjectIdentifier($0) == selected }),
+           event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
+            switch event.keyCode {
+            case 123:
+                if overview.canShowPreviousTurn { overview.showPreviousTurn() }
+                return nil
+            case 124:
+                if overview.canShowNextTurn { overview.showNextTurn() }
+                return nil
+            case 126:
+                overview.scrollReading(by: -48)
+                return nil
+            case 125:
+                overview.scrollReading(by: 48)
+                return nil
+            case 116:
+                overview.scrollReading(by: -overview.readingPageHeight)
+                return nil
+            case 121:
+                overview.scrollReading(by: overview.readingPageHeight)
+                return nil
+            default:
+                break
+            }
+        }
+
         if window?.isKeyWindow == true,
            event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
            event.keyCode == 123 || event.keyCode == 124,

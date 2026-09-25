@@ -191,6 +191,10 @@ struct AgentOverviewView: View {
                     // bounded number of blocks, so sizing them eagerly is cheap and
                     // terminates.
                     VStack(alignment: .leading, spacing: 20) {
+                    // Hands the pane the scroll view it is drawn in, so the
+                    // arrow keys can move the reading while it is selected.
+                    EnclosingScrollViewReader { pane.readingScrollView = $0 }
+                        .frame(width: 0, height: 0)
                     // An empty selection renders nothing, which just looks
                     // broken — fall back to everything.
                     let sections = pane.sections.isEmpty ? .all : pane.sections
@@ -2633,5 +2637,32 @@ struct OverviewPlaybackControls: View {
     private static func clock(_ seconds: TimeInterval) -> String {
         let whole = Int(seconds.rounded())
         return String(format: "%d:%02d", whole / 60, whole % 60)
+    }
+}
+
+/// Reports the AppKit scroll view a SwiftUI view is drawn inside.
+///
+/// SwiftUI's `ScrollView` has no way to be scrolled by a key without owning
+/// the keyboard itself, and an overview never does — the controller decides
+/// what the arrows move. Handing it the underlying `NSScrollView` lets it.
+private struct EnclosingScrollViewReader: NSViewRepresentable {
+    let onFind: (NSScrollView?) -> Void
+
+    func makeNSView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.onFind = onFind
+        return view
+    }
+
+    func updateNSView(_ view: ProbeView, context: Context) {
+        view.onFind = onFind
+    }
+
+    final class ProbeView: NSView {
+        var onFind: ((NSScrollView?) -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onFind?(enclosingScrollView)
+        }
     }
 }
