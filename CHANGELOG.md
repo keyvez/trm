@@ -17,6 +17,8 @@ retroactively.
 
 ### Fixed
 
+- **Reconnecting put every parked pane back in the grid.** When the link to the other machine drops, parked remote panes drop with it, and reconnecting swaps each one for a fresh terminal. The shelf kept the old one's identity, so it listed nothing while the new one — parked in no one's book — was drawn in the grid; one Reconnect All brought five panes back at once and handed focus to the last of them. A parked pane now stays parked through a reconnect and does not take focus from the shelf. The shelf also forgets entries for panes that no longer exist: it is keyed by address, and a stale entry could claim the next pane allocated there — a new ⌘T pane among them.
+
 - **Parking the pane you were in sent focus to the top-left corner.** Focus now goes where moving right would have taken it — the pane beside it, stepping over its overview when that is parked along with it, or at the right edge the next pane in reading order. Parking some other pane from its bar still leaves your focus where it is.
 
 - **Peeking a parked pane put it back in the grid.** On a shelf tile ⌘-click peeks and a plain click restores, and the tile decided which by asking whether ⌘ was down *when the click finished*. On the pane's name that is a third of a second later — the click waits to see whether it is the start of a double-click, which renames — and ⌘ is usually up by then, so the peek arrived as a restore. Whether it happened depended on where the click landed and how fast your finger came off the key, which is why it looked random. ⌘ is now read from the click itself. ⌘-clicking a parked pane's row on the Command Center also restored it before peeking; it now peeks the pane where it is, as the shelf does.

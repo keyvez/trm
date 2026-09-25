@@ -2703,6 +2703,23 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
+    /// Forget shelf entries whose pane no longer exists.
+    ///
+    /// The shelf is keyed by `ObjectIdentifier`, which is an address. An entry
+    /// that outlives its pane is worse than a missing tile: the next object
+    /// allocated at that address — a pane you just opened — is taken for the
+    /// parked one. Entries went stale that way when a reconnect swapped a
+    /// parked pane's surface without telling the shelf.
+    private func pruneDeadSidebarEntries() {
+        guard !sidebarPanes.isEmpty else { return }
+        let live = Set(allPanesUnfiltered.map(\.id))
+        let dead = sidebarPanes.filter { !live.contains($0) }
+        guard !dead.isEmpty else { return }
+        TrmDiagnostics.log("[shelf] dropped \(dead.count) entr\(dead.count == 1 ? "y" : "ies") for panes that no longer exist")
+        sidebarPanes.removeAll { !live.contains($0) }
+        if sidebarPanes.isEmpty { sidebarIsShowing = false }
+    }
+
     /// Drop a pane from the sidebar when it is closing for real, so the shelf
     /// never lists a pane that no longer exists.
     func removeFromSidebar(_ paneID: ObjectIdentifier) {
@@ -4087,6 +4104,7 @@ class BaseTerminalController: NSWindowController,
         // moves between windows, where the surface is still alive.
 
         surfaceTree = newTree
+        pruneDeadSidebarEntries()
         if let newView {
             DispatchQueue.main.async { [weak newView, weak oldView] in
                 guard let newView else { return }
@@ -4309,6 +4327,7 @@ class BaseTerminalController: NSWindowController,
         guard !pending.isEmpty else { return }
         // Snapshot first: each reconnect swaps a node in the live tree.
         let views = Array(surfaceTree).filter { $0.remoteHost != nil }
+        TrmDiagnostics.log("[remote] reconnecting \(pending.count) pane(s), \(sidebarPanes.count) parked")
         for view in views {
             guard let paneId = view.paneId, pending.contains(paneId) else { continue }
             remotePanesAwaitingExitVerdict.remove(paneId)
@@ -5806,6 +5825,15 @@ class BaseTerminalController: NSWindowController,
         // reader looking at a bare scrim over the reconnected terminal they
         // asked to keep reading.
         if peekedPane == oldId { peekedPane = newId }
+        // A parked pane stays parked. The shelf is keyed by surface identity
+        // too, and left pointing at the old surface it listed nothing while
+        // the new one — in no one's parked list — was drawn in the grid: a
+        // reconnect after the link dropped put every parked pane back at
+        // once.
+        let isParked = sidebarPanes.contains(oldId)
+        if let idx = sidebarPanes.firstIndex(of: oldId) {
+            sidebarPanes[idx] = newId
+        }
         if let children = paneStacks.removeValue(forKey: oldId) {
             paneStacks[newId] = children
         }
@@ -5815,9 +5843,11 @@ class BaseTerminalController: NSWindowController,
             }
         }
 
+        // Nor does it take focus from the shelf, unless it is the pane being
+        // read in the peek.
         replaceSurfaceTree(
             newTree,
-            moveFocusTo: newView,
+            moveFocusTo: isParked && peekedPane != newId ? nil : newView,
             moveFocusFrom: surfaceView,
             undoAction: undoAction
         )
